@@ -1,0 +1,24 @@
+# Normalize line endings to LF in the repository.
+#
+# This matters more than it looks on a Windows host: the vendored harness files are
+# drift-checked by BYTE COMPARISON (`sync-devkit.py --check`). Without this, git
+# checks them out with CRLF here and LF in CI, and the gate reports permanent drift
+# on files nobody touched.
+* text=auto eol=lf
+
+# Binaries git must never translate.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.parquet binary
+
+# Generated locks: keep them out of diffs and out of language stats.
+*.lock linguist-generated=true
+package-lock.json linguist-generated=true -diff
+uv.lock linguist-generated=true -diff

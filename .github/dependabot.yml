@@ -1,0 +1,58 @@
+# Dependency updates, one ecosystem per manifest this project actually has.
+#
+# Grouping is not cosmetic. Ungrouped, a weekly run opens one PR per package and
+# every one of them costs a full PR Gate run. Minor/patch land as a single PR;
+# majors stay individual so `dependabot-automerge.yml` can judge each on its own.
+#
+# Neither is `assignees`, which every entry carries. A Dependabot PR matches none of
+# the tabs on github.com/pulls -- the bot is the author, it mentions nobody, and it
+# requests no review -- so without an assignee these PRs are reachable only by opening
+# this repository. Assignment is the one qualifier a config file can set that puts them
+# in a view someone already reads.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    assignees:
+      - alexandrec90
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The actions the workflows pin. Majors land as individual PRs and the auto-merge
+  # classifier holds them for review.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    assignees:
+      - alexandrec90
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The base image in the Dockerfile. Compose service images (postgres, redis, …)
+  # are pinned to the majors production runs and are bumped deliberately, not by
+  # bot, so they are not listed here.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    assignees:
+      - alexandrec90
+    ignore:
+      # A Python base-image bump reads as semver-MINOR (3.12 -> 3.14), so it would
+      # sail straight through the auto-merge classifier — while uv.lock is resolved
+      # for 3.12 and the PR Gate runs 3.12, neither
+      # of which the image bump touches, and no gate job builds the image at all.
+      # The runtime moves together with the lock and the workflows, deliberately.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"

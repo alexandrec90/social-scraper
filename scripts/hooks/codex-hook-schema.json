@@ -1,0 +1,98 @@
+{
+  "source": "extracted from the installed Codex binary by scripts/extract-codex-schema.py",
+  "codex_version": "codex-cli 0.149.1",
+  "events": {
+    "PermissionRequest": [
+      "continue",
+      "hookSpecificOutput",
+      "hookSpecificOutput.decision",
+      "hookSpecificOutput.hookEventName",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "PostCompact": [
+      "continue",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "PostToolUse": [
+      "continue",
+      "decision",
+      "hookSpecificOutput",
+      "hookSpecificOutput.additionalContext",
+      "hookSpecificOutput.hookEventName",
+      "hookSpecificOutput.updatedMCPToolOutput",
+      "reason",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "PreCompact": [
+      "continue",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "PreToolUse": [
+      "continue",
+      "decision",
+      "hookSpecificOutput",
+      "hookSpecificOutput.additionalContext",
+      "hookSpecificOutput.hookEventName",
+      "hookSpecificOutput.permissionDecision",
+      "hookSpecificOutput.permissionDecisionReason",
+      "hookSpecificOutput.updatedInput",
+      "reason",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "SessionStart": [
+      "continue",
+      "hookSpecificOutput",
+      "hookSpecificOutput.additionalContext",
+      "hookSpecificOutput.hookEventName",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "Stop": [
+      "continue",
+      "decision",
+      "reason",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "SubagentStart": [
+      "continue",
+      "hookSpecificOutput",
+      "hookSpecificOutput.additionalContext",
+      "hookSpecificOutput.hookEventName",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "SubagentStop": [
+      "continue",
+      "decision",
+      "reason",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ],
+    "UserPromptSubmit": [
+      "continue",
+      "decision",
+      "hookSpecificOutput",
+      "hookSpecificOutput.additionalContext",
+      "hookSpecificOutput.hookEventName",
+      "reason",
+      "stopReason",
+      "suppressOutput",
+      "systemMessage"
+    ]
+  }
+}

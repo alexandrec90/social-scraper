@@ -1,0 +1,49 @@
+[project]
+name = "social-scraper"
+version = "0.1.0"
+description = "Browser-driven social ingestion (Reddit, X) into data-lake"
+requires-python = ">=3.12"
+dependencies = [
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "pyarrow>=17.0",
+  "duckdb>=1.1",
+  "boto3>=1.35",
+  "pydantic-settings>=2.4",
+]
+
+[project.optional-dependencies]
+# Host-only toolchain. Deliberately NOT installed into the container image — it is
+# several hundred MB of tooling the runtime never imports.
+dev = [
+  "ruff>=0.15",
+  "mypy>=1.11",
+  "pytest>=8.3",
+  "pytest-cov>=5.0",
+  # Runs `.pre-commit-config.yaml` — the commit-time gate. Installed here (not globally)
+  # so the version is pinned with everything else, and so `session-start.sh` can wire the
+  # git hook right after `uv sync` without a separate bootstrap step.
+  "pre-commit>=4.6",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+# `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
+# those are the vendored harness's own stdlib-only tests and run separately.
+testpaths = ["tests/"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+# The vendored agent harness is byte-identical upstream code (devkit owns its typing,
+# and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
+# only produces errors this repo is not allowed to fix.
+exclude = '^scripts/(hooks/|sync-harness\.py)'

@@ -1,0 +1,163 @@
+name: PR Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Re-runnable by hand. Cheap to have, and the only way to re-gate a commit whose
+  # run was cancelled by the concurrency rule below.
+  workflow_dispatch:
+
+# Least privilege. Every job here only reads the repo; a job that needs more must opt
+# in with its own `permissions:` block rather than inherit a permissive repo default.
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the in-flight run for that ref. Keyed on the ref, not
+# the workflow alone, so a PR run (refs/pull/N/merge) and a main run
+# (refs/heads/main) never cancel each other.
+#
+# `cancel-in-progress` is deliberately conditional: cancelling a superseded PR run
+# saves minutes on a commit nobody will merge, but cancelling a push run would throw
+# away the only CI signal that commit will ever get — and the Dependabot merge job
+# gates on `workflow_run.conclusion == 'success'`, which a cancelled run never
+# reports, so every bot PR would sit unmerged behind a run that was cancelled rather
+# than failed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pre-commit:
+    name: Pre-commit gate
+    runs-on: ubuntu-latest
+    # The same hooks `.pre-commit-config.yaml` runs locally, so a contributor who has not
+    # run `pre-commit install` cannot land what the gate would have caught. Its own job
+    # because it clones pinned hook repos and builds their isolated environments — a
+    # different failure mode and cache from the lint job.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Run every hook over the whole repo
+        # `--all-files` rather than the staged diff: on a push there is no staged diff.
+        # NB this includes devkit's `devkit-drift` hook, which byte-compares the vendored
+        # harness against the devkit rev pinned in `.pre-commit-config.yaml` — a second,
+        # independent check on top of the `devkit-drift` job below, which uses
+        # `sync-devkit.py` against the tag pinned in this file. They can disagree, and
+        # when they do the two pins have drifted apart, which is worth knowing.
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Install actionlint and dotenv-linter
+        # Fail loudly, no `|| true`: `lint-all.py` degrades a missing linter to a
+        # terminal note by design, so a silently skipped install here would leave the
+        # workflow files and `.env.example` unchecked while the job still reported
+        # green for them. The same installers `.claude/hooks/session-start.sh` uses,
+        # so the gate and a local session check the same way. NB actionlint's
+        # installer takes positional args ([[VERSION] DIR]) and no -b flag;
+        # dotenv-linter's takes -b.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+            | bash -s -- latest /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/dotenv-linter/dotenv-linter/master/install.sh \
+            | sh -s -- -b /usr/local/bin
+      - name: Lint
+        run: uv run python scripts/lint-all.py
+      - name: Upload lint artifact
+        # The filtered artifact, not the raw job log: a raw log buries the real
+        # error under container-boot noise and wastes an agent's context.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lint-errors
+          path: logs/lint-errors.log
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:18
+        env:
+          POSTGRES_USER: social_scraper
+          POSTGRES_PASSWORD: social_scraper_local_dev # pragma: allowlist secret
+          POSTGRES_DB: social_scraper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # CI always talks to the service container on its conventional port — the
+      # slot offsets in ports.toml exist to deconflict LOCAL stacks, and have no
+      # meaning on a runner where this job is the only thing running.
+      # The `pragma` below must stay on the same line as the value — detect-secrets matches
+      # its allowlist comment per-line, so a comment above the finding does nothing. These
+      # are the credentials of a service container that lives for one job.
+      DATABASE_URL: postgresql+psycopg://social_scraper:social_scraper_local_dev@127.0.0.1:5432/social_scraper # pragma: allowlist secret
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Application suite
+        run: uv run python scripts/run-tests.py
+      - name: Harness hook tests
+        # Separate from the application suite: pytest's testpaths excludes these,
+        # and they are stdlib-only by contract.
+        run: uv run python -m pytest scripts/hooks/tests/ -q
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-failures
+          path: logs/test-failures.log
+
+  devkit-drift:
+    name: Vendored harness drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # devkit must be checked out AFTER any `git status --porcelain` step in the
+      # same job: it lands an untracked directory in the workspace that a
+      # working-tree cleanliness check would otherwise report as dirty.
+      - name: Check out devkit
+        uses: actions/checkout@v7
+        with:
+          repository: alexandrec90/devkit
+          # Pin a tag, never @main — one bad devkit commit must not redden every
+          # consuming repo at once.
+          ref: v0.11.9
+          path: .devkit-src
+      # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs the
+      # project, and this job has nothing to sync for. `sync-devkit.py` is stdlib-only
+      # by contract precisely so the drift check can run before any environment exists,
+      # and installing one here would hide a third-party import creeping into it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Drift check
+        # DEVKIT_DIR must be set: it is what the checkout step above exists to provide.
+        # Unset, this exits 0 with "nothing to do (skipping)" before the project has
+        # pulled — correct, nothing is vendored yet — and fails loudly once DEVKIT_VERSION
+        # exists. If the skip line ever appears in this job's log, fix the wiring.
+        env:
+          DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
+        run: python scripts/sync-devkit.py --check

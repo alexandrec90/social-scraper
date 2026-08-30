@@ -1,0 +1,81 @@
+name: Nightly
+
+# The scheduled full run against main.
+#
+# The PR gate fires on a change, so it is structurally blind to every failure that
+# arrives without one — and those are the failures that hurt most, because they land
+# on a branch nobody is looking at:
+#
+#   * a dependency published inside this project's version bounds,
+#   * a runner image bump, or a service container image moving under its tag,
+#   * a credential that expired,
+#   * a test that is flaky rather than broken, which a single gate run per PR is the
+#     worst possible instrument for detecting.
+#
+# devkit's `scripts/hooks/tests/test_ci_workflow_contract.py` requires this file, so
+# it cannot be quietly dropped — but its *contents* are yours. Add the tiers your gate
+# has and this does not yet: a cross-browser E2E matrix, a migration round-trip, a
+# longer-running integration suite you would not pay for on every PR. A nightly is the
+# right home for anything too slow to gate on.
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  # Load-bearing, not a convenience: a scheduled job that cannot be started by hand
+  # can only be debugged one attempt per day.
+  workflow_dispatch:
+
+# Least privilege, same as the gate. A job needing more opts in with its own block.
+permissions:
+  contents: read
+
+# Serialize without cancelling. A manual dispatch during the scheduled window, or a
+# slow run overrunning into the next night, must not kill the run in flight — it is
+# the only unattended signal main gets, and a cancelled run reports no
+# conclusion at all rather than a failure.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  full-suite:
+    name: Full suite
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:18
+        env:
+          POSTGRES_USER: social_scraper
+          POSTGRES_PASSWORD: social_scraper_local_dev # pragma: allowlist secret
+          POSTGRES_DB: social_scraper
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # The `pragma` must stay on the same line as the value — detect-secrets matches
+      # its allowlist comment per-line. These are the credentials of a service
+      # container that lives for one job.
+      DATABASE_URL: postgresql+psycopg://social_scraper:social_scraper_local_dev@127.0.0.1:5432/social_scraper # pragma: allowlist secret
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Application suite
+        run: uv run python scripts/run-tests.py
+      - name: Harness hook tests
+        # Separate from the application suite: pytest's testpaths excludes these, and
+        # they are stdlib-only by contract.
+        run: uv run python -m pytest scripts/hooks/tests/ -q
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-failures
+          path: logs/test-failures.log

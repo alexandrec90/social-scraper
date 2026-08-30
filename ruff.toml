@@ -1,0 +1,55 @@
+target-version = "py312"
+line-length = 100
+# `.agents/skills/` is generated from `.claude/skills/`; lint the source once.
+extend-exclude = [".agents"]
+force-exclude = true
+
+[lint]
+# Correctness and security only. `.claude/rules/engineering.md` is the policy: lint
+# catches the problems a reviewer reads past, and "anything a formatter can decide" is
+# off.
+#
+# Dropped families -- none of them can report a defect. Each enforces a preferred
+# spelling of code that already behaves identically:
+#
+#   I    import ordering            UP   preferred modern syntax
+#   SIM  readability rewrites       N    naming conventions
+#   T20  stray print() calls
+#
+# They were also nearly free to violate already: `ruff check --fix` rewrites all of
+# them silently in the lint-fix PostToolUse hook, in pre-commit, and in lint-all.py.
+# What enforcing them bought was churn in every diff, not a bug caught.
+select = ["E", "F", "B", "ASYNC", "S", "RUF"]
+
+# `E` is a *family prefix* carrying 19 rules, and only some are about correctness.
+# That is exactly how E501 (line-too-long) came to be enforced: nobody selected it,
+# they selected `"E"`, and it rode in with the family -- then got suppressed one
+# directory at a time for years rather than questioned. Listed here are its cosmetic
+# members: line length, statement layout, semicolons, ambiguous single-char names.
+#
+# E501 is also the one that actually blocked a commit, because it is the one with **no
+# autofix** -- it fires precisely where the formatter cannot split a line (long string
+# literals, URLs), so there was never an action to take.
+#
+# `line-length` above is untouched and still drives `ruff format`: code is still
+# wrapped, silently, on every edit.
+#
+# Still on: E402, E711/E712/E713/E714 (comparison bugs), E721, E722 (bare except),
+# E902, E999. Those catch real defects.
+ignore = ["E101", "E401", "E501", "E701", "E702", "E703", "E731", "E741", "E742", "E743"]
+
+[lint.per-file-ignores]
+# CLI / diagnostic tooling: these scripts orchestrate trusted
+# first-party tools (git, ruff, docker) via subprocess, so the bandit
+# subprocess/partial-path/urlopen warnings (S603/S607/S310) are expected.
+"scripts/**/*.py" = ["S603", "S607", "S310"]
+# Skill payload scripts (`.claude/skills/*/`) are CLI tools a skill shells out to --
+# same subprocess allowances as `scripts/**`. These arrive vendored
+# from devkit, so this line must stay in step with devkit's own ruff.toml.
+".claude/skills/**/*.py" = ["S603", "S607", "S310"]
+# Tests: asserts (S101) and hardcoded test passwords (S105).
+"tests/**/*.py" = ["S101", "S105"]
+"scripts/hooks/tests/**/*.py" = ["S101", "S105"]
+
+[format]
+quote-style = "double"

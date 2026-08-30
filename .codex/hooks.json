@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event SessionStart -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/codex-session-start.py\"",
+            "commandWindows": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event SessionStart -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/codex-session-start.py\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|apply_patch|create_file)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event PostToolUse -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/lint-fix.py\"",
+            "commandWindows": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event PostToolUse -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/lint-fix.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event Stop -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/stop.py\"",
+            "commandWindows": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event Stop -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/stop.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

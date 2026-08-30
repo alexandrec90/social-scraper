@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.eggs/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.hypothesis/
+.testmondata
+.coverage
+.coverage.*
+htmlcov/
+.benchmarks/
+
+# Secrets and local environment. `.env.example` IS committed; `.env` never is —
+# it carries this checkout's ports and credentials.
+.env
+.env.local
+*.pem
+*.key
+
+# Runtime output. `logs/` holds the diagnostic artifacts the fixer skills read;
+# they are regenerated on every run and must never be committed.
+logs/
+artifacts/
+reports/
+
+# Local data-lake staging. The lake itself lives in object storage; this is only
+# the scratch area a local ingest or restore writes through.
+data/
+*.parquet
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# VS Code: tasks/settings/extensions are committed (they are project contract).
+# Only the per-user bits are ignored.
+.vscode/*.log
+.vscode/.ropeproject/

@@ -1,0 +1,90 @@
+# Local commit-time gate. Install once per clone with `pre-commit install`;
+# `.claude/hooks/session-start.sh` does it automatically, so agent sessions get it too.
+#
+# This is the fast, deterministic subset of the PR gate — the checks worth paying for on
+# every commit. Anything slow or infra-dependent (mypy, the test suites, the DB tier)
+# stays in `scripts/lint-all.py`, the Stop hook, and CI.
+#
+# Every `rev` is pinned and moved deliberately by `pre-commit autoupdate`. That includes
+# devkit's own hooks: a floating branch there would let one upstream commit change the
+# gate in every repo at once, which is the same reason the PR gate pins a tag.
+repos:
+  # --- devkit's published hooks ------------------------------------------------
+  # The alternative to `sync-devkit.py --check`, which resolves its source from
+  # $DEVKIT_DIR and can only refuse when that is unset — no clone, no comparison.
+  # pre-commit has already fetched devkit at the rev below, so the version is written down
+  # here instead of depending on a variable in whoever's shell, and a second machine that
+  # has never cloned devkit is still gated.
+  # Pinned to a commit rather than a tag: devkit's newest tag (v0.11.9) is 6 merged PRs
+  # behind `origin/main`, and `new-project.py` vendors from devkit's *working tree* while
+  # pinning the newest tag — so a project generated today is drift-red from its first
+  # commit. A SHA still satisfies the property the tag rule exists for (an immutable ref,
+  # so one bad devkit commit cannot redden every consumer at once). Replace this with the
+  # tag on the next `sync-devkit.py --pull` after devkit cuts a release.
+  - repo: https://github.com/alexandrec90/devkit
+    rev: 53820d0ca76121bd559b70b23d371750e85588f9  # pragma: allowlist secret - git SHA, not a credential
+    hooks:
+      # Fails on a manifest the harness would otherwise ignore: unparseable TOML (the
+      # loader falls back to neutral defaults rather than erroring), a path prefix missing
+      # its trailing slash, a directory that does not exist here, or a [db]/[frontend]
+      # block switched on and left half-filled.
+      - id: devkit-manifest
+      # The vendored hook scripts run before the virtualenv exists, so a third-party
+      # import there fails at hook time rather than at test time.
+      - id: devkit-hooks-stdlib-only
+      # Byte-compares scripts/hooks/ and friends against the devkit rev pinned above.
+      - id: devkit-drift
+
+  # --- formatting and lint ----------------------------------------------------
+  # The same fixers the `lint-fix.py` PostToolUse hook applies after every agent edit, so
+  # a human commit and an agent commit converge instead of reformatting each other.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # --- hygiene ----------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Not cosmetic for a repo with a vendored harness: a trailing space in a vendored
+      # file becomes drift the first time an editor strips it, and `sync-devkit.py
+      # --check` then fails a build over a byte nobody meant to change.
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf] # matches .gitattributes' `eol=lf`
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+        # .claude/settings.json is strict JSON; .vscode/tasks.json is JSONC and would fail.
+        files: ^\.claude/settings\.json$
+      - id: check-added-large-files
+
+  # --- secrets ----------------------------------------------------------------
+  # This is the hook `scripts/hooks/stop.py` defers to when it passes `--no-secrets`:
+  # secrets scanning belongs at commit time, not on every agent turn, where it would churn
+  # the baseline and cost seconds per stop.
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        # NB if you ever pin a devkit *commit* above instead of a tag, add
+        # `# pragma: allowlist secret` to that line — a 40-char hex SHA trips the
+        # high-entropy detector. `pre-commit autoupdate` writes tags, so this is only a
+        # concern if you pin by hand.
+        #
+        # No `--baseline`: findings are allowlisted inline with
+        # `# pragma: allowlist secret`, which is what this project's committed local-dev
+        # compose credentials already use. Add a baseline file only once the pragma count
+        # gets annoying — it is one more artifact to keep in sync, and a stale one hides
+        # real findings.
+        exclude: |
+          (?x)^(
+            uv\.lock|            # generated hashes, indistinguishable from secrets
+            \.env\.example|      # placeholder values, by definition not real
+            DEVKIT_FILES\.json   # vendoring receipt: path -> SHA-256, all of it hex
+          )$

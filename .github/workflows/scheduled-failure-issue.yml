@@ -1,0 +1,134 @@
+name: Scheduled failure issue
+
+# Files an issue when the nightly fails, and closes it when the nightly goes green.
+#
+# The nightly is the only unattended signal the default branch gets, and a workflow run
+# is the least visible artifact GitHub has: it lives in one repo's Actions tab, and
+# GitHub's cross-repository dashboards (`github.com/issues`, `github.com/pulls`)
+# aggregate issues and pull requests and nothing else. So across a workspace of several
+# repos, a red nightly and a nightly that stopped running look identical -- both are
+# silence in a tab nobody opens. Converting the failure into an assigned issue is what
+# puts it somewhere that is already checked.
+#
+# Two halves, and the second is the one that matters most:
+#
+#   1. A failing run opens one issue per workflow, deduplicated by title, and comments
+#      on it on each subsequent failure rather than opening another.
+#   2. A passing run closes it. Without that, the dashboard fills with failures that
+#      were fixed days ago, and an aggregate view that has to be re-verified item by
+#      item is worse than no view at all.
+#
+# And two jobs, because `workflow_run` alone cannot cover the repository:
+#
+#   `report` reacts to a `Nightly` completion. Immediate, and it is what closes an issue
+#   the minute a fix goes green -- but `on.workflow_run` selects what it watches by
+#   TITLE, and a title list is the per-project value this vendored file may not carry.
+#   So it watches `Nightly` and nothing else. A project that grows a second scheduled
+#   workflow gets no coverage for it, silently: one repo in the workspace this came from
+#   had a `Weekly Hardening` that had failed three Sundays running with nothing filed.
+#
+#   `sweep` runs on this file's own cron and enumerates instead: every workflow in
+#   `.github/workflows/` that declares a `schedule:`, reconciled against its latest run
+#   on the default branch. A new scheduled workflow is covered the first time the sweep
+#   runs, with no list to update anywhere. It also catches the failure `report` cannot
+#   see at all -- a workflow GitHub DISABLED after 60 days of repository inactivity,
+#   which emits no completion event, so the reporter goes quiet exactly when there is
+#   something to report.
+#
+# Both jobs write the same trackers, so running both is idempotent rather than duplicative.
+# The sweep cannot judge itself -- its own latest run is the one currently executing, and
+# an unfinished run reaches no verdict -- which is inherent: nothing inside a repository
+# can report that its own reporter is broken.
+#
+# THIS FILE IS VENDORED from devkit (`sync-devkit.py`'s MANIFEST) and is byte-identical
+# in every project, for the same reason `dependabot-automerge.yml` is: nothing in it is
+# project-specific. `report` waits on the title `Nightly`, which every project's nightly
+# carries; `sweep` names no workflow at all, and both read the assignee from
+# `github.repository_owner` at run time rather than writing it down here.
+#
+# NB: `workflow_run` and `schedule` BOTH only ever run the copy of this file on the
+# default branch, so a change here is inert until it lands there -- including while its
+# own PR is open. Use `workflow_dispatch` to exercise the sweep once it has.
+
+on:
+  workflow_run:
+    workflows: ["Nightly"]
+    types: [completed]
+  schedule:
+    # After the nightlies (02:00 in the rendered template) have finished and had their
+    # verdict recorded, so the sweep reads today's result rather than yesterday's.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+# `issues: write` is the whole point of the file. `contents: read` is for the checkout
+# that fetches the script, and `actions: read` is for the sweep, which asks the workflows
+# API which workflows exist and whether GitHub has disabled any of them.
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+# Serialize per watched workflow so two completions cannot race into two duplicate
+# issues. A pending run may be superseded by a newer one for the same workflow, which is
+# the right trade here: both would be reporting on the same workflow, and the newer
+# conclusion is the truer one.
+concurrency:
+  group: scheduled-failure-issue-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Open or close the tracking issue
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reconcile the tracking issue with this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The job checks the repo out, so `gh` could infer this from the remote --
+          # but stating it costs nothing and keeps the script's only assumption about
+          # its environment in one place.
+          GH_REPO: ${{ github.repository }}
+          # Everything below is the run being reported on. The script names no project
+          # and reads no repository file; this block is its entire input.
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # `schedule` or `workflow_dispatch`. Recorded in the issue rather than
+          # filtered on: a nightly someone dispatched by hand and that failed is still a
+          # failure, and a manual green run should still close the issue -- which is
+          # exactly how a fix gets verified without waiting for 02:00.
+          TRIGGER: ${{ github.event.workflow_run.event }}
+          # Assignment is what puts the issue in a dashboard: every tab on
+          # `github.com/issues` is keyed to the viewer, and an issue authored by
+          # `github-actions[bot]` is in nobody's "created" list. On an
+          # organisation-owned repo this is the org and cannot be assigned -- the script
+          # reports that and keeps the issue rather than failing the run.
+          OWNER: ${{ github.repository_owner }}
+        # The runner's own Python, deliberately: no `setup-python-env`, no install step.
+        # The script is stdlib-only, and how a project installs its dependencies is the
+        # one thing that varies everywhere -- a reporter that had to be provisioned
+        # first would be a reporter that fails whenever the thing it reports on does.
+        run: python scripts/report-workflow-failure.py
+
+  sweep:
+    name: Reconcile every scheduled workflow
+    if: github.event_name != 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reconcile each scheduled workflow with its latest run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          MODE: sweep
+          # The sweep judges each workflow on its latest run *here*. A scheduled run only
+          # ever happens on the default branch, so anywhere else is a branch someone is
+          # working on and its red run is already in front of them.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          OWNER: ${{ github.repository_owner }}
+        run: python scripts/report-workflow-failure.py
