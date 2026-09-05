@@ -14,6 +14,14 @@ prose that should be paid for only when someone goes looking for it. Same argume
 This file is vendored (it is in `sync-devkit.py`'s `MANIFEST`), because the pointers
 that reach it are vendored too. A local edit here is drift.
 
+## Which side of the split each rule family falls on
+
+The policy is correctness and security on, anything a formatter can decide off. In
+practice that means **on** for undefined names, unreachable code, shadowed builtins and
+mutable default arguments; for injection sinks, unsafe deserialisation and hard-coded
+secrets; and for unclosed files and bare `except`. **Off** for line length, quote style
+and import order, which `ruff format` settles before a review ever sees them.
+
 ## Rule families are how cosmetic rules get in
 
 **Adding a family prefix to `select` enables every member, including the cosmetic
@@ -119,9 +127,81 @@ silence would report a comparison that never ran, so it **fails** instead.
 what makes the distinction reliable: a second workstation, a fresh clone or a CI job
 missing its `env:` block is where the gate would otherwise go quiet.
 
+On a machine with no devkit clone at all, the drift check that still works is
+`pre-commit run devkit-drift --all-files` — the same comparison, made against the rev
+pinned in `.pre-commit-config.yaml` rather than against a checkout.
+
+## Reporting a *harness* defect: name the copy's age
+
+The hook scripts are a **vendored copy**, and every consuming project is routinely weeks
+of fixes behind devkit — so a block or a crash you hit there may already be fixed
+upstream, and a report of one costs a human a relay and a false-positive triage. Spend
+one command before reporting one, and put its answer in the report:
+
+```bash
+python scripts/sync-devkit.py --check     # clean = this copy matches upstream
+```
+
+A report that names `DEVKIT_VERSION` and what `--check` said can be triaged; one that
+does not cannot. Blocks from the capped-Bash gate carry this footer themselves, so the
+version is usually already in front of you. An old copy is still worth reporting once
+you know that is what it is — this is **not** a reason to route around the hook.
+
 ## Why a vendored file may depend on one the project owns
 
 `lint-all.py` and `run-tests.py` are the project's, not devkit's, and the vendored hooks
 call them. Those dependencies are asserted by
 `scripts/hooks/tests/test_repo_contract.py`, because at runtime a missing one is a
 silent skip by design — the gate reports green having run nothing.
+
+## Switching the harness off: `DEVKIT_HOOKS_OFF`
+
+The harness is a cost as well as a guarantee, and the cost is not always worth paying:
+the Stop gate reproduces the PR gate locally and blocks the session on what it finds, so
+a red tree turns every stop into another round of fixing. Before this switch the only way
+to stop paying was to delete hook entries out of each project's `.claude/settings.json` —
+N files to strip and N to reconstruct from memory — so nobody did, and the harness was
+effectively unconditional. It is read from the **environment** for exactly that reason:
+one line reaches every project, and deleting the line restores them.
+
+Put it in the `env` block of whichever `settings.json` should carry it — `~/.claude` for
+every project on the machine, the project's own for one repo.
+
+| Value | Effect |
+| --- | --- |
+| unset, or `0`/`false`/`no`/`off` | every hook runs — the default, and the only thing a value that reads as "off" to a human may mean |
+| `1`, `all`, `*` | every switchable hook stands down |
+| `stop`, `lint-fix`, `capped-bash`, `session-start`, `failure-retro` | that hook only; comma- or semicolon-separated for several |
+
+Selective is the state it comes back through: the Stop gate is the expensive one and
+`lint-fix` is nearly free, so they are re-enabled apart. Shell callers ask through
+`harness_config.py --hook-off <name>` rather than re-reading the variable, so the aliases
+and the off-values asymmetry have one owner instead of a copy in bash free to drift.
+
+**What it deliberately cannot reach is the branch tier.** `worktree-guard.py`, which
+routes an agent edit into an ephemeral box, and `task_slug.py`, which names its branch,
+never consult it. Switching those off does not make a session quieter — it lands agent
+work on a checkout's home branch with nothing under it, surfacing days later as a
+`needs-branch` verdict nobody can attribute to a session. Turning the harness off is a
+decision about *checks*; it is not a decision about where the work goes, and
+`test_the_branch_tier_never_consults_the_harness_kill_switch` asserts on the source of
+both, because the risk is a future edit adding the check by symmetry with the four hooks
+that do carry it.
+
+Three things to know before flipping it:
+
+- `session-start` also wires the commit-time `pre-commit` gate, so switching it off
+  leaves that gate uninstalled on a fresh clone. `pre-commit install` by hand restores
+  it; an already-wired checkout keeps it.
+- A **remote** session-start is never switched off. Below its local branch that script is
+  not a check at all but the only thing that installs a toolchain into a Claude Code on
+  the web sandbox, which starts empty every time — honouring the switch there would
+  answer "stop gating my sessions" with a cloud session that has no ruff, mypy or pytest,
+  a failure that reads as a broken sandbox rather than as a setting.
+- CI is unaffected. The PR gate runs the same checks server-side, so what the switch
+  removes is the *local* round, not the verdict.
+
+The vendored suite clears the variable in an autouse fixture, on the same reasoning as
+the ledger fixture beside it: the switch lives in the environment of every agent session
+on a machine where it is set, so a suite that inherits it is one whose end-to-end hook
+tests pass by agreeing that nothing happened.

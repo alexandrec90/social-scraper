@@ -10,7 +10,12 @@ report = load_module("scripts/hooks/report-harness-defect.py")
 
 
 def read_ledger(base):
-    return (base / "logs" / "harness-events.log").read_text(encoding="utf-8")
+    """Every shard's text -- the ledger is one file per machine."""
+    return "".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((base / "logs").glob("harness-events*.log"))
+        if path.is_file()
+    )
 
 
 class TestMain:

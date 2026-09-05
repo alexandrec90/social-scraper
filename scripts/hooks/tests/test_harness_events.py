@@ -115,14 +115,108 @@ class TestProjectName:
         assert events.project_name(tmp_path / events.BOX_NAME_SEP) == events.BOX_NAME_SEP
 
 
+class TestHostSlug:
+    """The reduction `host_name` applies. Separated because the shard filename is
+    durable: a machine renamed by this function starts a *second* shard, which then
+    reads as a third machine."""
+
+    def test_an_ordinary_name_is_left_alone(self):
+        assert events.host_slug("laptop") == "laptop"
+
+    def test_case_is_folded(self):
+        assert events.host_slug("LapTop") == "laptop"
+
+    def test_runs_of_separators_collapse_rather_than_stacking(self):
+        assert events.host_slug("a  //  b") == "a-b"
+
+    def test_leading_and_trailing_separators_are_dropped(self):
+        assert events.host_slug("  .laptop.  ") == "laptop"
+
+    def test_nothing_usable_is_the_empty_string_not_a_bare_dash(self):
+        """`host_name` turns this into `UNKNOWN_HOST`; a `-` would make a shard called
+        `harness-events--.log`, which reads as a machine named nothing."""
+        assert events.host_slug("...") == ""
+
+    def test_a_trailing_separator_left_by_the_cap_is_dropped(self):
+        assert events.host_slug("x" * 31 + ".tail") == "x" * 31
+
+
+class TestLedgerName:
+    def test_it_is_the_stem_plus_this_machine(self):
+        assert events.ledger_name({"DEVKIT_HOST": "laptop"}) == "harness-events-laptop.log"
+
+    def test_it_matches_the_glob_the_read_half_unions(self):
+        """Otherwise a machine writes a shard nothing ever reads."""
+        import fnmatch
+
+        assert fnmatch.fnmatch(events.ledger_name({"DEVKIT_HOST": "laptop"}), events.LEDGER_GLOB)
+
+
+class TestLedgerRoot:
+    """The checkout half of the answer, which sharding did not change."""
+
+    def test_explicit_root_wins(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        assert events.ledger_root(tmp_path) == tmp_path
+
+    def test_the_env_names_the_checkout(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        assert events.ledger_root() == tmp_path
+
+    def test_no_seam_and_not_devkit_is_no_root(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "someproject"))
+        assert events.ledger_root() is None
+
+
+class TestHostName:
+    def test_the_override_wins(self):
+        assert events.host_name({"DEVKIT_HOST": "laptop"}) == "laptop"
+
+    def test_the_hostname_is_the_default(self, monkeypatch):
+        monkeypatch.delenv("DEVKIT_HOST", raising=False)
+        monkeypatch.setattr(events.platform, "node", lambda: "Alex-Desktop")
+        assert events.host_name() == "alex-desktop"
+
+    def test_a_name_is_reduced_to_what_is_safe_in_a_filename(self):
+        assert events.host_name({"DEVKIT_HOST": "Alex's PC (work).local"}) == "alex-s-pc-work-local"
+
+    def test_non_ascii_never_reaches_the_filename(self):
+        """A shard name has to survive a round trip through whatever syncs it."""
+        assert events.host_name({"DEVKIT_HOST": "café-日本"}) == "caf"
+
+    def test_a_name_with_nothing_usable_falls_back(self):
+        assert events.host_name({"DEVKIT_HOST": "!!!"}) == events.UNKNOWN_HOST
+
+    def test_a_long_name_is_bounded(self):
+        assert len(events.host_name({"DEVKIT_HOST": "x" * 200})) == events.HOST_LIMIT
+
+    def test_a_hostname_that_cannot_be_read_is_not_fatal(self, monkeypatch):
+        """`record` must not raise, so neither may anything it calls."""
+        monkeypatch.delenv("DEVKIT_HOST", raising=False)
+        monkeypatch.setattr(events.platform, "node", lambda: (_ for _ in ()).throw(OSError("no")))
+        assert events.host_name() == events.UNKNOWN_HOST
+
+
 class TestLedgerPath:
     def test_explicit_root_wins(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
-        assert events.ledger_path(tmp_path) == tmp_path / "logs" / "harness-events.log"
+        monkeypatch.setenv("DEVKIT_HOST", "box")
+        assert events.ledger_path(tmp_path) == tmp_path / "logs" / "harness-events-box.log"
 
     def test_devkit_dir_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
-        assert events.ledger_path() == tmp_path / "logs" / "harness-events.log"
+        monkeypatch.setenv("DEVKIT_HOST", "box")
+        assert events.ledger_path() == tmp_path / "logs" / "harness-events-box.log"
+
+    def test_each_machine_writes_to_a_shard_of_its_own(self, tmp_path, monkeypatch):
+        """The property the whole split exists for: two machines syncing one `logs/`
+        never append to the same file, so no transport can produce a conflict copy."""
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        laptop = events.ledger_path()
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        assert events.ledger_path() != laptop
 
     def test_unset_means_no_ledger_in_a_project_that_vendored_devkit(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
@@ -135,8 +229,9 @@ class TestLedgerPath:
         was told so by `report-harness-defect.py` while standing in the checkout the
         ledger lives in. Where the copy *is* devkit, no seam is needed."""
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setenv("DEVKIT_HOST", "box")
         monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "devkit"))
-        assert events.ledger_path() == tmp_path / "logs" / "harness-events.log"
+        assert events.ledger_path() == tmp_path / "logs" / "harness-events-box.log"
 
     def test_the_fallback_resolves_a_worktree_to_the_checkout_it_was_cut_from(
         self, tmp_path, monkeypatch
@@ -150,8 +245,9 @@ class TestLedgerPath:
             f"gitdir: {main / '.git' / 'worktrees' / 'box'}\n", encoding="utf-8"
         )
         monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setenv("DEVKIT_HOST", "box")
         monkeypatch.setattr(events, "REPO_ROOT", box)
-        assert events.ledger_path() == main / "logs" / "harness-events.log"
+        assert events.ledger_path() == main / "logs" / "harness-events-box.log"
 
     def test_blank_env_means_no_ledger(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEVKIT_DIR", "   ")
@@ -163,15 +259,61 @@ class TestLedgerPath:
         assert events.ledger_path() is None
 
 
+class TestLedgerPaths:
+    def _shard(self, tmp_path, name, line="x"):
+        logs = tmp_path / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / name).write_text(line, encoding="utf-8")
+
+    def test_this_machines_shard_is_listed_before_it_exists(self, tmp_path, monkeypatch):
+        """So a caller reports an empty backlog against a real path, not against none."""
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        assert events.ledger_paths() == [tmp_path / "logs" / "harness-events-laptop.log"]
+
+    def test_another_machines_shard_is_picked_up(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        self._shard(tmp_path, "harness-events-desktop.log")
+        names = [p.name for p in events.ledger_paths()]
+        assert names == ["harness-events-desktop.log", "harness-events-laptop.log"]
+
+    def test_the_legacy_unsharded_file_is_still_read(self, tmp_path, monkeypatch):
+        """Most of the ledger's history predates the split, and it is append-only."""
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        self._shard(tmp_path, "harness-events.log")
+        assert tmp_path / "logs" / "harness-events.log" in events.ledger_paths()
+
+    def test_an_unrelated_log_is_not_a_shard(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        self._shard(tmp_path, "harness-triage.log")
+        assert [p.name for p in events.ledger_paths()] == ["harness-events-laptop.log"]
+
+    def test_a_directory_is_not_a_shard(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        (tmp_path / "logs" / "harness-events-odd.log").mkdir(parents=True)
+        assert [p.name for p in events.ledger_paths()] == ["harness-events-laptop.log"]
+
+    def test_no_ledger_means_no_shards(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("DEVKIT_DIR", raising=False)
+        monkeypatch.setattr(events, "REPO_ROOT", _repo(tmp_path, "someproject"))
+        assert events.ledger_paths() == []
+
+
 class TestRecord:
-    def test_appends_one_line_per_call(self, tmp_path):
+    def test_appends_one_line_per_call(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(events.ADAPTER_ENV, raising=False)
+        monkeypatch.setenv("DEVKIT_HOST", "box")
         path = events.record("guard-block", (("project", "p"),), root=tmp_path)
         events.record("guard-block", (("project", "q"),), root=tmp_path)
-        assert path == tmp_path / "logs" / "harness-events.log"
+        assert path == tmp_path / "logs" / "harness-events-box.log"
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
-        assert lines[0].endswith("\tevent=guard-block\tagent=claude\tproject=p")
-        assert lines[1].endswith("\tevent=guard-block\tagent=claude\tproject=q")
+        assert lines[0].endswith("\tevent=guard-block\tagent=claude\thost=box\tproject=p")
+        assert lines[1].endswith("\tevent=guard-block\tagent=claude\thost=box\tproject=q")
 
     def test_stamp_is_parseable_iso(self, tmp_path):
         path = events.record("agent-report", (), root=tmp_path)
@@ -224,6 +366,25 @@ class TestAgentName:
         text = path.read_text(encoding="utf-8")
         assert "\tagent=claude" in text
         assert "codex" not in text
+
+
+class TestHostField:
+    """Which machine wrote a row. Stamped centrally for `agent=`'s reason: a remedy that
+    depends on every writer remembering is the same defect again."""
+
+    def test_record_stamps_it_without_the_writer_asking(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        path = events.record("guard-block", (("project", "p"),), root=tmp_path)
+        assert "\thost=laptop\t" in path.read_text(encoding="utf-8")
+
+    def test_a_writer_recording_for_another_machine_keeps_its_own_value(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DEVKIT_HOST", "laptop")
+        path = events.record("agent-report", (("host", "desktop"),), root=tmp_path)
+        text = path.read_text(encoding="utf-8")
+        assert "\thost=desktop" in text
+        assert "laptop" not in text
 
 
 class TestTheSuiteCannotReachTheRealLedger:

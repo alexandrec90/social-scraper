@@ -169,6 +169,26 @@ def test_the_corpus_admits_a_sibling_that_names_the_module():
     assert "alpha" in us.corpus_for(Path("scripts/acme.py"), texts)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "load_module('scripts/acme-tool.py')",  # the file name
+        "import acme_tool",  # an import
+        "acme_tool.alpha()",  # an attribute off it
+        "acme_tool = load_module('x')",  # a binding
+    ],
+)
+def test_the_prefilter_cannot_skip_a_real_mention(text):
+    """`corpus_for` settles most (module, file) pairs with a substring check before it
+    runs the regex, and that is sound only while **every** alternative the pattern
+    accepts contains the file name or the underscored stem literally. Add one that does
+    not and this fails, instead of every corpus quietly shrinking and the gate reporting
+    gaps that are covered."""
+    module = Path("scripts/acme-tool.py")
+    assert us.module_pattern(module).search(text)
+    assert text in us.corpus_for(module, {Path("tests/test_acme.py"): text})
+
+
 # --- source_dirs / source_files / test_files ----------------------------------
 
 

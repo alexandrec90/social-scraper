@@ -1,59 +1,18 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: blocks the few shell commands whose output scales with the tree.
+"""PreToolUse hook: block the few shell commands whose output scales with the tree.
 
-This gate used to work the other way round, and the inversion is the whole content of
-this file. It required every Bash call to *prove* it was bounded -- through the wrapper,
-a `head`/`tail` cap, a redirect, or membership in a growing list of exempt shapes -- and
-blocked everything it could not recognise. Recognising bounded shell is not a small
-problem: it is most of a shell parser plus a model of what every command prints, and the
-exempt tier grew to twenty-five regexes covering heredocs, brace groups, `case` arms,
-loop keywords, env-assignment prefixes, `git` global options, and the difference between
-a backtick inside single quotes and one inside double quotes.
+The former allow-list required every Bash call to prove it was bounded. It grew into a
+partial shell parser and still false-positive blocked 46% of its observed calls. This
+gate therefore fails open and names a closed list: `ls`, `cat`, `find`, `tree`, `du`,
+`env`, `git status`, an uncounted `git log`, and raw `git diff`/`git show`.
 
-It did not converge, and the transcripts say so rather than an opinion. Of the 305 blocks
-recoverable from this workspace's sessions, **139 -- 46% -- are allowed by the very next
-version of the gate**: they were not commands anyone needed to rewrite, they were this
-file's own bugs. Fourteen of its eighteen commits are titled some variant of "stop the
-gate blocking X". Each of those cost a turn plus the ~1 KB of remedy prose the block
-message had to carry, and the remedy was often one the shape could not take -- a heredoc,
-a loop and a brace group all fail to survive the wrapper's `cmd.exe`.
+`BASH_MAX_OUTPUT_LENGTH` is the unconditional backstop. `invoke-capped.py` remains the
+right explicit bound for tests and linters because it preserves both output ends and the
+exit code. The parser retained here only prevents blocks: it discards heredoc bodies and
+comments, respects quoted separators, and keeps capped groups together.
 
-A fix here also reaches a consuming project only when someone runs `sync-devkit.py
---pull`, so a false positive keeps being *re*-reported for as long as the vendored copies
-lag. The report that prompted this rewrite was a `sed -n '1,30p'` block that had already
-been fixed upstream the day before.
-
-So the policy is now stated in the direction that is decidable. **Everything is allowed
-except a short list of commands whose output grows with the repository** -- `ls`, `cat`,
-`find`, `tree`, `du`, `env`, `git status`, an uncounted `git log`, and a raw
-`git diff`/`git show`. Those nine were 68 of the 166 blocks that were the old gate working
-as designed, which is to say that nearly everything it was ever right about, it was right
-about for one of nine reasons. The list is closed by policy: a command earns a place on it
-by being observed to flood a session, not by being suspected of it.
-
-What this gives up is real and worth naming: an unknown command that prints a megabyte is
-now allowed through. Two things carry that case instead of a block.
-
-  * `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json` is a native, unconditional bound
-    on every Bash result. It needs no grammar and cannot false-positive, because it
-    truncates bytes that already exist rather than predicting bytes that might.
-  * `invoke-capped.py` is still here and still the right tool for a test or lint run,
-    where a head *and* a tail window beats truncation from one end. It is now a thing to
-    reach for rather than a thing to be blocked into.
-
-Failing **open** is therefore the design and not a gap in it. A blocklist that cannot
-parse a statement allows it, and the backstop above bounds the cost; the allow-list this
-replaced failed *closed* on everything it could not parse, which is precisely how a gate
-arrives at a 46% false-positive rate.
-
-Two pieces of the old parser are kept, because both prevent a block rather than cause one.
-`split_top_level` still drops heredoc bodies and comments -- otherwise a commit message
-mentioning `cat` is read as a command -- and it still holds a `{ ...; }` group together,
-so the cap in `{ pwd; cat big; } | head -c N` is seen to bind the `cat` inside it.
-
-Decision logic is exposed as pure functions (`decide`, `offenders`, `noisy_reason`,
-`has_cap`, `statements`, `get_value`) so it can be unit-tested without spawning a
-subprocess. See `scripts/hooks/tests/test_enforce_capped_bash.py`.
+The decision functions stay importable for `scripts/hooks/tests/test_enforce_capped-bash.py`.
+Vendored consumers receive fixes only through `sync-devkit.py --pull`.
 """
 
 from __future__ import annotations
@@ -61,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -105,6 +65,9 @@ CAP_RE = re.compile(
     # way `wc` does -- `git show <ref>:<file> | grep -c foo` was blocked for want of
     # this spelling. `-C 3` is context, not count, so the match stays case-sensitive.
     r"|^(?:e|f)?grep\s+(?:\S+\s+)*?(?:-[a-zA-Z]*c|--count)(?=\s|$)"
+    # A numeric print range emits at most its stated number of lines. Keep this narrow:
+    # arbitrary sed programs can print once per input line and are not caps.
+    r"|^sed\s+-n\s+(?:'\d+,\d+p'|\"\d+,\d+p\"|\d+,\d+p)(?=\s|$)"
 )
 
 # Redirection of stdout to a file bounds a statement by sending its output somewhere that
@@ -451,7 +414,32 @@ def has_powershell_cap(statement: str) -> bool:
     )
 
 
-def noisy_reason(statement: str, command_shell: str = "bash") -> str | None:
+def _ls_names_regular_file(head: str, cwd: str = "") -> bool:
+    """Whether this `ls` names exactly one existing file rather than a directory."""
+    try:
+        words = shlex.split(head, posix=True)
+    except ValueError:
+        return False
+    if not words or words[0] != "ls":
+        return False
+    operands = [word for word in words[1:] if word != "--" and not word.startswith("-")]
+    if len(operands) != 1:
+        return False
+    path = Path(operands[0])
+    if not path.is_absolute():
+        path = Path(cwd or Path.cwd()) / path
+    return path.is_file()
+
+
+def _listed_reason(head: str, command_shell: str, cwd: str) -> str | None:
+    """The closed-list reason for `head`, accounting for a regular-file `ls`."""
+    if command_shell == "bash" and _ls_names_regular_file(head, cwd):
+        return None
+    table = POWERSHELL_NOISY_COMMANDS if command_shell == "powershell" else NOISY_COMMANDS
+    return next((reason for pattern, reason in table if pattern.match(head)), None)
+
+
+def noisy_reason(statement: str, command_shell: str = "bash", cwd: str = "") -> str | None:
     """Why this statement's output scales with the tree, or None if it does not.
 
     Judged on the peeled statement and on the *first* command in the pipeline, since that
@@ -479,10 +467,8 @@ def noisy_reason(statement: str, command_shell: str = "bash") -> str | None:
     head = strip_prefixes(segments[0].strip()) if segments else ""
     if not head:
         return None
-    table = POWERSHELL_NOISY_COMMANDS if command_shell == "powershell" else NOISY_COMMANDS
-    for pattern, reason in table:
-        if pattern.match(head):
-            return reason
+    if reason := _listed_reason(head, command_shell, cwd):
+        return reason
     if command_shell == "powershell":
         return None
     flags = strip_quoted(head)
@@ -497,14 +483,14 @@ def noisy_reason(statement: str, command_shell: str = "bash") -> str | None:
     return None
 
 
-def offenders(command: str, command_shell: str = "bash") -> list[str]:
+def offenders(command: str, command_shell: str = "bash", cwd: str = "") -> list[str]:
     """Every reason this command is blocked; empty when it is allowed."""
     capped = has_powershell_cap if command_shell == "powershell" else has_cap
     return [
         reason
         for statement in statements(command)
         if not capped(statement)
-        and (reason := noisy_reason(statement, command_shell=command_shell)) is not None
+        and (reason := noisy_reason(statement, command_shell=command_shell, cwd=cwd)) is not None
     ]
 
 
@@ -560,7 +546,8 @@ def decide(
         # command is one no agent can act on.
         return 0, ""
 
-    reasons = offenders(command, command_shell=command_shell)
+    cwd = get_value(payload, "cwd") or ""
+    reasons = offenders(command, command_shell=command_shell, cwd=cwd)
     if not reasons:
         return 0, ""
 
@@ -617,6 +604,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shell", choices=("bash", "powershell"), default="bash")
     args = parser.parse_args(argv)
+    # Asked before stdin is read: a gate that has been switched off blocks nothing, so
+    # there is nothing for it to decide. See `harness_config.hooks_off`.
+    if harness_config.hooks_off("capped-bash"):
+        return 0
     # UTF-8, never the platform codec -- see `worktree-guard.read_stdin`. A command
     # carrying an em dash decoded through cp1252 reaches `decide` mangled, and the
     # mangling is then what `record_block` puts on the ledger.

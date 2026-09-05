@@ -2,6 +2,7 @@
 name: ship
 description: 'Ship the completed task branch: verify it, commit the intended diff, push it, and open or reuse its GitHub pull request.'
 argument-hint: 'Optional PR title, or context such as which box/worktree to ship from'
+disable-model-invocation: true
 ---
 
 # Ship the current task
@@ -69,9 +70,42 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    `gh pr create` with the detected base branch, current branch, commit subject (or
    the argument, when it reads as a title), and a concise body covering the change and
    verification — written to a file and passed with `--body-file`.
-5. Report the PR number and URL.
+5. Apply the `automerge` label: `gh pr edit <number> --add-label automerge`. When that
+   fails because the repository has no such label, create it once and retry —
+   `gh label create automerge --color 0e8a16 --description "PR the harness may merge once the gate passes"`,
+   the spelling `sweep.AUTOMERGE_LABEL` and `dependabot-automerge.yml` both use. A
+   failure here is never fatal to the ship: report it and leave the PR labelled by hand.
+6. Report the PR number and URL, and **stop**.
 
-Do not enable auto-merge, wait on CI, or start an autofix loop unless the user asks.
+## Shipping ends at the push — the gate is somebody else's turn
+
+**Never wait for the PR to go green, and never poll it.** Watching a gate is the most
+expensive thing a session can do with its remaining context: it happens at the tail of a
+long conversation, where every turn re-sends the whole transcript, and it produces
+nothing a later session could not read in a single call. A gate also routinely outruns
+the Bash tool's ceiling, so even the "one blocking call" spelling
+`.claude/rules/engineering.md` prescribes for a deliberate wait decays into a poll loop
+with the timeout as its interval.
+
+Step 5 is what makes waiting unnecessary rather than merely forbidden. `worktree.py
+reconcile` runs on a schedule, squash-merges any green PR carrying the label, and reaps
+its box afterwards — so delivery is already automatic by the time you report, and sitting
+on the PR does not make it more so. **Applying the label is the review decision**: it
+says this branch may land on the strength of its gate, which is what the harness's own
+task branches are for. A change that wants a human's eyes instead is one to say so about
+in the report, having left the label off.
+
+So: no `gh pr checks --watch`, no repeated `gh pr view`, no autofix loop, and no "let me
+just confirm it passed". Report that the branch is pushed and the gate is running. If it
+fails, the run is on the PR, the label merges nothing, and a fresh session fixes it at
+the session floor rather than at the tail of this one.
+
+Two things this does not forbid: **diagnosing a failure you were asked to fix** is the
+work itself rather than waiting, and the single `gh pr view` in step 4. The waste begins
+at the second identical poll.
+
+Do not start an autofix loop, or reach for `gh pr merge`, unless the user asks. The
+scheduled pass is the only thing that merges.
 
 ## Do not clean up after yourself
 

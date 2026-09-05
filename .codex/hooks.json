@@ -11,6 +11,18 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|NotebookEdit|apply_patch|create_file|Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event PreToolUse -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/worktree-guard-launch.py\"",
+            "commandWindows": "python3 -c \"import pathlib,runpy,sys;p=pathlib.Path.cwd();r=next(x for x in (p,*p.parents) if (x/'.git').exists());sys.argv=[str(r/'scripts/hooks/codex-hook-adapter.py'),*[a.replace('__CODEX_PROJECT_ROOT__',str(r)) for a in sys.argv[1:]]];runpy.run_path(sys.argv[0],run_name='__main__')\" --event PreToolUse -- python3 \"__CODEX_PROJECT_ROOT__/scripts/hooks/worktree-guard-launch.py\""
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "^(Edit|Write|MultiEdit|apply_patch|create_file)$",

@@ -61,7 +61,10 @@ try:
     import harness_config
     import harness_events
 except ImportError:  # pragma: no cover - a partially vendored consumer
-    harness_events = None  # type: ignore[assignment]
+    # One statement, one suppression: the structural gate counts each `type: ignore` as
+    # something somebody chose to write, and two lines here would be two of them saying
+    # the identical thing about the identical fallback.
+    harness_config = harness_events = None  # type: ignore[assignment]
 
 ALLOWED_TOOLS = {"Edit", "Write", "MultiEdit", "apply_patch", "create_file"}
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
@@ -224,6 +227,11 @@ def _run(ruff: str, *args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedPr
 
 
 def main() -> int:
+    # `is not None` because this hook tolerates a partially vendored consumer whose
+    # sibling import failed; there the switch is simply unreadable and the hook runs.
+    if harness_config is not None and harness_config.hooks_off("lint-fix"):
+        return 0
+
     hook_input = parse_hook_input(_read_stdin())
     paths = [path for path in extract_paths(hook_input) if is_lintable(path)]
     if not paths:
