@@ -39,6 +39,25 @@ def _ledger_off_the_machine(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("DEVKIT_DIR", str(tmp_path_factory.mktemp("ledger")))
 
 
+@pytest.fixture(autouse=True)
+def _harness_switch_off_the_machine(monkeypatch):
+    """Clear `$DEVKIT_HOOKS_OFF` for every test in this tree.
+
+    The variable is the harness kill switch (`harness_config.hooks_off`), and it is set
+    in a `settings.json` `env` block -- so it is present in the environment of every
+    agent session on a machine where someone has switched the harness off, and absent in
+    CI. A suite that inherits it is a suite whose hooks stand down: every test that
+    drives `stop.py`, `lint-fix.py`, `enforce-capped-bash.py` or `session-start.sh` end
+    to end would be asserting against a hook that returned before doing anything, and
+    would pass by agreeing that nothing happened. Same shape as the ledger fixture above
+    -- a test a machine's own configuration can quietly hollow out is worse than none.
+
+    Tests that set it themselves still win: `monkeypatch` applies in order and theirs
+    runs second.
+    """
+    monkeypatch.delenv("DEVKIT_HOOKS_OFF", raising=False)
+
+
 # Put scripts/ on the path so modules under it (e.g. `diagnostics`) import the
 # same way they do at runtime, where the script's own dir is sys.path[0].
 sys.path.insert(0, str(REPO_ROOT / "scripts"))

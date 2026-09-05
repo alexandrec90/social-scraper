@@ -349,6 +349,26 @@ def test_declared_dependencies_read_every_manifest_a_project_carries(tmp_path):
     }
 
 
+def test_a_frontend_at_the_repository_root_is_one_manifest_not_two(tmp_path):
+    """`dir = "."` must produce the same key the root manifest already has.
+
+    These strings are baseline keys, so a second spelling of one file is the worst
+    shape a ratchet finding can take: every dependency in it is reported as new, and
+    every line already recorded under the other spelling goes stale in the same run --
+    a project that has added nothing is told to justify its entire dependency list.
+    roguelike is the shape that reaches it: a Phaser game whose `package.json`,
+    `vite.config.ts` and `src/` are the repository root, so it declares `dir = "."`
+    rather than a subdirectory that does not exist.
+    """
+    write(tmp_path, "package.json", '{"dependencies": {"phaser": "4"}}')
+    cfg = dataclasses.replace(config(), frontend=hc.FrontendConfig(enabled=True, dir="."))
+
+    assert sc.declared_dependencies(tmp_path, cfg) == {"package.json": {"phaser"}}
+    assert [f.key for f in sc.dependency_findings(tmp_path, cfg)] == [
+        "dependency::package.json::phaser"
+    ]
+
+
 def test_declared_dependencies_survive_a_manifest_that_does_not_parse(tmp_path):
     write(tmp_path, "pyproject.toml", "[project\n")
     write(tmp_path, "package.json", "{")
@@ -447,6 +467,125 @@ def test_tighten_drops_and_lowers_but_never_adds_or_raises(tmp_path):
     worse, stale = sc.verdict(tmp_path, config())
     assert [f.key for f in worse] == ["orphan::src/dead.py"]
     assert stale == []
+
+
+def _oversized(tmp_path, lines: int = 40) -> None:
+    """A module past `file_lines`, which is the rule `--record` exists for."""
+    write(tmp_path, "src/big.py", "import os\n" + "x = 1\n" * lines + "print(os)\n")
+
+
+def test_record_raises_the_baseline_and_writes_the_reason_into_the_file(tmp_path):
+    """The deliberate hole. A module far past `file_lines` cannot gain a line, so a bug
+    whose fix belongs in one has nowhere to go -- and the split the finding asks for is a
+    separate body of work. Recording says so out loud rather than silently."""
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "")
+
+    recorded, refused = sc.record(
+        tmp_path, config(limits={"file_lines": 10}), "the split is its own PR"
+    )
+
+    assert refused == []
+    assert "file_lines::src/big.py" in {f.key for f in recorded}
+    assert sc.verdict(tmp_path, config(limits={"file_lines": 10})) == ([], [])
+    body = sc.baseline_path(tmp_path).read_text(encoding="utf-8")
+    assert "the split is its own PR" in body
+    assert "file_lines::src/big.py ->" in body
+
+
+def test_recordable_splits_the_findings_by_whether_size_can_explain_them():
+    """The predicate `record` refuses on, asserted directly: a limit rule is a fact about
+    a split nobody has done, a counter is somebody's decision to give up."""
+    big = sc.Finding("file_lines", "src/big.py", 900)
+    gave_up = sc.Finding("suppressions", "src/a.py", 1)
+    assert sc.recordable([big, gave_up]) == ([big], [gave_up])
+    assert sc.recordable([]) == ([], [])
+
+
+def test_existing_notes_reads_back_only_the_record_log(tmp_path):
+    """Read out of the file rather than kept beside it: a second state file would be one
+    more thing that can disagree with the baseline it annotates."""
+    path = tmp_path / sc.BASELINE_NAME
+    path.write_text(sc.render_baseline({"a::x": 1}), encoding="utf-8")
+    assert sc.existing_notes(path) == []
+    assert sc.existing_notes(tmp_path / "missing") == []
+
+    path.write_text(sc.render_baseline({"a::x": 1}, ["# one", "# two"]), encoding="utf-8")
+    assert sc.existing_notes(path) == ["# one", "# two"]
+
+
+def test_run_record_reports_the_refusal_and_the_missing_reason(tmp_path, monkeypatch, capsys):
+    """`main`'s branch, which is where the exit codes are decided: 2 for a blank reason
+    and 2 for a counter rule, so neither can be mistaken for a recorded success."""
+    monkeypatch.setattr(sc, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sc, "CFG", config(limits={"file_lines": 10}))
+    write(tmp_path, "src/main.py", "x = 1  # noqa\n")
+    write(tmp_path, sc.BASELINE_NAME, "")
+
+    assert sc.run_record("") == 2
+    assert "needs a reason" in capsys.readouterr().out
+
+    assert sc.run_record("a reason") == 2
+    assert "do not record" in capsys.readouterr().out
+
+
+def test_record_refuses_without_a_reason(tmp_path):
+    """Mandatory, exactly as `harness_triage --resolve` requires `--note`: a number that
+    got bigger with no account of why is the laundering this must not become."""
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "")
+    for blank in ("", "   ", "\n"):
+        with pytest.raises(ValueError, match="needs a reason"):
+            sc.record(tmp_path, config(limits={"file_lines": 10}), blank)
+
+
+def test_record_refuses_a_counter_rule_whatever_the_reason(tmp_path):
+    """A `# noqa`, a `TODO`, a skipped test: every counter is somebody's decision to give
+    up, so "the module is already large" is never the explanation and the fix is always
+    available. Nothing is written -- not even the recordable findings beside it."""
+    _oversized(tmp_path)
+    write(tmp_path, "src/main.py", "x = 1  # noqa\n")
+    path = write(tmp_path, sc.BASELINE_NAME, "")
+    before = path.read_text(encoding="utf-8")
+
+    recorded, refused = sc.record(tmp_path, config(limits={"file_lines": 10}), "a good reason")
+
+    assert recorded == []
+    assert [f.key for f in refused] == ["suppressions::src/main.py"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_recording_twice_keeps_both_reasons(tmp_path):
+    """The log is append-only for the reason the reap ledger is: a record of a decision
+    that the next decision overwrites is not a record."""
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "")
+    sc.record(tmp_path, config(limits={"file_lines": 10}), "first reason")
+    _oversized(tmp_path, lines=80)
+    sc.record(tmp_path, config(limits={"file_lines": 10}), "second reason")
+
+    body = sc.baseline_path(tmp_path).read_text(encoding="utf-8")
+    assert "first reason" in body and "second reason" in body
+
+
+def test_tighten_carries_the_record_log_through(tmp_path):
+    """A tighten that dropped the log would leave the next reader with raised numbers and
+    no account of who raised them."""
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
+    sc.record(tmp_path, config(limits={"file_lines": 10}), "kept through a tighten")
+
+    assert sc.tighten(tmp_path, config(limits={"file_lines": 10}))[0] == 1
+    assert "kept through a tighten" in sc.baseline_path(tmp_path).read_text(encoding="utf-8")
+
+
+def test_a_recorded_baseline_still_reads_back_as_numbers(tmp_path):
+    """The log is comments, so `read_baseline` must be blind to it."""
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "")
+    sc.record(tmp_path, config(limits={"file_lines": 10}), "why")
+    entries = sc.read_baseline(sc.baseline_path(tmp_path))
+    assert entries and all(isinstance(v, int) for v in entries.values())
 
 
 def test_tighten_leaves_an_exact_baseline_untouched(tmp_path):

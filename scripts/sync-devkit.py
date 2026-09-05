@@ -19,15 +19,13 @@ submodule. This script keeps that copy honest:
     seed a fresh shared repo from the project that currently owns the code).
   - `--list`: print the manifest and resolved source, then exit.
 
-The shared-repo path resolves from `--src` or `$DEVKIT_DIR`. `.devkit.toml`
-itself is **never** synced -- it is the per-project config the shared code reads.
+The source resolves from `--src` or `$DEVKIT_DIR`; `.devkit.toml` stays project-owned.
 
-`MANIFEST` is the reviewed, portable subset (config loader + the scripts audited so
-far); extend it as more scripts are decoupled. Pure helpers (`resolve_src`,
-`classify`) are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
+`MANIFEST` is the reviewed, portable subset; extend it as more scripts are decoupled.
+Pure helpers are unit-tested in `scripts/hooks/tests/test_sync_devkit.py`.
 
-`BLOCK_MANIFEST` is the second tier: a *region* of a per-project file, delimited by
-`<!-- devkit:begin <id> -->` / `<!-- devkit:end <id> -->`, gated byte-for-byte while
+`BLOCK_MANIFEST` gates a *region* delimited by `<!-- devkit:begin <id> -->` /
+`<!-- devkit:end <id> -->` byte-for-byte while
 the rest of the file stays the project's own. It exists for `CLAUDE.md`, which can
 never join `MANIFEST` -- see the tier's own comment block below for why the policy has
 to be inline rather than behind a pointer. Every mode handles both tiers; a block that
@@ -46,6 +44,15 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+
+# For `project_settings.py`, which the three functions below import **on use** rather
+# than here. A project's very first pull runs the copy of this script the generator
+# placed there, at a moment when nothing else in the MANIFEST exists yet -- so an import
+# at module scope is a crash in exactly the bootstrap the pull exists for, and that is
+# not a hypothesis: it is what `test_a_generated_project_satisfies_the_vendored_ci_contract`
+# caught. The insert names *this* copy's directory, so a consumer's `workspace-status.py`
+# loading this file by path cannot reach a sibling checkout's tier.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 REPO_ROOT = (Path(__file__).parent / "..").resolve()
 SRC_ENV = "DEVKIT_DIR"
@@ -148,10 +155,20 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/structure_check.py",
     "scripts/hooks/tests/test_structure_check.py",
     "scripts/hooks/stop.py",
+    "scripts/hooks/stop_session.py",
     "scripts/hooks/tests/test_stop.py",
+    "scripts/hooks/tests/test_stop_session.py",
     # Auto-fix-on-edit PostToolUse hook (repo-relative ruff path fix).
     "scripts/hooks/lint-fix.py",
     "scripts/hooks/tests/test_lint_fix.py",
+    "scripts/hooks/worktree-guard-launch.py",
+    "scripts/hooks/tests/test_worktree_guard_launch.py",
+    # The settings tier `--pull` edits: the project's own `.claude/settings.json`, which
+    # no MANIFEST entry covers. It ships beside the shim above because it is what wires
+    # it -- the shim was vendored a release before anything ran it, and every consumer
+    # spent that release holding an edit guard it never called.
+    "scripts/project_settings.py",
+    "scripts/hooks/tests/test_project_settings.py",
     # Bash output cap: the PreToolUse gate and the wrapper it demands. They ship
     # together because the gate's allow-list matches the wrapper's path -- vendoring
     # one without the other yields a hook that blocks every Bash call and names a
@@ -815,118 +832,67 @@ def retired_present(root: Path) -> list[str]:
 
 
 # The settings file is the project's own (never vendored — see CLAUDE.md), which is
-# exactly why `--pull` has to touch it here. A retired hook is *deleted* by the pull,
-# and a `hooks` entry naming a file that no longer exists is not inert: the harness
-# runs it, the interpreter fails, and every prompt or edit in that project carries a
-# hook error. The pull created that state, so the pull cleans it up.
+# exactly why `--pull` has to touch it: the pull deletes a retired hook script and wires
+# a newly delivered one, and both of those are edits to a file no MANIFEST covers. That
+# tier lives in `project_settings.py` — a different contract from copying, and this
+# module was past every structural limit it holds other files to. Spelled out here
+# rather than read from there because this module must load before that file exists
+# (see the sys.path comment at the top); `test_the_two_modules_name_the_same_settings
+# _file` is what stops the two copies drifting.
 SETTINGS_FILE = ".claude/settings.json"
 
 
 def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...]:
-    """The retired entries that could plausibly be wired as a hook command.
+    """`project_settings.retired_hook_paths`, over this module's retired list.
 
-    `retired=None` reads `RETIRED_PATHS` **at call time**, not as a default bound when
-    this module was defined. The difference is not academic: `workspace-status.py`
-    loads this module by path and its test replaces `RETIRED_PATHS` on the loaded
-    module to prove the list is read from here rather than copied. A default captured
-    at def time silently ignores that, and the test would have been asserting nothing.
+    Kept here, thin, because `retired=None` must read `RETIRED_PATHS` **at call time**:
+    `workspace-status.py` loads this module by path and its test replaces that list on
+    the loaded module to prove the names are read from here rather than copied. A
+    default captured at def time silently ignores that, and the test would have been
+    asserting nothing.
 
-    A hook command runs a Python script under `scripts/`. A retired skill, rule,
-    README or test file cannot be one, and including them is not merely wasteful --
-    it is how `README.md` came to be treated as a retired hook name. Narrowing the
-    candidate set here means the matching in `prune_hook_commands` and in
-    `workspace-status.retired_hooks_line` cannot go wrong the same way twice.
+    Empty when the tier is not on disk yet, which is the bootstrap pull and nothing
+    else: a copy that has vendored the MANIFEST and lost this file is drift, and
+    `--check` reports it as drift rather than through this.
     """
-    candidates = RETIRED_PATHS if retired is None else retired
-    return tuple(rel for rel in candidates if rel.startswith("scripts/") and rel.endswith(".py"))
-
-
-def prune_hook_commands(payload: object, retired: tuple[str, ...]) -> tuple[object, list[str]]:
-    """`(settings, dropped)` with every hook command naming a retired script removed.
-
-    Structural, not textual: it walks the `hooks` tree and drops matching *commands*,
-    then any hook group left with no commands, then any event left with no groups.
-    A regex over the file would leave `{"hooks": []}` husks behind, and those are not
-    harmless — an event with an empty group list is a shape the harness has to parse,
-    and the next reader cannot tell it from one that lost its hook by accident.
-
-    Matches on the **repo-relative path**, not the basename. The command is a shell
-    string wrapping a path (`python3
-    "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-on-write.py"`) whose prefix varies
-    per project and per platform, but the tail is always the manifest path.
-
-    Basenames were tried first and are actively dangerous. `RETIRED_PATHS` holds
-    non-script entries too, one of which is `.claude/skills/state-tools/README.md` --
-    so `README.md` became a "retired hook", and carameli wires a markdownlint hook
-    whose command lists `"README.md"` among its arguments. This function would have
-    deleted that hook. `retired_hook_paths` narrows the candidates on top of that, so
-    a name that could never be a hook command is not even considered.
-    """
-    dropped: list[str] = []
-    if not isinstance(payload, dict):
-        return payload, dropped
-    hooks = payload.get("hooks")
-    if not isinstance(hooks, dict):
-        return payload, dropped
-
-    names = retired_hook_paths(retired)
-    events: dict[str, object] = {}
-    for event, groups in hooks.items():
-        if not isinstance(groups, list):
-            events[event] = groups
-            continue
-        kept_groups = []
-        for group in groups:
-            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
-                kept_groups.append(group)
-                continue
-            kept = []
-            for entry in group["hooks"]:
-                command = entry.get("command", "") if isinstance(entry, dict) else ""
-                # Compared with forward slashes: a settings file written on Windows can
-                # spell the same hook `scripts\\hooks\\branch-on-write.py`, and the
-                # manifest paths are always POSIX.
-                probe = command.replace("\\", "/") if isinstance(command, str) else ""
-                hit = next((n for n in names if n in probe), "")
-                if hit:
-                    dropped.append(hit.rsplit("/", 1)[-1])
-                else:
-                    kept.append(entry)
-            if kept:
-                kept_groups.append({**group, "hooks": kept})
-        if kept_groups:
-            events[event] = kept_groups
-    # Nothing retired means nothing rewritten, byte for byte. Returning the rebuilt
-    # tree here would let this tidy up shapes it was not asked about -- an already
-    # empty hook group, a matcher someone left behind -- and `--pull` would show a
-    # settings diff in projects where no hook was retired at all.
-    if not dropped:
-        return payload, []
-    return {**payload, "hooks": events}, dropped
-
-
-def prune_settings(root: Path, retired: tuple[str, ...] = RETIRED_PATHS) -> list[str]:
-    """Drop retired hooks from this project's settings file. Returns what went.
-
-    Best-effort by design. A settings file that cannot be parsed is left exactly as it
-    is and reported by the caller: rewriting one this could not read is how a pull
-    would take a project's whole harness config with it, and the cost of skipping is a
-    hook error the operator can see and fix by hand.
-    """
-    path = root / SETTINGS_FILE
     try:
-        original = path.read_text(encoding="utf-8")
-        payload = json.loads(original)
-    except (OSError, json.JSONDecodeError):
-        return []
-    pruned, dropped = prune_hook_commands(payload, retired)
-    if not dropped:
-        return []
+        import project_settings
+    except ModuleNotFoundError:
+        return ()
+    return project_settings.retired_hook_paths(RETIRED_PATHS if retired is None else retired)
+
+
+def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[str]:
+    """The pull's pass over this project's settings file; one note per change made.
+
+    Unwires the hooks this pull's deletions left dangling, and wires the cross-checkout
+    edit guard when nothing runs it. `project_settings.settings_pass` owns both, and
+    the notes it returns are already worded for the report below.
+    """
     try:
-        path.write_text(json.dumps(pruned, indent=2) + "\n", encoding="utf-8", newline="\n")
-    except OSError:
+        import project_settings
+    except ModuleNotFoundError:
         return []
-    return dropped
+    return project_settings.settings_pass(root, retired_hook_paths(retired))
+
+
+def local_faults(root: Path) -> tuple[list[tuple[str, str]], str]:
+    """`(faults, summary)` for what `--check` finds outside the MANIFEST.
+
+    Neither the settings file nor the generated Codex mirror is ever compared against
+    upstream, so neither is drift -- but an unwired edit guard is the one harness fault
+    with no symptom at all, and a check that stayed quiet about it is how five
+    checkouts spent a release routing agent edits onto their home branches.
+
+    Returns the summary already worded, so `main` neither grows a branch per fault nor
+    words it there; both are what pushed that function past its limits.
+    """
+    try:
+        import project_settings
+    except ModuleNotFoundError:
+        return [], ""
+    faults = project_settings.check_notes(root, CODEX_HOOKS_FILE, codex_hooks_stale(root))
+    return faults, project_settings.check_summary(faults)
 
 
 CODEX_HOOKS_FILE = ".codex/hooks.json"
@@ -1304,8 +1270,8 @@ def main(argv: list[str] | None = None) -> int:
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
         # After the deletions, never before: pruning a hook whose script survived the
         # pull would disable a live hook.
-        unwired = prune_settings(REPO_ROOT) if args.pull else []
-        # After the settings prune, never before: the Codex file is generated *from*
+        unwired = settings_pass(REPO_ROOT) if args.pull else []
+        # After the settings pass, never before: the Codex file is generated *from*
         # those settings, so regenerating first would bake back in whatever the prune
         # is about to remove.
         codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
@@ -1327,8 +1293,8 @@ def main(argv: list[str] | None = None) -> int:
             # project's own from here on -- devkit will not update it again, and the
             # only thing that could tell you so is this line.
             print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
-        for name in unwired:
-            print(f"  (unwired retired hook) {SETTINGS_FILE}: {name}")
+        for note in unwired:
+            print(f"  {note}")
         if codex_regenerated:
             # Named, because it is the one file the pull rewrote that was never copied
             # from the source: it is generated here, from this project's own settings.
@@ -1389,15 +1355,11 @@ def main(argv: list[str] | None = None) -> int:
     block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
     retired = retired_present(REPO_ROOT)
     receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
-    codex_stale = codex_hooks_stale(REPO_ROOT)
+    # Faults in this project's own files: not drift, since `--check` never compares
+    # them, but red for the same reason -- an unwired edit guard has no other symptom.
+    local, local_summary = local_faults(REPO_ROOT)
     if not (
-        drifted
-        or missing
-        or retired
-        or receipt_retired
-        or block_drifted
-        or block_unusable
-        or codex_stale
+        drifted or missing or retired or receipt_retired or block_drifted or block_unusable or local
     ):
         blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
         print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
@@ -1429,15 +1391,10 @@ def main(argv: list[str] | None = None) -> int:
         # Distinct from DRIFT on purpose: `--pull` fixes drift, and cannot fix a
         # missing marker pair. Saying so here saves the pull that would not help.
         print(f"BLOCK   {label} -- not comparable; --pull cannot fix this", file=sys.stderr)
-    if codex_stale:
-        # Not DRIFT: nothing upstream to compare against, and `--pull` fixes it only as
-        # a side effect of regenerating. Say which command actually rewrites the file.
-        print(
-            f"STALE   {CODEX_HOOKS_FILE} -- not what {SETTINGS_FILE} generates today; "
-            f"Codex is running hook wiring this repo no longer describes. "
-            f"Run `python scripts/sync-codex-context.py`",
-            file=sys.stderr,
-        )
+    for _, message in local:
+        # Never DRIFT: `--pull` fixes these, but nothing upstream differs, so the file
+        # list and the advice that goes with it would both point at the wrong thing.
+        print(message, file=sys.stderr)
     if drifted or missing or retired or receipt_retired or block_drifted or block_unusable:
         print(
             "sync-harness: vendored harness drifted from the shared repo. "
@@ -1446,12 +1403,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     else:
-        # A `--pull` would resolve this one too, but only incidentally, and telling
+        # A `--pull` would resolve these too, but only incidentally, and telling
         # someone to adopt upstream when nothing upstream differs is the kind of advice
         # that gets a red gate reclassified as noise.
         print(
-            "sync-harness: every vendored file is in sync; only the generated Codex "
-            "hooks are stale.",
+            f"sync-harness: every vendored file is in sync; {local_summary}.",
             file=sys.stderr,
         )
     return 1

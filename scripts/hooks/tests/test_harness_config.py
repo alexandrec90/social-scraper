@@ -12,6 +12,8 @@ repo whose manifest differed — the exact opposite of the portability the harne
 exists for. Assert *invariants* of a manifest, never one project's contents.
 """
 
+import os
+import sys
 from pathlib import Path
 
 from conftest import REPO_ROOT, load_module
@@ -570,3 +572,151 @@ def test_the_footer_says_a_source_checkout_cannot_be_behind(tmp_path):
 
 def test_no_version_means_no_footer(tmp_path):
     assert cfg.provenance(tmp_path / "nope") == ""
+
+
+# --- The harness kill switch (`DEVKIT_HOOKS_OFF`) ----------------------------------
+
+
+def test_an_unset_switch_leaves_every_hook_running():
+    """The default has to be "on" for a variable nobody has ever heard of."""
+    for name in cfg.SWITCHABLE_HOOKS:
+        assert cfg.hooks_off(name, {}) is False, name
+
+
+def test_a_bare_one_switches_every_hook_off():
+    """`DEVKIT_HOOKS_OFF=1` is what an operator reaches for first, so it has to mean
+    the obvious thing rather than name a hook called `1`."""
+    for name in cfg.SWITCHABLE_HOOKS:
+        assert cfg.hooks_off(name, {cfg.HOOKS_OFF_ENV: "1"}) is True, name
+
+
+def test_the_all_aliases_all_mean_every_hook():
+    for value in ("all", "*", "true", "yes", "ON", " All "):
+        assert cfg.hooks_off("stop", {cfg.HOOKS_OFF_ENV: value}) is True, value
+
+
+def test_a_value_that_reads_as_off_to_a_human_never_switches_the_harness_off():
+    """The same asymmetry `git_policy.SKIP_ENV_VAR` documents: someone writing
+    `DEVKIT_HOOKS_OFF=0` means "leave the hooks running", and reading that as "off"
+    would disable the harness for the person trying to turn it back on."""
+    for value in ("", "0", "false", "no", "off", "  OFF  "):
+        assert cfg.hooks_off("stop", {cfg.HOOKS_OFF_ENV: value}) is False, value
+
+
+def test_a_list_switches_off_only_the_hooks_it_names():
+    """Selective is the state the harness comes back through: the Stop gate is the
+    expensive one and `lint-fix` is nearly free, so they are re-enabled apart."""
+    env = {cfg.HOOKS_OFF_ENV: "stop, capped-bash"}
+    assert cfg.hooks_off("stop", env) is True
+    assert cfg.hooks_off("capped-bash", env) is True
+    assert cfg.hooks_off("lint-fix", env) is False
+    assert cfg.hooks_off("session-start", env) is False
+
+
+def test_separators_and_casing_a_human_would_write_are_all_accepted():
+    for value in ("Stop;lint-fix", " STOP , lint-fix ", "stop,lint-fix"):
+        assert cfg.hooks_off("stop", {cfg.HOOKS_OFF_ENV: value}) is True, value
+        assert cfg.hooks_off("lint-fix", {cfg.HOOKS_OFF_ENV: value}) is True, value
+
+
+def test_an_unknown_name_in_the_list_switches_nothing_else_off():
+    """A typo must fail closed -- towards the harness running -- never silently widen
+    to every hook, which is the one direction that loses a guarantee."""
+    env = {cfg.HOOKS_OFF_ENV: "stopp"}
+    for name in cfg.SWITCHABLE_HOOKS:
+        assert cfg.hooks_off(name, env) is False, name
+
+
+def test_the_switch_reads_the_process_environment_when_none_is_passed(monkeypatch):
+    """Hooks call it with no argument; the env is where a `settings.json` puts it."""
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "stop")
+    assert cfg.hooks_off("stop") is True
+    assert cfg.hooks_off("lint-fix") is False
+
+
+def test_the_shell_arm_answers_with_an_exit_code(monkeypatch):
+    """`session-start.sh` and the `PostToolUseFailure` one-liner ask through the CLI
+    rather than re-implementing the parse in shell -- a second copy of the aliases and
+    the off-values asymmetry is exactly the drift this arm exists to prevent."""
+    import subprocess
+
+    script = REPO_ROOT / "scripts/hooks/harness_config.py"
+    for value, expected in (("1", 0), ("session-start", 0), ("stop", 1), ("0", 1)):
+        run = subprocess.run(
+            [sys.executable, str(script), "--hook-off", "session-start"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, cfg.HOOKS_OFF_ENV: value},
+        )
+        assert run.returncode == expected, (value, run.returncode)
+
+
+def test_the_lookup_arm_still_never_exits_non_zero():
+    """Only the `--hook-off` arm may fail. The lookup arm is read by shell that has no
+    handler for a failure, and a hook must not die over config."""
+    import subprocess
+
+    script = REPO_ROOT / "scripts/hooks/harness_config.py"
+    for argv in ([], ["python.install_command"], ["no.such.field"]):
+        run = subprocess.run([sys.executable, str(script), *argv], capture_output=True, text=True)
+        assert run.returncode == 0, (argv, run.stderr)
+
+
+def _explodes(*_args, **_kwargs):
+    raise AssertionError("the hook did work after being switched off")
+
+
+def test_the_stop_gate_returns_before_it_reads_anything(monkeypatch):
+    """The reversion check for the switch's whole point: with it on, the Stop gate must
+    not read stdin, shell out to git, or run a single check. This is the hook the switch
+    was added for -- it reproduces the PR gate locally and blocks the session on what it
+    finds, which is the cost an operator turning the harness off is turning off."""
+    stop = load_module("scripts/hooks/stop.py")
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "stop")
+    monkeypatch.setattr(stop, "_read_stdin", _explodes)
+    assert stop.main() == 0
+
+
+def test_the_formatter_returns_before_it_reads_anything(monkeypatch):
+    lint_fix = load_module("scripts/hooks/lint-fix.py")
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "lint-fix")
+    monkeypatch.setattr(lint_fix, "_read_stdin", _explodes)
+    assert lint_fix.main() == 0
+
+
+def test_the_bash_cap_returns_before_it_reads_anything(monkeypatch):
+    capped = load_module("scripts/hooks/enforce-capped-bash.py")
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "capped-bash")
+    monkeypatch.setattr(capped, "_read_stdin", _explodes)
+    assert capped.main([]) == 0
+
+
+def test_the_branch_tier_shim_returns_before_it_resolves_devkit(monkeypatch):
+    """`branch-tier` is the one switch name whose hook is a *shim*: it forwards the
+    payload to a guard that lives in devkit. Standing it down has to happen before that
+    subprocess, or an operator who switched the tier off still pays a Python start on
+    every mutating call in every consuming project."""
+    shim = load_module("scripts/hooks/worktree-guard-launch.py")
+    monkeypatch.setenv(cfg.HOOKS_OFF_ENV, "branch-tier")
+    monkeypatch.setattr(shim, "devkit_root", _explodes)
+    assert shim.main([]) == 0
+
+
+def test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch():
+    """`SWITCHABLE_HOOKS` is the documented vocabulary, so a name in it that no hook
+    reads is a value an operator can set and watch do nothing. The two call sites that
+    are not Python -- `session-start` and `failure-retro` -- go through the `--hook-off`
+    arm, so search for either spelling."""
+    sources = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in (
+            REPO_ROOT / "scripts/hooks/stop.py",
+            REPO_ROOT / "scripts/hooks/lint-fix.py",
+            REPO_ROOT / "scripts/hooks/enforce-capped-bash.py",
+            REPO_ROOT / "scripts/hooks/worktree-guard-launch.py",
+            REPO_ROOT / ".claude/hooks/session-start.sh",
+            REPO_ROOT / ".claude/settings.json",
+        )
+    )
+    for name in cfg.SWITCHABLE_HOOKS:
+        assert f'hooks_off("{name}")' in sources or f"--hook-off {name}" in sources, name

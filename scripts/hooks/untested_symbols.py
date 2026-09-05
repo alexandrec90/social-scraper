@@ -218,9 +218,29 @@ def module_pattern(module: Path) -> re.Pattern[str]:
 
 
 def corpus_for(module: Path, texts: dict[Path, str]) -> str:
-    """The text of every test file that mentions `module`, concatenated."""
+    """The text of every test file that mentions `module`, concatenated.
+
+    The substring test in front of the regex is a **necessary condition of every
+    alternative** {@link module_pattern} accepts -- each one contains either the file
+    name or the underscored stem literally -- so it can only skip a file the pattern
+    would have rejected anyway, and `test_the_prefilter_cannot_skip_a_real_mention`
+    pins that.
+
+    It is here because this scan is quadratic and the regex is the expensive half:
+    every module is searched against every test file, and `.*\\b<stem>\\b` under
+    `re.MULTILINE` backtracks per line. On a repo with 235 modules and 166 test files
+    -- 1.4 MB of corpus, which is nothing -- the whole scan took 60s and tripped the
+    60s timeout on `test_every_public_symbol_is_named_by_a_test`; a `in` check that
+    settles the same question for most pairs brings it to about 4s. A timing-out gate
+    is not a slow gate, it is a red one, and the failure names a regex rather than the
+    coverage it was asked about.
+    """
     mentions = module_pattern(module)
-    return "\n".join(text for text in texts.values() if mentions.search(text))
+    name = module.name
+    snake = module.stem.replace("-", "_")
+    return "\n".join(
+        text for text in texts.values() if (name in text or snake in text) and mentions.search(text)
+    )
 
 
 def entry(module: Path, symbol: str) -> str:

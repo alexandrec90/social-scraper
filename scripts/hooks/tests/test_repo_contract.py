@@ -713,6 +713,157 @@ def test_vendored_skills_are_not_locally_edited():
         )
 
 
+# --- no repo defines its own VS Code tasks ------------------------------------
+# Ungated, like the ignore check below it: a stray `tasks.json` is a hazard whether or
+# not this repo has wired the Stop tier, and VS Code can write one into a checkout that
+# has adopted nothing at all.
+
+PROJECT_TASKS = REPO_ROOT / ".vscode" / "tasks.json"
+
+
+def strip_jsonc(text: str) -> str:
+    """Blank `//` and `/* */` comments outside strings, then drop trailing commas.
+
+    `.vscode/tasks.json` is JSONC and `json` is not, and the obvious shortcut -- drop
+    lines whose first non-space characters are `//` -- gets both halves of a real file
+    wrong: it keeps an inline comment after a value, and it deletes a `"detail"` whose
+    text happens to start with a URL. This walks the string state instead, which is the
+    only way to tell a comment from those two.
+    """
+    out: list[str] = []
+    i, end = 0, len(text)
+    in_string = False
+    while i < end:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < end:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and text[i + 1 : i + 2] == "/":
+            while i < end and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and text[i + 1 : i + 2] == "*":
+            i += 2
+            while i < end and text[i : i + 2] != "*/":
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def hoisted_task_problems(text: str) -> list[str]:
+    """What is wrong with a `.vscode/tasks.json`, or an empty list if nothing is.
+
+    Present-and-empty is legal and is what the generator renders: the file is kept for
+    the policy comment that stops the next author re-adding a task, so its `tasks` and
+    `inputs` must both be `[]`. Anything else is an entry that has to move.
+    """
+    try:
+        parsed = json.loads(strip_jsonc(text))
+    except json.JSONDecodeError as exc:
+        return [f"does not parse even as JSONC ({exc})"]
+    if not isinstance(parsed, dict):
+        return [f"is not an object but a {type(parsed).__name__}"]
+    problems = []
+    for key in ("tasks", "inputs"):
+        entries = parsed.get(key, [])
+        if not isinstance(entries, list):
+            problems.append(f"{key!r} is not a list")
+        elif entries:
+            named = [
+                e.get("label") or e.get("id") or "<unlabelled>"
+                for e in entries
+                if isinstance(e, dict)
+            ]
+            problems.append(f"defines {len(entries)} {key}: {', '.join(named) or entries}")
+    return problems
+
+
+def test_no_repo_defines_its_own_vscode_tasks():
+    """Tasks live once in the shared workspace file, never in a repo.
+
+    Three things break when one is defined here instead. It is invisible from the
+    workspace root, it cannot be scoped with `devkit_project.Action.projects`, and --
+    the arithmetic that actually forces the rule -- a task defined in a repo is
+    rendered once per WORKTREE. The workspace holds an ephemeral agent box per task in
+    flight, so a single entry becomes N quick-pick rows carrying the same label with
+    nothing to say which checkout each would run in. When the last of these files were
+    deleted, carameli's two copies had drifted to eight tasks versus two and
+    ibkr_trader's to five versus eleven, with the same label running different commands.
+
+    A test is what enforces it because **VS Code writes this file itself**: configuring
+    an auto-detected npm script emits a `tasks.json` with no author and no review, and
+    it rides into main inside whatever PR happened to be open. That is exactly how
+    carameli's came back on 2026-08-28 -- a single "npm: build - frontend" stub wrapping
+    `frontend`'s own `build` script, in a PR that added an image asset, three weeks
+    after a sweep had deleted the 85-line file it replaced. Nothing read it and nothing
+    ran it; the frontend build was already reachable from the shared block.
+
+    Vendored rather than written per project because every consumer is a folder in the
+    one multi-root workspace by construction -- `new-project.py` registers there and
+    ships no `.code-workspace` of its own -- which is the same assumption `sweep.py`
+    already makes when it reads that `folders` list as the project registry.
+
+    What a repo owes instead is the CLI contract: a `scripts/<name>.py` at the path
+    `devkit_project.ACTIONS` names. A task that cannot be expressed that way is not
+    blocked from hoisting -- write the seam.
+    """
+    if not PROJECT_TASKS.is_file():
+        return
+    problems = hoisted_task_problems(PROJECT_TASKS.read_text(encoding="utf-8"))
+    assert not problems, (
+        f".vscode/tasks.json {'; '.join(problems)} -- move each one into the shared "
+        "task block in alex-projects.code-workspace (edit devkit's canonical "
+        "workspace.jsonc, on a branch) and scope it with Action.projects. Keep this "
+        "file only for its policy comment, with empty `tasks` and `inputs`."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_empty"),
+    [
+        ('{"version": "2.0.0", "tasks": [], "inputs": []}', True),
+        # The generator's stub: the comment is the whole point of the file.
+        ('{\n// no tasks here on purpose\n"version": "2.0.0", "tasks": []\n}', True),
+        # No `tasks` key at all is still nothing hoisted.
+        ('{"version": "2.0.0"}', True),
+        # A `//` inside a string is data, not a comment -- the line-prefix shortcut
+        # keeps this file's closing brace and then fails to parse it.
+        ('{"tasks": [], "detail": "see https://example.test/x"}', True),
+        # The real regression, verbatim in shape.
+        (
+            '{"tasks": [{"type": "npm", "script": "build", "label": "npm: build - frontend"}]}',
+            False,
+        ),
+        # An input with no task is still a project-level definition.
+        ('{"tasks": [], "inputs": [{"id": "target"}]}', False),
+        ("{not json at all", False),
+    ],
+)
+def test_hoisted_task_scanner_reads_the_entries_not_the_formatting(text, expected_empty):
+    """The scanner decides on parsed entries, so comments and layout cannot fool it.
+
+    devkit itself ships no `.vscode/tasks.json`, so the test above passes here without
+    ever reaching its assertion. These cases are what actually exercise the check in
+    the repo that vendors it.
+    """
+    assert (hoisted_task_problems(text) == []) is expected_empty
+
+
 # --- a hook that decodes a child's output names the codec --------------------
 
 DECODES_OUTPUT = {"text", "universal_newlines"}

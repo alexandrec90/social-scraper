@@ -1,10 +1,17 @@
 # Structural findings the code already had when it adopted the gate.
 #
-# Debt, not configuration. This file may only SHRINK: a new key fails the gate, a
+# Debt, not configuration. This file SHRINKS on its own: a new key fails the gate, a
 # value that grew fails the gate, and a line the code no longer earns fails it too,
 # so fixing a finding forces its line out (`structure_check.py --tighten` does that).
-# Never add or raise a line to make new code pass; fix the code. The one exception
-# is `dependency::` -- adding a package is a line here, so the PR diff shows it.
+# Never add or raise a line to make new code pass; fix the code. `dependency::` is one
+# exception -- adding a package is a line here, so the PR diff shows it.
+#
+# `--record --reason "..."` is the other, and it is the deliberate hole. A module far
+# past `file_lines` cannot gain a line, so a bug whose fix belongs in one has nowhere
+# to go, and the split the finding asks for is a separate body of work. Recording says
+# so out loud: the reason is mandatory, counter rules (`suppressions`, `todos`,
+# `skipped_tests`, ...) are refused because those are always somebody giving up rather
+# than a module's size, and every move is logged below with what it moved and why.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
 complexity::scripts/hooks/enforce-capped-bash.py::split_top_level = 29
@@ -15,10 +22,9 @@ complexity::scripts/hooks/structure_scan.py::mask_literals = 18
 complexity::scripts/hooks/structure_scan.py::scan_js = 19
 complexity::scripts/lint-all.py::main = 19
 complexity::scripts/sync-devkit.py::main = 69
-complexity::scripts/sync-devkit.py::prune_hook_commands = 17
-definitions::scripts/hooks/harness_config.py = 31
-definitions::scripts/hooks/stop.py = 55
-definitions::scripts/hooks/structure_check.py = 38
+definitions::scripts/hooks/harness_config.py = 32
+definitions::scripts/hooks/stop.py = 51
+definitions::scripts/hooks/structure_check.py = 42
 definitions::scripts/hooks/structure_scan.py = 31
 definitions::scripts/report-workflow-failure.py = 27
 definitions::scripts/sync-devkit.py = 44
@@ -33,16 +39,16 @@ dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::pytest-cov = 1
 dependency::pyproject.toml::ruff = 1
 dependency::pyproject.toml::sqlalchemy = 1
-file_lines::scripts/hooks/enforce-capped-bash.py = 638
-file_lines::scripts/hooks/harness_config.py = 580
-file_lines::scripts/hooks/stop.py = 1172
-file_lines::scripts/hooks/structure_check.py = 904
+file_lines::scripts/hooks/enforce-capped-bash.py = 629
+file_lines::scripts/hooks/harness_config.py = 655
+file_lines::scripts/hooks/stop.py = 1110
+file_lines::scripts/hooks/structure_check.py = 1042
 file_lines::scripts/hooks/structure_scan.py = 669
 file_lines::scripts/report-workflow-failure.py = 614
-file_lines::scripts/sync-devkit.py = 1461
+file_lines::scripts/sync-devkit.py = 1417
 function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/lint-all.py::main = 99
-function_lines::scripts/sync-devkit.py::main = 256
+function_lines::scripts/sync-devkit.py::main = 246
 function_params::scripts/report-workflow-failure.py::apply = 7
 nesting_depth::scripts/hooks/harness_events.py::_main_checkout = 5
 nesting_depth::scripts/hooks/structure_check.py::strongly_connected = 5
@@ -71,3 +77,11 @@ suppressions::scripts/notify-wrap.py = 1
 suppressions::scripts/task_branch.py = 1
 swallowed_errors::scripts/hooks/harness_events.py = 2
 swallowed_errors::scripts/notify.py = 1
+
+# --- recorded growth ------------------------------------------------
+
+# 2026-09-05  recorded: Vendored devkit code at v0.11.14: harness_config.py grew upstream and structure_check.py is new to this repo. Both are byte-identical to devkit and gated by sync-devkit.py --check, so the growth cannot be answered here -- it is devkit's debt to pay.
+#   definitions::scripts/hooks/harness_config.py -> 32
+#   definitions::scripts/hooks/structure_check.py -> 42
+#   file_lines::scripts/hooks/harness_config.py -> 655
+#   file_lines::scripts/hooks/structure_check.py -> 1042

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import datetime
 import os
 import re
 import sys
@@ -110,14 +111,25 @@ REMEDIES: dict[str, str] = {
 BASELINE_HEADER = """\
 # Structural findings the code already had when it adopted the gate.
 #
-# Debt, not configuration. This file may only SHRINK: a new key fails the gate, a
+# Debt, not configuration. This file SHRINKS on its own: a new key fails the gate, a
 # value that grew fails the gate, and a line the code no longer earns fails it too,
 # so fixing a finding forces its line out (`structure_check.py --tighten` does that).
-# Never add or raise a line to make new code pass; fix the code. The one exception
-# is `dependency::` -- adding a package is a line here, so the PR diff shows it.
+# Never add or raise a line to make new code pass; fix the code. `dependency::` is one
+# exception -- adding a package is a line here, so the PR diff shows it.
+#
+# `--record --reason "..."` is the other, and it is the deliberate hole. A module far
+# past `file_lines` cannot gain a line, so a bug whose fix belongs in one has nowhere
+# to go, and the split the finding asks for is a separate body of work. Recording says
+# so out loud: the reason is mandatory, counter rules (`suppressions`, `todos`,
+# `skipped_tests`, ...) are refused because those are always somebody giving up rather
+# than a module's size, and every move is logged below with what it moved and why.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
 """
+
+# What `existing_notes` reads back, and what separates the machine-readable lines above
+# it from the `--record` log below. Both halves are comments to `read_baseline`.
+RECORD_MARKER = "# --- recorded growth ------------------------------------------------\n"
 
 TOOLING_DIRS = frozenset(
     {
@@ -699,7 +711,7 @@ def declared_dependencies(root: Path, cfg: harness_config.Config) -> dict[str, s
     for rel in dict.fromkeys(("package.json", f"{cfg.frontend.dir.strip('/')}/package.json")):
         path = root / rel
         if path.is_file() and (names := _package_json_dependencies(path)):
-            out[rel] = names
+            out[str(PurePosixPath(rel))] = names  # `dir = "."` spells one file two ways
     return out
 
 
@@ -761,8 +773,16 @@ def read_baseline(path: Path) -> dict[str, int]:
     return out
 
 
-def render_baseline(entries: dict[str, int]) -> str:
-    return BASELINE_HEADER + "".join(f"{k} = {entries[k]}\n" for k in sorted(entries))
+def render_baseline(entries: dict[str, int], notes: list[str] | None = None) -> str:
+    """The whole file: header, the sorted findings, then the `--record` log.
+
+    The log goes *after* the entries so the sorted block stays a clean diff -- a note
+    inserted between two lines would move every line under it.
+    """
+    body = BASELINE_HEADER + "".join(f"{k} = {entries[k]}\n" for k in sorted(entries))
+    if not notes:
+        return body
+    return body + "\n" + RECORD_MARKER + "\n" + "\n\n".join(notes) + "\n"
 
 
 def seed(root: Path, cfg: harness_config.Config | None = None) -> int | None:
@@ -795,6 +815,86 @@ def verdict(
     return worse, stale
 
 
+# Rules `--record` will not move, whatever the reason given. Every one of them counts a
+# thing somebody chose to write -- a lint suppression, a deferred-work comment, a skipped
+# test, a swallowed exception -- so "the module is already large" is never the
+# explanation, and the fix is always available. The limit rules are different in kind:
+# `file_lines` on a module twelve times its limit is a fact about a split nobody has
+# done yet, and a bug fix landing in that module cannot be asked to do the split first.
+#
+# Written without the literal tokens those rules match, because this module is scanned
+# by the scanner it configures: naming them here would make this comment a finding.
+UNRECORDABLE = frozenset(scan_mod.COUNTERS)
+
+
+def recordable(worse: list[Finding]) -> tuple[list[Finding], list[Finding]]:
+    """`worse`, split into what `--record` may move and what it must refuse."""
+    allowed = [f for f in worse if f.rule not in UNRECORDABLE]
+    refused = [f for f in worse if f.rule in UNRECORDABLE]
+    return allowed, refused
+
+
+def record(
+    root: Path, cfg: harness_config.Config, reason: str
+) -> tuple[list[Finding], list[Finding]]:
+    """Move the baseline up to what the code now earns, with `reason` written down.
+
+    The deliberate hole in the ratchet, and it exists because the ratchet had none. The
+    baseline pins the *current* `file_lines`, `definitions` and `imports` of modules that
+    are 2x-12x their limits, so those modules cannot gain a line, a function or an import
+    -- and a bug whose fix belongs in one of them has nowhere to go. A `/triage-harness`
+    sweep verified eight live defects and could land two: six were in modules the gate had
+    sealed, one of them blocked by a single `import` statement. The advice the finding
+    prints ("split the module along the seam its imports already show") is right and is
+    also a separate body of work; asking a bug fix to carry a 6000-line module's split is
+    how a gate gets switched off instead.
+
+    Three things keep this from being the laundering `--seed`'s refusal exists to stop.
+    The reason is **mandatory** and non-blank, exactly as `harness_triage --resolve`
+    requires `--note`. Counter rules are refused outright (see `UNRECORDABLE`) -- those
+    are always somebody's decision to give up, never a module's size. And every move is
+    written into the file as a dated comment naming what moved and why, so the PR diff
+    carries the justification rather than a bare number that got bigger.
+
+    Returns `(recorded, refused)`.
+    """
+    if not reason.strip():
+        raise ValueError("--record needs a reason: say why the growth is the honest answer")
+    path = baseline_path(root)
+    worse, _stale = verdict(root, cfg)
+    allowed, refused = recordable(worse)
+    if refused or not allowed:
+        return [], refused
+    entries = read_baseline(path)
+    entries.update({f.key: f.value for f in allowed})
+    stamp = datetime.datetime.now(datetime.UTC).date().isoformat()
+    note = "\n".join(
+        [f"# {stamp}  recorded: {reason.strip()}"]
+        + [f"#   {f.key} -> {f.value}" for f in sorted(allowed, key=lambda f: f.key)]
+    )
+    path.write_text(
+        render_baseline(entries, [*existing_notes(path), note]), encoding="utf-8", newline="\n"
+    )
+    return allowed, []
+
+
+def existing_notes(path: Path) -> list[str]:
+    """The `--record` notes already in the file, so a later one appends rather than wins.
+
+    Read back out of the file rather than kept beside it: a second state file would be
+    one more thing that can disagree with the baseline it annotates, and the whole point
+    of this tier is that one file is the record.
+    """
+    if not path.exists():
+        return []
+    body = path.read_text(encoding="utf-8")
+    _, marker, tail = body.partition(RECORD_MARKER)
+    if not marker:
+        return []
+    blocks = [b.strip("\n") for b in tail.split("\n\n") if b.strip()]
+    return [b for b in blocks if b.startswith("#")]
+
+
 def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:
     """Rewrite the baseline so it is exactly as loose as the code needs and no looser:
     drop lines whose finding is gone, lower values that shrank. `(dropped, lowered)`.
@@ -813,7 +913,10 @@ def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:
         else:
             kept[key] = value
     if dropped or lowered:
-        path.write_text(render_baseline(kept), encoding="utf-8", newline="\n")
+        # The `--record` log is carried through: it explains lines that are still here,
+        # and a tighten that silently dropped it would leave the next reader with raised
+        # numbers and no account of who raised them.
+        path.write_text(render_baseline(kept, existing_notes(path)), encoding="utf-8", newline="\n")
     return dropped, lowered
 
 
@@ -848,6 +951,30 @@ def write_artifact(root: Path, body: str) -> Path:
     return path
 
 
+def run_record(reason: str) -> int | None:
+    """`--record`'s whole branch: an exit code to return, or None to carry on checking.
+
+    Its own function because `main` is one branch under its complexity limit and this is
+    four -- which is the gate doing its job on the change that adds the escape to it.
+    """
+    try:
+        recorded, refused = record(REPO_ROOT, CFG, reason)
+    except ValueError as exc:
+        print(f"structure-check: {exc}")
+        return 2
+    if refused:
+        print("structure-check: these are never a module's size -- fix them, do not record:")
+        for f in refused:
+            print(f"  {describe(f, limits(CFG))}")
+        return 2
+    if not recorded:
+        print(f"structure-check: nothing to record; {BASELINE_NAME} already covers the code.")
+        return 0
+    for f in recorded:
+        print(f"structure-check: recorded {f.key} = {f.value}")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -860,6 +987,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--list", action="store_true", help="print every current finding, recorded or not"
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="raise the baseline to what the code now earns; needs --reason",
+    )
+    parser.add_argument(
+        "--reason", default="", help="with --record: why the growth is the honest answer"
     )
     args = parser.parse_args(argv)
 
@@ -881,6 +1016,9 @@ def main(argv: list[str] | None = None) -> int:
         for f in findings(REPO_ROOT, CFG):
             print(describe(f, limits(CFG)))
         return 0
+
+    if args.record and (code := run_record(args.reason)) is not None:
+        return code
 
     if args.tighten:
         dropped, lowered = tighten(REPO_ROOT, CFG)

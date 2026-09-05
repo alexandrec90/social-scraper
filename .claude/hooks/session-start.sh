@@ -11,6 +11,28 @@
 # `report_missing_toolchain` carries why that line is not the same as the ladder below.
 set -uo pipefail
 
+# --- The harness kill switch ---------------------------------------------------
+# `DEVKIT_HOOKS_OFF` is parsed by `harness_config.hooks_off`, never re-implemented here:
+# a second copy of the aliases and the off-values asymmetry in shell is exactly the drift
+# the manifest CLI exists to prevent. The `-n` pre-check is not an optimisation for its
+# own sake -- with the switch unset (the normal state) it costs nothing, so leaving the
+# harness on never pays for the ability to turn it off.
+#
+# NB this also skips `wire_pre_commit` below, deliberately: switching the agent harness
+# off while a commit-time gate goes on installing itself at every session start is the
+# half-off state nobody asked for. `pre-commit install` by hand restores it.
+#
+# **A REMOTE session is never switched off.** Below the local branch this file is not a
+# check at all -- it is the only thing that installs the toolchain into a Claude Code on
+# the web sandbox, which starts empty every time. Honouring the switch there would answer
+# "stop gating my sessions" with "your cloud session has no ruff, mypy or pytest", a
+# failure that reads as a broken sandbox rather than as a setting. The switch turns off
+# things that *judge*; it may not turn off the thing that provisions.
+if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ] && [ -n "${DEVKIT_HOOKS_OFF:-}" ] &&
+  python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/harness_config.py" --hook-off session-start 2>/dev/null; then
+  exit 0
+fi
+
 # --- The pre-commit gate, wired for BOTH session kinds -------------------------
 # `.git/hooks/` is not committed, so a fresh clone has the config file and none of the
 # hooks it describes — the gate silently does not exist until someone runs
@@ -245,6 +267,43 @@ uv_pin="$(sed -nE 's/^uv==([^ ;]+).*/\1/p' requirements-dev.txt 2>/dev/null | he
   || echo "[session-start] WARN: uv bootstrap failed — dependency install may fail"
 uv_run="./.venv/bin/python -m uv"
 
+# The interpreter the project is pinned to, from `[python] version`. The venv above is
+# whatever `python3` happens to be — the sandbox default — and `python -m venv`
+# structurally cannot be anything else, since it can only ever copy the interpreter
+# running it. So a project pinned to 3.12 across its `FROM python:` tag, its locks,
+# mypy.ini and CI got a 3.14 venv and was reported as provisioned; the mismatch surfaces
+# later as a resolution or type-check failure that reads as broken code rather than as
+# the wrong interpreter. `worktree.venv_step` fixed exactly this for boxes and this file
+# never got the matching change.
+#
+# uv is what can honour a pin, because it *fetches* the version. It has to be bootstrapped
+# into a venv first, and rebuilding that venv underneath it is safe here for the reason it
+# is safe anywhere on POSIX: the running interpreter already has its files open. The pip
+# bootstrap is repeated because the rebuilt venv is empty.
+#
+# The manifest field only. `worktree.detect_python_version` also reads a pin off
+# `.python-version` or a `FROM python:` tag, and that helper is not vendored — so a
+# project that pins its interpreter only in its build files is still provisioned on the
+# default here. Reimplementing the detection in shell would be a second copy free to
+# drift from the one boxes use; moving it into `harness_config.py` is the fix, and it is
+# its own change.
+py_pin="$(python3 scripts/hooks/harness_config.py python.version 2>/dev/null)"
+venv_version="$(sed -nE 's/^version(_info)? *= *([0-9]+\.[0-9]+).*/\2/p' .venv/pyvenv.cfg 2>/dev/null | head -n 1)"
+if [ -n "$py_pin" ] && [ "$py_pin" != "$venv_version" ]; then
+  echo "[session-start] .venv is on ${venv_version:-an unknown version}; rebuilding on the pinned $py_pin"
+  if $uv_run venv --python "$py_pin" .venv; then
+    ./.venv/bin/python -m pip install --quiet --disable-pip-version-check \
+      "uv${uv_pin:+==${uv_pin}}" \
+      || echo "[session-start] WARN: uv bootstrap failed after the rebuild — dependency install may fail"
+  else
+    echo "[session-start] WARN: could not rebuild .venv on python $py_pin — continuing on ${venv_version:-the default}"
+  fi
+fi
+# Passed to every installer below that accepts it. `requires-python` in a lock is a
+# floor, not a pin, so a project pinned to 3.12 resolves happily on 3.14 without this.
+py_pin_arg=""
+[ -n "$py_pin" ] && py_pin_arg="--python $py_pin"
+
 install_command="$(python3 scripts/hooks/harness_config.py python.install_command 2>/dev/null)"
 if [ -n "$install_command" ]; then
   echo "[session-start] install: .devkit.toml install_command"
@@ -255,7 +314,8 @@ elif [ -f uv.lock ]; then
   # --all-extras --all-groups because the lint/test toolchain lives in extras or
   # dependency-groups depending on the project, and we need it either way.
   echo "[session-start] install: uv sync (uv.lock)"
-  $uv_run sync --all-extras --all-groups \
+  # shellcheck disable=SC2086 # $py_pin_arg is two words or none, by construction
+  $uv_run sync --all-extras --all-groups $py_pin_arg \
     || echo "[session-start] WARN: uv sync failed — ruff/mypy/pytest may be unavailable"
 elif [ -f requirements-dev.txt ]; then
   # pip-tools model: fully-pinned compiled locks, runtime + dev together.

@@ -24,6 +24,8 @@ Pure and unit-tested in `scripts/hooks/tests/test_harness_config.py`.
 from __future__ import annotations
 
 import contextlib
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -571,10 +573,83 @@ def lookup(cfg: Config, dotted: str) -> str:
     return "" if isinstance(node, (dict, list, tuple)) else str(node)
 
 
+# --- The harness kill switch -------------------------------------------------
+#
+# `DEVKIT_HOOKS_OFF` switches hooks off from the **environment**, so one line in a
+# `settings.json` `env` block quietens the harness across every project at once and
+# deleting that line restores it. The alternative — stripping hook entries out of each
+# project's `.claude/settings.json` — is N files to edit and N files to reconstruct from
+# memory later, which is not a switch anyone flips twice. It is read here rather than in
+# each hook so the spelling, the "all" aliases and the off-values asymmetry have one
+# owner.
+#
+# **The branch tier is switchable too, and that is a deliberate reversal.**
+# `worktree-guard.py` — which routes an agent edit into a box on a task branch — and
+# `task_slug.py`, which names it, were exempt from this switch on the reasoning that
+# turning them off does not quieten a session, it lands agent work on a checkout's home
+# branch with nothing under it. That argument held only while the hooks were the *only*
+# thing that could cut the branch. They no longer are: devkit's workspace carries a task
+# per verb — cut the box, open an agent in it, ship it, destroy it — so an operator who
+# stands the tier down is choosing to drive it by hand rather than losing it. That tier is
+# devkit's, not every project's, which is why this comment describes the *reversal* rather
+# than naming a script a consumer does not have.
+#
+# The two share one name, `branch-tier`, rather than one each. They are halves of a
+# single mechanism — the slug exists to name the box the guard cuts — and the vendored
+# tier can only see one of them anyway: consumers run `worktree-guard-launch.py` and
+# have no copy of `task_slug.py` at all.
+HOOKS_OFF_ENV = "DEVKIT_HOOKS_OFF"
+
+# Every hook the switch reaches, spelled as it is written in the env var. Listing them
+# is what makes `DEVKIT_HOOKS_OFF=stop` a typo-checkable value rather than a guess, and
+# what lets the harness be re-enabled one hook at a time — the order it will actually
+# come back in, since the Stop gate is the expensive one and `lint-fix` is nearly free.
+SWITCHABLE_HOOKS = (
+    "session-start",
+    "capped-bash",
+    "lint-fix",
+    "stop",
+    "failure-retro",
+    "branch-tier",
+)
+
+# Anything meaning "every hook in `SWITCHABLE_HOOKS`". A bare `=1` is what an operator
+# reaches for first, so it has to mean the obvious thing.
+_ALL_HOOKS = frozenset({"1", "all", "*", "true", "yes", "on"})
+
+# Values that read as "off" to a human must not switch the harness off — the same
+# asymmetry `git_policy.SKIP_ENV_VAR` documents, for the same reason: someone who writes
+# `DEVKIT_HOOKS_OFF=0` means "leave the hooks running", and honouring it as "off" would
+# disable the harness for the person trying to turn it back on.
+_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def hooks_off(name: str, env: Mapping[str, str] | None = None) -> bool:
+    """True when `DEVKIT_HOOKS_OFF` names `name`, or names every hook.
+
+    Asked at the top of a hook's `main()`, before anything else runs — deliberately
+    *before* `load()`, so a project whose `.devkit.toml` is broken can still be
+    quietened. Never raises and never touches the filesystem for the same reason.
+    """
+    raw = (os.environ if env is None else env).get(HOOKS_OFF_ENV, "") or ""
+    if raw.strip().lower() in _OFF_VALUES:
+        return False
+    tokens = {token.strip().lower() for token in raw.replace(";", ",").split(",")}
+    return bool(tokens & _ALL_HOOKS) or name.strip().lower() in tokens
+
+
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in tests
     # `python3 scripts/hooks/harness_config.py python.install_command` -> stdout.
     # Exists so `.claude/hooks/session-start.sh` can read the manifest without a
     # TOML parser in shell. Always exits 0: a hook must not die over config.
     import sys
 
-    print(lookup(load(Path.cwd()), sys.argv[1]) if len(sys.argv) > 1 else "")
+    argv = sys.argv[1:]
+    if argv[:1] == ["--hook-off"]:
+        # `--hook-off session-start` -> exit 0 when that hook is switched off, 1 when it
+        # is live. An exit code rather than stdout because the only caller is
+        # `session-start.sh`, where `if ... --hook-off session-start; then exit 0; fi` is
+        # the whole of what it needs. This arm is the one that may exit non-zero; the
+        # lookup arm below still must not, per the note above.
+        sys.exit(0 if len(argv) > 1 and hooks_off(argv[1]) else 1)
+    print(lookup(load(Path.cwd()), argv[0]) if argv else "")

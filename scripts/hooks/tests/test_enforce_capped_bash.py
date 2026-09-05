@@ -147,6 +147,34 @@ def test_the_bounded_spellings_of_a_noisy_git_command_allow(command):
     assert allows(command)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git show HEAD:README.md | sed -n '1,80p'",
+        "git diff | sed -n 20,40p",
+    ],
+)
+def test_a_numeric_sed_range_bounds_a_noisy_git_command(command):
+    """The range fixes the maximum number of emitted lines just as `head -n` does."""
+    assert allows(command)
+
+
+def test_ls_of_one_existing_regular_file_is_bounded(tmp_path):
+    """A named file emits one entry; only a directory operand scales with its contents."""
+    log = tmp_path / "run.log"
+    log.write_text("output\n", encoding="utf-8")
+    body = json.loads(payload("Bash", "ls -la run.log"))
+    body["cwd"] = str(tmp_path)
+    assert hook.decide(json.dumps(body), max_bytes=4000)[0] == 0
+
+
+def test_ls_of_one_existing_directory_still_blocks(tmp_path):
+    body = json.loads(payload("Bash", "ls -la nested"))
+    body["cwd"] = str(tmp_path)
+    (tmp_path / "nested").mkdir()
+    assert hook.decide(json.dumps(body), max_bytes=4000)[0] == hook.EXIT_BLOCK
+
+
 def test_a_counted_log_asked_for_patches_still_blocks():
     """`-p` revokes what the count earned -- one commit's diff has no bound of its own."""
     assert blocks("git log --oneline -5 -p")
@@ -429,10 +457,17 @@ def test_the_powershell_message_names_native_caps_only():
 
 
 def ledger_lines(base):
-    path = base / "logs" / "harness-events.log"
-    if not path.exists():
-        return []
-    return path.read_text(encoding="utf-8").splitlines()
+    """Every ledger line, across every shard -- the ledger is one file per machine.
+
+    Reading the single unsharded name found nothing once the writers moved to a shard,
+    and the `return []` below turned every assertion built on this into one that passes
+    against an empty list.
+    """
+    lines = []
+    for path in sorted((base / "logs").glob("harness-events*.log")):
+        if path.is_file():
+            lines.extend(path.read_text(encoding="utf-8").splitlines())
+    return lines
 
 
 def test_record_block_writes_session_and_command(tmp_path, monkeypatch):

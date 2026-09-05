@@ -33,6 +33,9 @@ reads the workspace lease file and verifies the box this session holds; with no 
 file, no entry, or no box tier at all — which is every consuming project — it is
 `REPO_ROOT` exactly as before.
 
+**And a session that wrote nothing is never blocked on what it found** —
+`stop_session.session_wrote_nothing`, which owns that claim and the incident behind it.
+
 **It runs up to `MAX_VERIFY_ROUNDS` rounds, blocking on all but the last.**
 `stop_hook_active` is a boolean, so honouring it alone meant verification ran on the
 first stop only: the agent was told what was broken, "fixed" it, stopped again, and the
@@ -78,6 +81,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_config
+import stop_session
 import task_branch
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
@@ -314,103 +318,18 @@ def verify_enabled(env: Mapping[str, str]) -> bool:
 
 # --- Which tree this stop verifies -----------------------------------------
 #
-# `REPO_ROOT` is where *this file* lives, and for a whole class of session that is not
-# where the work is. Claude Code resolves the hook command through `CLAUDE_PROJECT_DIR`,
-# which is the session's static checkout, so an agent whose every edit was routed into an
-# ephemeral box got a Stop gate pointed at a checkout it never touched: it verified
-# whatever branch that checkout happened to be parked on, and blocked on failures
-# belonging to somebody else's work. That is not a hypothetical -- a session whose PR gate
-# was fully green was blocked twice by two failures on the checkout's `release/…` branch,
-# with no edit of its own anywhere in the tree being checked.
-#
-# The box tier is a *workspace* facility rather than a project one, so the lookup below is
-# the stdlib-only half of it: read the lease file, match on the session id, take the
-# directory. `worktree.py` owns these names, and a hook cannot import it -- hooks run
-# before a venv exists and from a checkout that has no workspace scripts at all. The
-# duplication is the same trade `harness_events.BOX_NAME_SEP` makes, for the same reason.
-#
-# **Absence is the ordinary case, not an error.** Every consuming project has no
-# `.worktrees/` at all; so does a CI runner, a fresh clone, and any session working
-# directly in its checkout. All of them fall through to `REPO_ROOT` and behave exactly as
-# they did before this existed.
-BOXES_DIR_NAME = ".worktrees"
-LEASE_FILE_NAME = "leases.json"
-# `worktree.SESSION_PREFIX_MIN`: a box cut by hand carries `--session <first 8 hex>`, and
-# the abbreviation has to keep naming the session that abbreviated it.
-SESSION_PREFIX_MIN = 8
-# Only a task box holds a session's work. A `preview` box is a throwaway copy of somebody
-# else's branch, brought up to be looked at in a browser -- verifying it would block this
-# session on a tree it did not write and cannot fix.
-BOX_KIND_TASK = "task"
-
-
-def session_id(raw_stdin: str) -> str:
-    """The session id from the hook payload, or '' when there is none to read."""
-    try:
-        payload = json.loads(raw_stdin)
-    except (json.JSONDecodeError, TypeError):
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    value = payload.get("session_id")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def sessions_match(recorded: str, session: str) -> bool:
-    """Does a lease's session id name this session?
-
-    Exact, or either id a prefix of the other with the shorter side at least
-    `SESSION_PREFIX_MIN` characters. Mirrors `worktree.sessions_match` -- see the note
-    above for why this is a copy rather than an import.
-    """
-    if not recorded or not session:
-        return False
-    if recorded == session:
-        return True
-    short, long = sorted((recorded, session), key=len)
-    return len(short) >= SESSION_PREFIX_MIN and long.startswith(short)
-
-
-def session_box(session: str, repo_root: Path = REPO_ROOT) -> Path | None:
-    """The ephemeral box holding this session's work for `repo_root`, or None.
-
-    Best-effort by contract, in every direction: no lease file, unreadable JSON, an
-    entry whose directory has since been reaped, no session id on the payload -- each
-    returns None, and the caller verifies the checkout as before. A Stop gate must never
-    fail *because* of this lookup; the worst it may do is decline to improve on the
-    default.
-    """
-    if not session:
-        return None
-    project = repo_root.name
-    try:
-        raw = (repo_root.parent / BOXES_DIR_NAME / LEASE_FILE_NAME).read_text(encoding="utf-8")
-        boxes = json.loads(raw).get("boxes", {})
-        if not isinstance(boxes, dict):
-            return None
-        for name, lease in boxes.items():
-            if not isinstance(lease, dict):
-                continue
-            if lease.get("project") != project:
-                continue
-            if lease.get("kind", BOX_KIND_TASK) != BOX_KIND_TASK:
-                continue
-            if not sessions_match(str(lease.get("session", "")), session):
-                continue
-            path = repo_root.parent / BOXES_DIR_NAME / name
-            # A husk -- a box whose `git worktree remove` died partway -- is a directory
-            # with no `.git`, and every check below would run against a tree git has
-            # stopped tracking. Fall back to the checkout instead.
-            if (path / ".git").exists():
-                return path
-    except (OSError, ValueError, AttributeError):
-        return None
-    return None
-
-
-def verify_root(raw_stdin: str, repo_root: Path = REPO_ROOT) -> Path:
-    """The tree this stop should verify: the session's box when it has one."""
-    return session_box(session_id(raw_stdin), repo_root) or repo_root
+# Both tiers live in `stop_session.py`, which is where the reasoning for each is too:
+# this module was at the ceiling `.devkit-structure.txt` records for it, and neither tier
+# knows anything about the gate's checks or its verdict. Re-exported rather than reached
+# through the module, so every name this file has published stays published.
+BOXES_DIR_NAME = stop_session.BOXES_DIR_NAME
+LEASE_FILE_NAME = stop_session.LEASE_FILE_NAME
+SESSION_PREFIX_MIN = stop_session.SESSION_PREFIX_MIN
+BOX_KIND_TASK = stop_session.BOX_KIND_TASK
+session_id = stop_session.session_id
+sessions_match = stop_session.sessions_match
+session_box = stop_session.session_box
+verify_root = stop_session.verify_root
 
 
 def _repo_script(root: Path, default: Path) -> Path:
@@ -1051,6 +970,7 @@ def _print_verify_failures(
     failures: list[tuple[str, str | None, str]],
     blocking: bool = True,
     root: Path = REPO_ROOT,
+    foreign: bool = False,
 ) -> None:
     """Status line plus artifact paths -- never the failure text itself.
 
@@ -1062,6 +982,11 @@ def _print_verify_failures(
     ran = [name for name, _artifact, _tail in failures if name not in stopped]
     if blocking:
         verdict = "Pre-stop verification found issues that would fail CI -- fix before finishing:"
+    elif foreign:
+        verdict = (
+            "Pre-stop verification failed, but this session wrote no files -- these belong "
+            "to whatever else is working in this tree. Not blocking, and not yours to fix:"
+        )
     elif ran:
         verdict = (
             f"Pre-stop verification still failing after {MAX_VERIFY_ROUNDS} attempts. "
@@ -1131,6 +1056,14 @@ def verify(raw_stdin: str, env: Mapping[str, str]) -> int:
         _print_verify_failures(failures, blocking=False, root=root)
         return 0
 
+    # A session that wrote no files did not cause these, and cannot be the one to fix
+    # them: the checkout is shared, and something else is working in it. Reported so the
+    # red tree is still visible, never blocked on. See `stop_session`.
+    if stop_session.session_wrote_nothing(raw_stdin):
+        write_rounds(0, root)
+        _print_verify_failures(failures, blocking=False, foreign=True, root=root)
+        return 0
+
     rounds_used = blocked_rounds(read_rounds(root), stop_hook_active(raw_stdin))
     if not should_block(rounds_used):
         write_rounds(0, root)
@@ -1142,6 +1075,11 @@ def verify(raw_stdin: str, env: Mapping[str, str]) -> int:
 
 
 def main() -> int:
+    # Before stdin, before git, before the frontend typecheck: an operator who has
+    # switched this gate off is not waiting on any of it. See `harness_config.hooks_off`.
+    if harness_config.hooks_off("stop"):
+        return 0
+
     raw_stdin = _read_stdin()
 
     root = verify_root(raw_stdin, REPO_ROOT)

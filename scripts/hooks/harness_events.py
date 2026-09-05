@@ -28,6 +28,10 @@ Where the ledger lives decides who can write to it, and there are two callers:
   there is no "stamped but unset" failure mode here: silence is always the right
   degradation.
 
+That checkout holds **one shard per machine** rather than one file: `record` appends to
+`harness-events-<host>.log` and the read half unions every `harness-events*.log` beside
+it. `HOST_ENV` above carries why, and why the host is not part of a defect's identity.
+
 Event names and their fields belong to the writers; this module only owns the format.
 `record` never raises -- it is called from hooks on paths where they are already
 reporting something else, and from blocking flows that must still block.
@@ -40,11 +44,22 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import os
+import platform
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-LEDGER = Path("logs") / "harness-events.log"
+LEDGER_DIR = Path("logs")
+LEDGER_STEM = "harness-events"
+
+# Every shard the read half unions. Matches the legacy name below as well as any
+# `harness-events-<host>.log`, so a machine that syncs its `logs/` in beside another's
+# is read without either of them being told about the other.
+LEDGER_GLOB = f"{LEDGER_STEM}*.log"
+
+# The unsharded name every row was written to before a machine had one of its own. Kept
+# readable forever -- the ledger is append-only, and that history is most of it.
+LEDGER = LEDGER_DIR / f"{LEDGER_STEM}.log"
 
 # The repo this copy is vendored into -- devkit itself, when nobody vendored it. Read by
 # `ledger_path` on the branch where `$DEVKIT_DIR` says nothing.
@@ -108,6 +123,68 @@ BOX_NAME_SEP = "--"
 ADAPTER_ENV = "DEVKIT_HOOK_ADAPTER"
 NATIVE_AGENT = "claude"
 UNKNOWN_AGENT = "unknown"
+
+
+# Which machine wrote a row, and which file it wrote it to.
+#
+# One ledger per machine was correct while there was one machine. Working the same
+# projects from two of them makes it wrong in both directions: a defect filed on the
+# laptop is invisible to a triage pass on the desktop, and -- worse, because it is
+# silent -- a resolution is itself an event, so a group fixed and retired on one machine
+# stays open on the other forever. The second machine re-verifies, and may re-fix, work
+# that already shipped.
+#
+# Pooling wants a single directory that both machines write into, which a single file
+# cannot survive: two hosts appending to one synced `harness-events.log` is the case
+# every file-sync tool resolves by making conflict copies. So the *filename* carries the
+# host and each machine only ever appends to its own, which makes the pooled directory
+# conflict-free for any transport -- a synced folder, a private repo, an rsync.
+#
+# `host=` on the row is the other half, and it is deliberately **not** in
+# `harness_triage.Item.signature`: one defect hit on both machines is one defect, and a
+# single `--resolve-like` has to retire both machines' copies of it. That is the whole
+# point of pooling, and putting the host in the signature would undo it. Which hosts a
+# group was seen on is triage evidence -- `render` shows it -- not identity.
+HOST_ENV = "DEVKIT_HOST"
+UNKNOWN_HOST = "unknown-host"
+
+# The host goes in a filename, so it is reduced to what is portable in one: ASCII
+# alphanumerics and dashes. The cap is against a pathological name, not an opinion --
+# a corporate hostname can be long, and the shard still has to be a legal path.
+HOST_LIMIT = 32
+
+
+def host_slug(raw: object) -> str:
+    """`raw` reduced to a filename-safe token, or `""` when nothing survives.
+
+    ASCII-only on purpose: `str.isalnum` is true for accented and CJK characters, which
+    are legal in a filename and a poor thing to have decide whether two machines'
+    shards collide after a round trip through a sync tool that normalises them.
+    """
+    kept = "".join(c if (c.isascii() and c.isalnum()) else "-" for c in str(raw).strip().lower())
+    while "--" in kept:
+        kept = kept.replace("--", "-")
+    return kept.strip("-")[:HOST_LIMIT].strip("-")
+
+
+def host_name(env: Mapping[str, str] | None = None) -> str:
+    """This machine's name for the ledger: `$DEVKIT_HOST`, else the hostname.
+
+    The override exists because the hostname is not always the name a person thinks of
+    the machine by, and because a shard filename is durable -- renaming a machine should
+    not silently start a second shard that reads as a third machine.
+    """
+    source = os.environ if env is None else env
+    raw = (source.get(HOST_ENV, "") or "").strip()
+    if not raw:
+        with contextlib.suppress(Exception):  # pragma: no branch - platform-dependent
+            raw = platform.node()
+    return host_slug(raw) or UNKNOWN_HOST
+
+
+def ledger_name(env: Mapping[str, str] | None = None) -> str:
+    """The shard filename this machine appends to."""
+    return f"{LEDGER_STEM}-{host_name(env)}.log"
 
 
 def agent_name(env: Mapping[str, str] | None = None) -> str:
@@ -200,8 +277,12 @@ def _own_checkout_is_devkit() -> bool:
     return harness_config.is_devkit_source(REPO_ROOT)
 
 
-def ledger_path(root: Path | None = None) -> Path | None:
-    """Where this machine's ledger is, or None when it has none.
+def ledger_root(root: Path | None = None) -> Path | None:
+    """The checkout whose `logs/` holds the ledger, or None when there is none.
+
+    Split out of `ledger_path` when the ledger became one file per machine: resolving
+    *which checkout* is unchanged and is what every caller shared, while the filename
+    below is now the part that varies.
 
     `root` is for callers that already know the devkit checkout; without it the answer
     comes from `$DEVKIT_DIR`.
@@ -215,14 +296,40 @@ def ledger_path(root: Path | None = None) -> Path | None:
     itself if it *is* devkit, and keeps quiet if it is not.
     """
     if root is not None:
-        return root / LEDGER
+        return root
     devkit = os.environ.get("DEVKIT_DIR", "").strip()
     if not devkit:
-        return _main_checkout(REPO_ROOT) / LEDGER if _own_checkout_is_devkit() else None
+        return _main_checkout(REPO_ROOT) if _own_checkout_is_devkit() else None
     base = Path(devkit)
     if not base.is_dir():
         return None
-    return base / LEDGER
+    return base
+
+
+def ledger_path(root: Path | None = None) -> Path | None:
+    """The shard this machine appends to, or None when it has no ledger at all."""
+    base = ledger_root(root)
+    return None if base is None else base / LEDGER_DIR / ledger_name()
+
+
+def ledger_paths(root: Path | None = None) -> list[Path]:
+    """Every shard the read half should union, this machine's included.
+
+    The write target is always in the list even before it exists, so a caller can report
+    "nothing open" against a real path rather than against nothing. Everything else in
+    the list is whatever is present: the legacy unsharded file, and any other machine's
+    shard that a sync has dropped in beside it.
+
+    Never raises, for `record`'s reasons -- an unreadable `logs/` degrades to this
+    machine's own shard rather than taking a hook down with it.
+    """
+    target = ledger_path(root)
+    if target is None:
+        return []
+    found = {target}
+    with contextlib.suppress(OSError):
+        found.update(p for p in target.parent.glob(LEDGER_GLOB) if p.is_file())
+    return sorted(found)
 
 
 def record(
@@ -234,16 +341,19 @@ def record(
     failing *their* work over bookkeeping would invert the priorities this file exists
     to serve.
 
-    `agent=` is stamped **here** rather than passed by each writer, for the reason the
-    workspace states as a rule: a remedy that depends on every caller remembering is the
-    same defect again. Several writers reach this ledger and most of them have no reason
-    to know what a hook adapter is. A caller recording an event on some *other* runtime's
-    behalf passes its own `agent` field, and that one is kept.
+    `agent=` and `host=` are stamped **here** rather than passed by each writer, for the
+    reason the workspace states as a rule: a remedy that depends on every caller
+    remembering is the same defect again. Several writers reach this ledger and most of
+    them have no reason to know what a hook adapter is, or that the machine they are on
+    is one of several. A caller recording an event on some *other* runtime's or machine's
+    behalf passes its own `agent` or `host` field, and that one is kept.
     """
     try:
         path = ledger_path(root)
         if path is None:
             return None
+        if not any(key == "host" for key, _ in fields):
+            fields = (("host", host_name()), *fields)
         if not any(key == "agent" for key, _ in fields):
             fields = (("agent", agent_name()), *fields)
         stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
