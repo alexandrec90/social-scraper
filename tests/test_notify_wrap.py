@@ -29,6 +29,10 @@ def _load(rel: str):
     dataclass inside it can resolve its own annotations."""
     path = REPO_ROOT / rel
     spec = importlib.util.spec_from_file_location(path.stem.replace("-", "_"), path)
+    # `spec_from_file_location` is typed `ModuleSpec | None` and a loaderless spec is
+    # possible for a path importlib cannot handle. Asserting names the failure here
+    # rather than as an AttributeError three lines down.
+    assert spec is not None and spec.loader is not None, f"cannot load {rel}"
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
