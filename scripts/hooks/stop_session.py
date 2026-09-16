@@ -12,7 +12,13 @@ exists — and, for the lease half, from a checkout that has no workspace script
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+# Where each agent CLI cuts a `--worktree` checkout. Imported plainly, the way every hook
+# imports `harness_config`: both files are in one `MANIFEST` and arrive in one `--pull`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import worktree_tiers
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 
@@ -37,6 +43,10 @@ REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 # `.worktrees/` at all; so does a CI runner, a fresh clone, and any session working
 # directly in its checkout. All of them fall through to `REPO_ROOT` and behave exactly as
 # they did before this existed.
+# `claude --worktree <name>`, `codex --worktree` and the harness quick-pick all cut a
+# worktree and register the result nowhere. Where each of them puts one is
+# `worktree_tiers.TIERS`, imported above rather than spelled here: Claude's lands inside
+# the checkout and Codex's outside it, so there is no one directory name to name.
 BOXES_DIR_NAME = ".worktrees"
 LEASE_FILE_NAME = "leases.json"
 # `worktree.SESSION_PREFIX_MIN`: a box cut by hand carries `--session <first 8 hex>`, and
@@ -119,9 +129,73 @@ def session_box(session: str, repo_root: Path = REPO_ROOT) -> Path | None:
     return None
 
 
+def payload_cwd(raw_stdin: str) -> Path | None:
+    """The working directory the hook payload reports, or None when it reports none."""
+    value = payload(raw_stdin).get("cwd")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value.strip())
+
+
+def cli_worktree(cwd: Path | None, repo_root: Path = REPO_ROOT) -> Path | None:
+    """The agent-CLI worktree `cwd` sits in, when it sits in one cut from `repo_root`.
+
+    The second worktree tier, and the one `session_box` structurally cannot see. A box
+    cut by `worktree.py` is a sibling of the checkout and announces itself in a lease
+    file; a worktree cut by `claude --worktree`, by `codex --worktree` or by the
+    harness's own quick-pick is registered nowhere and carries no session id anywhere a
+    hook could read. So this asks the only question that has an answer: is the session's
+    own cwd inside one?
+
+    That is not hypothetical. A session working in `.claude/worktrees/devkit-320` had its
+    Stop gate verify the primary checkout instead, and was blocked on that checkout's
+    unrelated uncommitted work plus a broken venv over there -- failures the session could
+    not have caused and must not fix, on a branch whose own tests all passed.
+
+    **`repo_root` is checked against the worktree's owner, not against its prefix.** That
+    was the same test while Claude's nested tier was the only one: a worktree under
+    `<repo_root>/.claude/worktrees/` is `repo_root`'s by construction. Codex cuts outside
+    the checkout, so a prefix test finds nothing there and a session in one would have
+    its Stop gate aimed back at the static checkout -- the exact failure above, restored
+    by a runtime that did not exist when it was fixed.
+
+    `cwd` rather than `os.getcwd()`: the hook's own process is started wherever Claude
+    Code starts it, and `CLAUDE_PROJECT_DIR` is exactly the answer that is wrong here.
+    The `.git` check is the husk guard `session_box` makes for the same reason -- a
+    directory git has stopped tracking is not a tree worth verifying.
+    """
+    if cwd is None:
+        return None
+    try:
+        resolved = cwd.resolve()
+        root = repo_root.resolve()
+    except OSError:
+        return None
+    for candidate in (resolved, *resolved.parents):
+        owner = worktree_tiers.owning_checkout(candidate)
+        if owner is None:
+            continue
+        # Case-folded rather than `==`: `resolve()` has run on both, so the last
+        # difference that can remain is the one Windows makes -- git writes `C:/Users/...`
+        # into a worktree's `.git` pointer while the hook's own `__file__` may arrive as
+        # `c:/users/...`, and comparing `Path`s directly calls those two directories.
+        if not worktree_tiers.same_dir(owner, root):
+            return None
+        return candidate if (candidate / ".git").exists() else None
+    return None
+
+
 def verify_root(raw_stdin: str, repo_root: Path = REPO_ROOT) -> Path:
-    """The tree this stop should verify: the session's box when it has one."""
-    return session_box(session_id(raw_stdin), repo_root) or repo_root
+    """The tree this stop should verify: the session's own worktree when it has one.
+
+    The lease file is asked first because it is the stronger claim -- it names the
+    session, where the cwd tier only observes where the session happens to be standing.
+    """
+    return (
+        session_box(session_id(raw_stdin), repo_root)
+        or cli_worktree(payload_cwd(raw_stdin), repo_root)
+        or repo_root
+    )
 
 
 def transcript_path(raw_stdin: str) -> Path | None:

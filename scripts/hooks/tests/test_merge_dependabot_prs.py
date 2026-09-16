@@ -15,9 +15,10 @@ when `gh pr merge` hit a GraphQL 503, and nothing ever retried them.
 """
 
 import json
+import re
 from types import SimpleNamespace
 
-from conftest import load_module
+from conftest import REPO_ROOT, load_module
 
 merger = load_module("scripts/merge-dependabot-prs.py")
 
@@ -274,3 +275,120 @@ def test_a_failed_api_call_surfaces_with_its_stderr():
         assert "503" in str(error)
     else:
         raise AssertionError("a failed listing must not read as 'no PRs to merge'")
+
+
+# --- the workflow's token must cover the API surface ------------------------------
+
+
+# The regression these pin: `blocking_checks` arrived in bd11890 reading
+# `commits/{sha}/check-runs`, and nothing added `checks: read` to the workflow that runs
+# it. A `permissions:` block grants *only* what it lists, so the omission did not narrow
+# the sweep's evidence -- it made every scheduled pass that reached a candidate PR die on
+# `HTTP 403: Resource not accessible by integration`, and the retry for stranded
+# auto-merges had not run since in any repo holding an `automerge` PR.
+#
+# `scheduled-failure-issue.yml` reported it correctly and immediately -- one repo's issue
+# had been open for over a month, updated hourly -- which is worth stating because it
+# locates the gap precisely. Nothing here failed to *notice*. What was missing was the
+# thing that would have made the bug impossible to ship: the permission a call needs is
+# not in the file you add the call to, and no test spanned the two.
+#
+# Deriving the routes from the source rather than listing them is the whole point. A test
+# that pinned today's five paths would pass the day a sixth is added -- which is exactly
+# how the fifth got in.
+
+# Every REST route this script reaches, normalised to its path shape, mapped to the
+# token scopes GitHub requires for it. A route the script calls and this table does not
+# name fails the test outright: adding an endpoint is the moment to decide what it needs,
+# and the workflow is not in the file you are editing when you add one.
+ROUTE_SCOPES = {
+    # The gate's verdict on a head SHA, which is a workflow run.
+    "actions/runs": {("actions", "read")},
+    # Anything *else* wired onto the PR -- a lock repair, a licence scan.
+    "commits/*/check-runs": {("checks", "read")},
+    # Listing and reading open PRs.
+    "pulls": {("pull-requests", "read")},
+    "pulls/*": {("pull-requests", "read")},
+    # Merging writes a commit to the base branch and closes the PR.
+    "pulls/*/merge": {("contents", "write"), ("pull-requests", "write")},
+}
+
+# GitHub's own ordering. `write` implies `read`; an unlisted scope is `none`.
+LEVELS = {"none": 0, "read": 1, "write": 2}
+
+AUTOMERGE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "dependabot-automerge.yml"
+
+
+def called_routes() -> set[str]:
+    """The REST routes `merge-dependabot-prs.py` builds, as path shapes.
+
+    Read off the source text, not by importing and calling: a route reached only on a
+    branch these tests do not drive is still a route the token has to cover.
+    """
+    source = (REPO_ROOT / "scripts" / "merge-dependabot-prs.py").read_text(encoding="utf-8")
+    routes = set()
+    for raw in re.findall(r"repos/\{repo\}/([^\"']+)", source):
+        path = raw.split("?", 1)[0].rstrip("/")
+        # `{sha}`, `{number}` -- the variable segments are not part of the route's shape.
+        routes.add("/".join("*" if "{" in part else part for part in path.split("/")))
+    return routes
+
+
+def granted_permissions() -> dict[str, str]:
+    """The workflow's top-level `permissions:` block, as `{scope: level}`.
+
+    Stdlib text parsing, no PyYAML, for the reason the rest of this vendored suite uses
+    none: it runs as its own step and may not assume the project installed anything.
+    """
+    granted = {}
+    inside = False
+    for line in AUTOMERGE_WORKFLOW.read_text(encoding="utf-8").splitlines():
+        if line.startswith("permissions:"):
+            inside = True
+            continue
+        if inside:
+            if line.strip().startswith("#") or not line.strip():
+                continue
+            if not line.startswith(" "):
+                break
+            scope, _, level = line.strip().partition(":")
+            granted[scope.strip()] = level.strip()
+    return granted
+
+
+def test_every_route_the_script_calls_is_named_in_the_scope_table():
+    undeclared = called_routes() - set(ROUTE_SCOPES)
+    assert not undeclared, (
+        f"merge-dependabot-prs.py calls {sorted(undeclared)}, which ROUTE_SCOPES does not "
+        "name. Add the route with the scopes GitHub requires for it, and grant them in "
+        f"{AUTOMERGE_WORKFLOW.name} -- an ungranted scope is a 403 at 17 past the hour, "
+        "not a degraded result."
+    )
+
+
+def test_the_workflow_grants_every_scope_the_script_needs():
+    granted = granted_permissions()
+    missing = []
+    for route in sorted(called_routes()):
+        for scope, level in sorted(ROUTE_SCOPES.get(route, ())):
+            have = LEVELS.get(granted.get(scope, "none"), 0)
+            if have < LEVELS[level]:
+                missing.append(
+                    f"{route} needs {scope}: {level}, workflow grants {granted.get(scope, 'none')}"
+                )
+    assert not missing, "; ".join(missing)
+
+
+def test_checks_read_specifically_is_granted():
+    """The one that was missing, pinned by name so a future tidy of the block cannot drop
+    it back out without saying so."""
+    assert granted_permissions().get("checks") == "read"
+
+
+def test_the_sweep_reads_check_runs_at_all():
+    """The other half of the pair. If `blocking_checks` stops calling the endpoint, the
+    permission above is dead weight and should go in the same change -- but until then,
+    the reason `checks: read` is there must stay true."""
+    run = FakeRun(world())
+    merger.main(env(), run)
+    assert any("check-runs" in arg for call in run.calls for arg in call), run.calls

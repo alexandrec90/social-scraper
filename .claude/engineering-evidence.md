@@ -170,23 +170,47 @@ every project on the machine, the project's own for one repo.
 | Value | Effect |
 | --- | --- |
 | unset, or `0`/`false`/`no`/`off` | every hook runs — the default, and the only thing a value that reads as "off" to a human may mean |
-| `1`, `all`, `*` | every switchable hook stands down |
-| `stop`, `lint-fix`, `capped-bash`, `session-start`, `failure-retro` | that hook only; comma- or semicolon-separated for several |
+| `1`, `all`, `*`, `true`, `yes`, `on` | every switchable hook stands down |
+| `stop`, `lint-fix`, `capped-bash`, `session-start`, `failure-retro`, `branch-tier` | that hook only; comma- or semicolon-separated for several |
+
+`SWITCHABLE_HOOKS` in `harness_config.py` is the list this table copies, and the one to
+believe when the two disagree. A name in it that no hook reads would be a value an
+operator can set and watch do nothing, so
+`test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch` searches the
+hook sources for each — both spellings, since `session-start` and `failure-retro` ask
+through the `--hook-off` arm rather than importing.
 
 Selective is the state it comes back through: the Stop gate is the expensive one and
 `lint-fix` is nearly free, so they are re-enabled apart. Shell callers ask through
 `harness_config.py --hook-off <name>` rather than re-reading the variable, so the aliases
 and the off-values asymmetry have one owner instead of a copy in bash free to drift.
 
-**What it deliberately cannot reach is the branch tier.** `worktree-guard.py`, which
-routes an agent edit into an ephemeral box, and `task_slug.py`, which names its branch,
-never consult it. Switching those off does not make a session quieter — it lands agent
-work on a checkout's home branch with nothing under it, surfacing days later as a
-`needs-branch` verdict nobody can attribute to a session. Turning the harness off is a
-decision about *checks*; it is not a decision about where the work goes, and
-`test_the_branch_tier_never_consults_the_harness_kill_switch` asserts on the source of
-both, because the risk is a future edit adding the check by symmetry with the four hooks
-that do carry it.
+**The branch tier is switchable too, under one name — and once was not.**
+`worktree-guard.py`, which routes an agent edit into an ephemeral box, and
+`task_slug.py`, which names its branch, both stand down on `branch-tier`. One name
+rather than two: the slug exists to name the box the guard cuts, so a recorded slug with
+no guard to spend it is a file written before every prompt for nothing — and a vendored
+copy has no `task_slug.py` to switch separately anyway. Consumers get the switch through
+the `worktree-guard-launch.py` shim, which returns before it resolves devkit, so an
+operator who stood the tier down does not still pay a Python start on every mutating
+call.
+
+The old exemption was real, and its reasoning still is: standing the tier down does not
+make a session quieter — it lands agent work on a checkout's home branch with nothing
+under it, surfacing days later as a `needs-branch` verdict nobody can attribute to a
+session. What changed is that the tier stopped being the only thing that cuts a box.
+`claude --worktree`, `/ship`, and `agent-box.py spawn`/`ship` behind the `Agent:`
+workspace tasks all cut and deliver one without a hook, so the operator who switches the
+tier off keeps the guarantee by hand rather than losing it. The safety property moved; it
+was not deleted.
+
+Both halves are asserted on in `tests/test_worktree_guard.py` —
+`test_the_branch_tier_consults_the_harness_kill_switch` on the source,
+`test_a_stood_down_branch_tier_returns_before_it_reads_stdin` on the behaviour, since an
+early return before either reads its payload is the whole of what "off" can mean on a
+hot path. The source assertion is kept deliberately, now pointing the other way: the risk
+today is a future edit *removing* the check by symmetry with a tier that used to be
+exempt.
 
 Three things to know before flipping it:
 

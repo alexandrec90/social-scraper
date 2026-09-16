@@ -7,43 +7,42 @@ disable-model-invocation: true
 
 # Ship the current task
 
-> **Three of the commands below are on Claude Code's Bash blocklist** -- `git status`,
-> a raw `git diff` and an uncounted `git log` all grow with the repo, so
-> `scripts/hooks/enforce-capped-bash.py` blocks those issued bare. Route each through
-> `python3 scripts/hooks/invoke-capped.py --command "<the command>"`, which keeps a head
-> *and* a tail window and preserves the exit code. Pass no `--max-bytes`: it defaults to
-> this project's `[bash] max_bytes`, and a number written here would be one project's
-> value baked into a file every project vendors byte-for-byte.
+> **Pass an authored message from a file — `git commit -F <path>` and `gh pr create
+> --body-file <path>` — never inline in double quotes.** This holds everywhere and has
+> nothing to do with any hook: a message worth writing about this codebase names
+> identifiers, and a Markdown body names them in backticks, which inside double quotes is
+> command substitution the shell really does expand. `-m "…"` and `--body "…"` therefore
+> fail on exactly the messages worth writing.
 >
-> **`git commit` and `gh pr create` are not on that list and must be issued bare.** Their
-> message is authored and multi-line, and it does not survive the wrapper's `cmd.exe`;
-> the `| head -c N` fallback masks the exit code, so a commit a pre-commit hook rejected
-> would read as a success. Nothing else in this skill needs a wrapper at all.
+> **Where `scripts/hooks/enforce-capped-bash.py` is running, three commands below are on
+> its blocklist** — `git status`, a raw `git diff` and an uncounted `git log` — because
+> each grows with the repo. Route those three through `python3
+> scripts/hooks/invoke-capped.py --command "<the command>"`, which keeps a head *and* a
+> tail window and preserves the exit code; pass no `--max-bytes`, so it takes the
+> project's `[bash] max_bytes` rather than baking one project's number into a vendored
+> file. **Nothing else here needs a wrapper**, and `git commit` and `gh pr create` must
+> never get one: the gate exempts them, and their multi-line message does not survive the
+> wrapper's `cmd.exe`.
 >
-> **Codex runs the numbered commands directly.** Its shell runner already caps captured
-> output, and `scripts/sync-codex-hooks.py` omits the redundant gate. Adding the wrapper
-> in Codex only adds transcript noise and can change shell semantics.
->
-> **The two that carry an authored message are the exception — issue `git commit` and
-> `gh pr create` bare.** The gate exempts them, and wrapping one destroys it: a
-> multi-line message does not survive `cmd.exe`, and the `| head -c N` fallback masks
-> the exit code, so a commit a pre-commit hook rejected reports success and step 3
-> pushes a branch with nothing on it.
->
-> **Pass those two their text from a file — `git commit -F <path>` and `gh pr create
-> --body-file <path>` — never inline in double quotes.** A message worth writing about
-> this codebase names identifiers, and a Markdown body names them in backticks; inside
-> double quotes those are command substitution, which the shell really would expand, so
-> the gate is right to refuse the call. `-m "…"` and `--body "…"` therefore fail on
-> exactly the messages worth writing, and the block message names the cap rather than
-> the backtick, so the cause is invisible. Single quotes escape it for a one-liner; a
-> file is what survives a multi-paragraph body.
+> Two cases where that paragraph does not apply at all, and wrapping only adds noise:
+> **Codex**, whose shell runner caps output itself so `scripts/sync-codex-hooks.py` omits
+> the gate; and **any machine with the harness switched off** (`DEVKIT_HOOKS_OFF`), where
+> the hook exits without deciding anything. Issue the commands bare in both.
 
 Run each step in order. Stop on failure; never open a PR for an unverified branch.
 
 1. Run `python scripts/ship.py --preflight`. It must report a namespaced task branch
    and the repository's detected default branch. The namespace is agent-neutral, so
-   branches such as `agent/...`, `claude/...`, and `codex/...` are all valid.
+   `agent/...`, `claude/...` and `codex/...` are all valid, as is the `worktree-<topic>`
+   spelling `claude --worktree` cuts and cannot be asked to change. **It also names
+   what this checkout is missing** — no `.venv`, no `node_modules` — with the command
+   that installs it. Run that command now, before anything is committed. A linked
+   worktree checks out tracked files only, and the commit-time pre-commit gate and
+   step 3's lint gate both run from that toolchain: a `language: system` hook resolves
+   its entry point against `PATH`, which in a fresh worktree has no venv on it, so the
+   gate refuses the commit with `Executable '...' not found`. Installing the one tool
+   it named by hand and putting it on `PATH` gets that commit through and leaves the
+   next gate to fail the same way; the named command is the whole fix.
 2. Review the change. Get the file list from `git status --short`, then read the
    changes with the Read tool rather than paging a capped `git diff` — a cap drops the
    middle of a large diff, which is the one part a truncated read hides from you. Run

@@ -7,9 +7,15 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import load_module
+from conftest import REPO_ROOT, load_module
 
 sh = load_module("scripts/sync-devkit.py")
+
+# This project's own tiers, for the claims whose answer depends on them. Loaded against
+# `REPO_ROOT` the same way `stop.py` and `structure_check.py` do it, so a test running in
+# a consumer reads that consumer's `.devkit.toml` and not a default.
+CFG = load_module("scripts/hooks/harness_config.py").load(REPO_ROOT)
+
 # The settings tier the pull drives. Loaded here rather than off `sh`, because
 # `sync-devkit.py` imports it on use and deliberately holds no reference: a project's
 # first pull runs that script before this file exists. Its own contract is covered in
@@ -1459,6 +1465,80 @@ def test_the_structure_baseline_reader_drops_comments_and_blank_lines(tmp_path):
     assert sh.read_structure_baseline(tmp_path) == ["file_lines::src/a.py = 900"]
 
 
+# --- tightening: the seed's mirror, on every pull after the first ----------------
+# A release that shrinks a vendored module, or stops scanning vendored paths at all,
+# leaves an adopted baseline holding lines its code no longer earns, and the vendored
+# stale-line test reddens the adoption PR on files the consumer never edited. v0.11.13,
+# v0.11.14 and v0.11.15 were each re-tightened by hand in the consumers.
+
+
+def test_structure_tightening_drops_a_line_the_code_no_longer_earns(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(
+        root,
+        sh.STRUCTURE_BASELINE_FILE,
+        "suppressions::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+    assert sh.tighten_structure_baseline(root) == (1, 0)
+    assert sh.read_structure_baseline(root) == ["suppressions::src/main.py = 1"]
+
+
+def test_structure_tightening_lowers_a_value_that_shrank(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 3\n")
+    assert sh.tighten_structure_baseline(root) == (0, 1)
+    assert sh.read_structure_baseline(root) == ["suppressions::src/main.py = 1"]
+
+
+def test_structure_tightening_leaves_an_exact_baseline_alone(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 1\n")
+    assert sh.tighten_structure_baseline(root) == (0, 0)
+    assert (root / sh.STRUCTURE_BASELINE_FILE).read_text(encoding="utf-8") == (
+        "suppressions::src/main.py = 1\n"
+    )
+
+
+def test_structure_tightening_is_skipped_before_adoption(tmp_path):
+    """No baseline means the seed's turn, not the tightener's; it must not create one."""
+    root = _structure_project(tmp_path)
+    assert sh.tighten_structure_baseline(root) is None
+    assert not (root / sh.STRUCTURE_BASELINE_FILE).exists()
+
+
+def test_structure_tightening_is_skipped_when_the_checker_was_not_vendored(tmp_path):
+    _seed(tmp_path, ".devkit.toml", "")
+    _seed(tmp_path, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    assert sh.tighten_structure_baseline(tmp_path) is None
+    assert sh.read_structure_baseline(tmp_path) == ["suppressions::src/gone.py = 1"]
+
+
+def test_a_checker_that_crashes_reports_no_tightening(tmp_path):
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    _seed(root, STRUCTURE_CHECKER, "raise SystemExit(3)\n")
+    assert sh.tighten_structure_baseline(root) is None
+
+
+def test_structure_tightening_still_drops_when_the_project_has_new_debt_of_its_own(tmp_path):
+    """`--tighten` judges after it rewrites, so a consumer whose own code got worse
+    sees exit 1 from the checker. The stale lines are still gone -- that debt is the
+    gate's to report, not a reason to leave devkit's numbers in the file."""
+    root = _structure_project(tmp_path)
+    _seed(root, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/gone.py = 1\n")
+    assert sh.tighten_structure_baseline(root) == (1, 0)
+    assert sh.read_structure_baseline(root) == []
+
+
+def test_structure_baseline_values_parse_only_finding_lines(tmp_path):
+    _seed(
+        tmp_path,
+        sh.STRUCTURE_BASELINE_FILE,
+        "# header\n\nfile_lines::src/a.py = 900\nnot a finding\nsuppressions::src/b.py = x\n",
+    )
+    assert sh.structure_baseline_values(tmp_path) == {"file_lines::src/a.py": 900}
+
+
 def test_the_structure_baseline_is_not_vendored():
     assert sh.STRUCTURE_BASELINE_FILE not in sh.MANIFEST
     assert STRUCTURE_CHECKER in sh.MANIFEST
@@ -1492,6 +1572,42 @@ def test_a_second_pull_does_not_say_it_again(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     assert "untested-symbol ratchet" not in capsys.readouterr().out
+
+
+def test_pull_tightens_an_adopted_structure_baseline_and_says_so(tmp_path, monkeypatch, capsys):
+    """End to end, because the ordering is the part that can go wrong: the tighten runs
+    the checker the same pull just copied in, after the stamp that tells it which paths
+    are vendored, and only when there was no seed to make the file exact already."""
+    src, dst = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _structure_project(dst)
+    _seed(
+        dst,
+        sh.STRUCTURE_BASELINE_FILE,
+        "suppressions::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+    monkeypatch.setattr(sh, "REPO_ROOT", dst)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    out = capsys.readouterr().out
+    assert "(tightened the structure ratchet)" in out
+    assert "dropped 1 line(s)" in out
+    assert sh.read_structure_baseline(dst) == ["suppressions::src/main.py = 1"]
+
+
+def test_a_pull_with_nothing_to_tighten_says_nothing(tmp_path, monkeypatch, capsys):
+    """An exact baseline is the ordinary case; naming a rewrite that did not happen
+    would read as the pull touching a project-owned file it left alone."""
+    src, dst = tmp_path / "shared", tmp_path / "proj"
+    _seed(src, "scripts/x.py", "v1")
+    _structure_project(dst)
+    _seed(dst, sh.STRUCTURE_BASELINE_FILE, "suppressions::src/main.py = 1\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", dst)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+    monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    assert "tightened the structure ratchet" not in capsys.readouterr().out
 
 
 # --- the settings pass, from the two modes that drive it ----------------------
@@ -1581,3 +1697,299 @@ def test_the_retired_list_reaches_the_settings_pass_from_this_module(tmp_path, m
     )
     monkeypatch.setattr(sh, "RETIRED_PATHS", ("scripts/hooks/made-up.py",))
     assert any("made-up.py" in note for note in sh.settings_pass(root))
+
+
+# --- the gated tier -------------------------------------------------------------
+
+
+def _consumer(root: Path, frontend: str) -> Path:
+    """A project with the given `[frontend]` block. The gate reads `harness_config`
+    relative to the SCRIPT, not to `root`, so through devkit's own `sh` it always finds
+    devkit's copy -- which is the production shape, where the script is inside the
+    consumer. `_consumer_script` below is the fixture for the case where it is not."""
+    _seed(root, ".devkit.toml", frontend)
+    return root
+
+
+def _consumer_script(root: Path, with_config: bool):
+    """`sync-devkit.py` as a consumer actually holds it: a copy under `root/scripts/`,
+    loaded by path, with or without the `scripts/hooks/harness_config.py` beside it that
+    the gate resolves through `__file__`."""
+    import importlib.util
+
+    # Bytes, not `_seed`: that helper writes in the platform codec, and a script that
+    # carries an em dash would arrive as cp1252 and refuse to import as UTF-8.
+    for rel in ("scripts/sync-devkit.py",) + (
+        ("scripts/hooks/harness_config.py",) if with_config else ()
+    ):
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / rel).read_bytes())
+    name = f"_consumer_sync_{'with' if with_config else 'without'}_{abs(hash(str(root)))}"
+    spec = importlib.util.spec_from_file_location(name, root / "scripts" / "sync-devkit.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ON = "[frontend]\nenabled = true\n"
+ON_WEB = '[frontend]\nenabled = true\ndir = "web"\nsrc = "web/src/"\n'
+OFF = "[frontend]\nenabled = false\n"
+
+
+def test_the_gated_tier_is_absent_where_the_frontend_tier_is_off(tmp_path):
+    """Skipped, not MISSING: that is the whole difference between a gate and an
+    unconditional entry, and it is what lets devkit itself and every stackless project
+    hold a manifest that names a Vite file."""
+    off = _consumer(tmp_path / "off", OFF)
+    assert sh.gated_paths(off) == ()
+    assert sh.manifest_for(off) == tuple(sh.MANIFEST)
+    assert sh.gated_paths(tmp_path / "never-configured") == ()
+
+
+def test_the_gated_tier_resolves_at_the_consumers_own_source_prefix(tmp_path):
+    on = _consumer(tmp_path / "on", ON_WEB)
+    assert sh.frontend_src(on) == "web/src/"
+    assert sh.gated_paths(on) == ("web/src/worktreePort.ts", "web/src/worktreePort.test.ts")
+    assert set(sh.MANIFEST) < set(sh.manifest_for(on))
+
+
+def test_the_source_prefix_is_normalised_to_the_manifests_spelling(tmp_path):
+    """Forward slashes and exactly one trailing `/`, whatever the TOML said: every path
+    in the manifest is spelled that way, and a gated entry joins onto the prefix."""
+    assert (
+        sh.frontend_src(
+            _consumer(tmp_path / "a", '[frontend]\nenabled = true\nsrc = "web\\\\src"\n')
+        )
+        == "web/src/"
+    )
+    assert (
+        sh.frontend_src(
+            _consumer(tmp_path / "b", '[frontend]\nenabled = true\nsrc = "web/src//"\n')
+        )
+        == "web/src/"
+    )
+    assert sh.frontend_src(_consumer(tmp_path / "c", OFF)) == ""
+
+
+def test_the_gated_tier_is_off_until_the_bootstrap_pull_has_landed(tmp_path):
+    """`sync-devkit.py` is copied into a project as the bootstrap of its FIRST pull, at
+    which moment `scripts/hooks/harness_config.py` is not there to read the gate from.
+    The gate answers "off" rather than raising, the first pull delivers the helper the
+    gate needs, and the second pull delivers what the gate selects."""
+    root = tmp_path / "fresh"
+    _seed(root, ".devkit.toml", ON)
+    bootstrap = _consumer_script(root, with_config=False)
+    assert bootstrap.gated_paths(root) == ()
+    delivered = _consumer_script(root, with_config=True)
+    assert delivered.gated_paths(root) == (
+        "frontend/src/worktreePort.ts",
+        "frontend/src/worktreePort.test.ts",
+    )
+
+
+def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
+    """The unreleased-change check asks about devkit's files, and devkit keeps its own
+    frontend tier off -- so `manifest_for(devkit)` would hide exactly the edits that
+    check exists to catch.
+
+    The answer is a property of `GATED_MANIFEST`, not of the repo this runs in, so it
+    is asserted everywhere. Whether the files are actually *there* is the half that
+    only devkit can answer -- see below."""
+    assert sh.gated_source_paths() == (
+        "frontend/src/worktreePort.ts",
+        "frontend/src/worktreePort.test.ts",
+    )
+
+
+def test_every_gated_path_is_on_disk_exactly_where_it_should_be():
+    """Whether a gated file is present is a question with an answer in every checkout --
+    a different answer, which is why this is one assertion and not a skip.
+
+    In devkit there is no `DEVKIT_VERSION` (the stamp records the upstream commit a
+    vendored copy came from, and the source of truth has no upstream) and the file must
+    be there: the release check in `new-project.py` reads these paths off devkit's own
+    worktree, so a name with no file behind it reports "no unreleased change" about a
+    file that cannot be vendored at all. devkit's own `[frontend]` tier being off is
+    exactly why `gated_source_paths()` exists and does not gate on it.
+
+    In a consumer the file is present iff that project's frontend tier is on, which is
+    the gate doing its job in both directions -- a `bare` project that received it would
+    mean the gate leaks, and a `fullstack` one that did not would mean the pull skipped
+    a file it was supposed to deliver. Asserting bare presence here instead is what
+    turned every generated project's first gate red on arrival.
+    """
+    vendored = (REPO_ROOT / sh.VERSION_FILE).exists()
+    for rel in sh.gated_source_paths():
+        present = (REPO_ROOT / rel).is_file()
+        if not vendored:
+            assert present, f"devkit vendors {rel} but does not carry it"
+        elif CFG.frontend.enabled:
+            assert present, f"[frontend] is on but {rel} is missing -- run sync-devkit.py --pull"
+        else:
+            assert not present, f"[frontend] is off yet {rel} arrived -- the manifest gate leaks"
+
+
+def test_a_pull_delivers_the_gated_file_only_where_the_tier_is_on(tmp_path, monkeypatch):
+    """End to end through `main`, against a source repo that carries the file."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    on = _consumer(tmp_path / "on", ON)
+    _seed(on, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", on)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert (on / "frontend" / "src" / "worktreePort.ts").read_text(encoding="utf-8") == "vendored"
+    assert "frontend/src/worktreePort.ts" in sh.read_receipt(on)
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+    off = _consumer(tmp_path / "off", OFF)
+    _seed(off, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", off)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert not (off / "frontend").exists()
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+
+# --- the two layouts are not the same path ------------------------------------
+#
+# devkit keeps its copy at `frontend/src/`; a single-package consumer sets
+# `dir = "."` and wants it at `src/`. Both sides used to be probed with the
+# consumer's spelling, so devkit was asked for a file it has never had at that name.
+
+
+def test_the_source_map_is_empty_where_both_layouts_agree(tmp_path):
+    """Every MANIFEST entry, and a consumer whose `src` is devkit's own, need no
+    translation -- an entry in the map would be a rename waiting to happen."""
+    assert sh.source_map(_consumer(tmp_path / "off", OFF)) == {}
+    assert sh.source_map(_consumer(tmp_path / "default", ON)) == {}
+
+
+def test_the_source_map_translates_a_consumer_whose_layout_differs(tmp_path):
+    """Keyed by the consumer's path, valued at devkit's -- the direction every caller
+    needs, since the manifest is spelled at the consumer's layout throughout."""
+    assert sh.source_map(_consumer(tmp_path / "web", ON_WEB)) == {
+        "web/src/worktreePort.ts": "frontend/src/worktreePort.ts",
+        "web/src/worktreePort.test.ts": "frontend/src/worktreePort.test.ts",
+    }
+
+
+def test_copy_ends_remaps_only_the_devkit_side_of_each_direction():
+    """The direction is the whole of it. `manifest` is spelled at the consumer's layout,
+    so a pull reads devkit's spelling and writes the consumer's, and a push does the
+    reverse -- remapping both ends, or the wrong one, silently relocates the file."""
+    sources = {"src/worktreePort.ts": "frontend/src/worktreePort.ts"}
+
+    assert sh.copy_ends("src/worktreePort.ts", sources, pull=True) == (
+        "frontend/src/worktreePort.ts",
+        "src/worktreePort.ts",
+    )
+    assert sh.copy_ends("src/worktreePort.ts", sources, pull=False) == (
+        "src/worktreePort.ts",
+        "frontend/src/worktreePort.ts",
+    )
+
+
+def test_copy_ends_leaves_an_unmapped_entry_identical_on_both_sides():
+    """Every MANIFEST entry takes this path, so the untranslated case is the common one
+    and must not depend on the map having a key for it."""
+    for pull in (True, False):
+        assert sh.copy_ends("scripts/hooks/stop.py", {}, pull=pull) == (
+            "scripts/hooks/stop.py",
+            "scripts/hooks/stop.py",
+        )
+
+
+def test_a_single_package_consumer_adopts_the_gated_tier(tmp_path, monkeypatch):
+    """The regression, and it is roguelike's exact shape: `dir = "."`, `src = "src/"`.
+
+    It stopped the v0.11.17 adoption pass after the release itself had succeeded -- the
+    pull skipped both files as absent from the shared repo, and the commit gate then
+    reported them MISSING from a repo that has always carried them at `frontend/src/`.
+    """
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert (flat / "src" / "worktreePort.ts").read_text(encoding="utf-8") == "vendored"
+    assert (flat / "src" / "worktreePort.test.ts").read_text(encoding="utf-8") == "vendored test"
+    # Never at devkit's layout: the consumer's own prefix is the whole point of the gate.
+    assert not (flat / "frontend").exists()
+    assert "src/worktreePort.ts" in sh.read_receipt(flat)
+    # The half that actually failed: the gate must not call these MISSING.
+    assert sh.main(["--check", "--src", str(src)]) == 0
+
+
+def test_a_check_reports_real_drift_at_the_translated_path(tmp_path, monkeypatch):
+    """The mapping may not become a blind spot: an edit to the consumer's copy is still
+    drift against devkit's, even though the two are at different paths."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+
+    (flat / "src" / "worktreePort.ts").write_text("locally edited", encoding="utf-8")
+    drifted, missing, _ = sh.classify(src, flat, sh.manifest_for(flat))
+
+    assert "src/worktreePort.ts" in drifted
+    assert missing == []
+
+
+def test_a_push_sends_the_gated_file_back_to_devkits_layout(tmp_path, monkeypatch):
+    """The mirror direction. A project that authored a fix to its copy has to land it
+    where devkit keeps it, or the next release vendors the old bytes back out."""
+    src = _repo(
+        tmp_path / "src",
+        tag="v0.5.3",
+        files={
+            "scripts/hooks/x.py": "upstream",
+            "frontend/src/worktreePort.ts": "vendored",
+            "frontend/src/worktreePort.test.ts": "vendored test",
+        },
+    )
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    flat = _consumer(tmp_path / "flat", '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n')
+    _seed(flat, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", flat)
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    (flat / "src" / "worktreePort.ts").write_text("authored here", encoding="utf-8")
+
+    assert sh.main(["--push", "--src", str(src)]) == 0
+    assert (src / "frontend" / "src" / "worktreePort.ts").read_text(
+        encoding="utf-8"
+    ) == "authored here"
+    assert not (src / "src").exists()

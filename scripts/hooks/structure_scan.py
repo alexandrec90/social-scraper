@@ -291,8 +291,19 @@ def _without_comments(text: str, comments: list[str]) -> str:
 
 _JS_SUPPRESSION = re.compile(r"eslint-disable|@ts-ignore|@ts-expect-error|@ts-nocheck|biome-ignore")
 _JS_ANY = re.compile(r":\s*any\b|\bas\s+any\b|<any>|\bany\[\]")
-_JS_SKIP = re.compile(r"\b(?:it|test|describe)\.skip\s*\(|\bx(?:it|test|describe)\s*\(")
-_JS_ONLY = re.compile(r"\b(?:it|test|describe)\.only\s*\(|\bf(?:it|describe)\s*\(")
+# The bare `xit`/`fit` spellings take a **quoted title** here, and the `.skip`/`.only`
+# ones do not. `it.only` is a property access on a name the runner owns, so it can mean
+# nothing else; `fit(` is just an identifier followed by a paren, and any helper a test
+# file happens to call `fit` or `xit` reads as a focused test. One did: a local
+# `const fit = (...) => fitMessage(...)` was reported as twelve focused tests in a Vitest
+# suite, which has no `fit` at all, and the author renamed the helper to get past the
+# gate -- the gate winning an argument it was wrong about. Jasmine's and Jest's forms
+# always take the title first, so requiring the quote costs no real detection and takes
+# the whole identifier-collision class out. `mask_literals` blanks a string's interior
+# but keeps its delimiters, so the quote is still here to match on.
+_TITLE = r"\s*\(\s*['\"`]"
+_JS_SKIP = re.compile(r"\b(?:it|test|describe)\.skip\s*\(|\bx(?:it|test|describe)" + _TITLE)
+_JS_ONLY = re.compile(r"\b(?:it|test|describe)\.only\s*\(|\bf(?:it|describe)" + _TITLE)
 _JS_EMPTY_CATCH = re.compile(r"\bcatch\b\s*(?:\([^)]*\))?\s*\{\s*\}")
 _JS_IMPORT_STMT = re.compile(r"^\s*(?:import\b|export\s+(?:\*|\{)[^;]*?\bfrom\b)", re.M)
 _JS_REQUIRE = re.compile(r"\brequire\s*\(")

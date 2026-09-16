@@ -99,11 +99,11 @@ class BashConfig:
 class PythonConfig:
     """How to provision this project's Python toolchain.
 
-    Deliberately just an escape hatch. `session-start.sh` *detects* the dependency
-    model from the files on disk (`uv.lock` -> uv sync, `requirements-dev.txt` ->
-    pip-tools locks, else `pyproject.toml`), because a lockfile cannot drift from
-    reality the way a manifest field can. Set `install_command` only for a project
-    that fits none of those shapes; it then wins over detection.
+    Deliberately just an escape hatch. `toolchain.py` *detects* the dependency model
+    from the files on disk (`uv.lock` -> uv sync, `requirements-dev.txt` -> pip-tools
+    locks, else `pyproject.toml`) for `session-start.sh` and `ship.py --preflight`, as
+    a lockfile cannot drift from reality the way a manifest field can. Set
+    `install_command` only for a project that fits none of those shapes; it then wins.
 
     `version` is an override for the same reason. A lockfile pins packages, not the
     interpreter that resolves them, so `worktree.py provision` built every box's `.venv`

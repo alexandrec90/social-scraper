@@ -253,6 +253,12 @@ def vendored_paths(root: Path) -> frozenset[str]:
 
     Read off the script's `MANIFEST` literal rather than imported: the script is not a
     module of this tree, and a consumer's copy may be older than this one.
+
+    **`AnnAssign` too.** The real declaration is `MANIFEST: tuple[str, ...] = (...)`, so
+    matching `Assign` alone returned `frozenset()` in every consumer that ever ran this:
+    the skip was inert, and adopting a release reddened both baseline tests on vendored
+    files the consumer cannot fix. Devkit has no `DEVKIT_VERSION`, so its own CI cannot
+    see it -- the guard below short-circuits here for a different reason.
     """
     if not (root / "DEVKIT_VERSION").is_file():
         return frozenset()
@@ -263,16 +269,47 @@ def vendored_paths(root: Path) -> frozenset[str]:
         tree = ast.parse(script.read_text(encoding="utf-8"))
     except (SyntaxError, ValueError, OSError):
         return frozenset()
+    literals = _manifest_literals(tree)
+    if not isinstance(manifest := literals.get("MANIFEST"), (list, tuple)):
+        return frozenset()
+    paths = {str(v) for v in manifest if isinstance(v, str)}
+    # The gated tier: `GATED_MANIFEST` names files RELATIVE to a `.devkit.toml` tier's
+    # source prefix, vendored only where that tier is on. Resolved here the way
+    # `sync-devkit.manifest_for` resolves it, because a gated file that reached this
+    # project through `--pull` is devkit's debt exactly as an unconditional one is --
+    # and unskipped it would put devkit's TypeScript into the consumer's baseline.
+    gated = literals.get("GATED_MANIFEST")
+    if isinstance(gated, dict):
+        frontend = harness_config.load(root).frontend
+        if frontend.enabled:
+            prefix = str(frontend.src).replace("\\", "/").rstrip("/") + "/"
+            for name in gated.get("frontend", ()):
+                if isinstance(name, str):
+                    paths.add(prefix + name)
+    return frozenset(paths)
+
+
+def _manifest_literals(tree: ast.Module) -> dict[str, object]:
+    """`{name: value}` for the module-level `MANIFEST` and `GATED_MANIFEST` literals.
+
+    Both `Assign` and `AnnAssign` (see `vendored_paths`), and a literal that will not
+    evaluate is simply absent -- the caller treats a missing `MANIFEST` as "skip
+    nothing", which is the fail-loud direction for a vendored-file exemption.
+    """
+    found: dict[str, object] = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "MANIFEST" for t in node.targets
-        ):
-            try:
-                value = ast.literal_eval(node.value)
-            except ValueError:
-                return frozenset()
-            return frozenset(str(v) for v in value if isinstance(v, str))
-    return frozenset()
+        bound = getattr(node, "targets", None) or [getattr(node, "target", None)]
+        assigned = getattr(node, "value", None)
+        if assigned is None:
+            continue
+        names = {t.id for t in bound if isinstance(t, ast.Name)}
+        for wanted in ("MANIFEST", "GATED_MANIFEST"):
+            if wanted in names:
+                try:
+                    found[wanted] = ast.literal_eval(assigned)
+                except ValueError:
+                    pass
+    return found
 
 
 def _excluded(rel: str, cfg: harness_config.Config) -> bool:
@@ -295,9 +332,8 @@ def source_files(root: Path, cfg: harness_config.Config) -> list[str]:
     found: list[str] = []
     for directory in scan_roots(cfg):
         base = root / directory
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
+        # A file entry is scanned as itself: the one importer outside every scanned tree.
+        for path in sorted(base.rglob("*")) if base.is_dir() else [base]:
             if not path.is_file():
                 continue
             rel = path.relative_to(root).as_posix()

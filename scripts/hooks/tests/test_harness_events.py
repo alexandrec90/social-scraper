@@ -114,6 +114,37 @@ class TestProjectName:
         """Never return an empty string: the ledger field would read as a missing value."""
         assert events.project_name(tmp_path / events.BOX_NAME_SEP) == events.BOX_NAME_SEP
 
+    def test_a_cli_worktree_reads_as_the_repo_it_was_cut_in(self, tmp_path):
+        """`claude --worktree` cuts `<repo>/.claude/worktrees/<random-name>/`, and a report
+        filed from one named the random name as its project -- five groups in one week,
+        two of them devkit's own, none greppable as the repo."""
+        worktree = tmp_path / "devkit" / ".claude" / "worktrees" / "glowing-sparking-swing"
+        assert events.project_name(worktree) == "devkit"
+
+    def test_a_cli_worktree_of_a_box_still_reads_as_the_project(self, tmp_path):
+        box = tmp_path / f"carameli{events.BOX_NAME_SEP}task-0906"
+        assert events.project_name(box / ".claude" / "worktrees" / "x") == "carameli"
+
+    def test_a_codex_worktree_reads_as_the_repo_it_was_cut_from(self, tmp_path, monkeypatch):
+        """The same failure with none of the same arithmetic available: Codex cuts
+        `<CODEX_HOME>/worktrees/<digest>/<name>`, which names no repo anywhere in it. The
+        answer comes off the worktree's `.git` pointer -- still one read, never a git
+        subprocess in a hook."""
+        home = tmp_path / ".codex"
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        checkout = tmp_path / "vs-code" / "carameli"
+        tree = home / "worktrees" / "2e51" / "carameli"
+        tree.mkdir(parents=True)
+        gitdir = checkout / ".git" / "worktrees" / "carameli"
+        (tree / ".git").write_text(f"gitdir: {gitdir.as_posix()}", encoding="utf-8")
+        assert events.project_name(tree) == "carameli"
+
+    def test_a_worktrees_directory_elsewhere_is_not_a_cli_worktree(self, tmp_path):
+        """Only the exact `.claude/worktrees/<name>` shape: a project that happens to keep
+        a `worktrees/` directory is still named by its own directory."""
+        assert events.project_name(tmp_path / "worktrees" / "thing") == "thing"
+        assert events.project_name(tmp_path / ".claude" / "worktrees") == "worktrees"
+
 
 class TestHostSlug:
     """The reduction `host_name` applies. Separated because the shard filename is

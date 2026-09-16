@@ -20,6 +20,24 @@ def test_namespaced_task_branches_are_shippable_regardless_of_agent():
         assert not ok
 
 
+def test_the_branch_claude_s_own_worktree_flag_cuts_is_shippable():
+    """`claude --worktree fix-thing` cuts `worktree-fix-thing`, and a name containing a
+    slash has it replaced (`claude/x` -> `worktree-claude+x`), so the built-in flag can
+    never produce the `<namespace>/<topic>` spelling. That is hard-coded in the CLI with
+    no setting behind it, so refusing the branch would make `/ship` work from a devkit box
+    and not from Claude Code's own worktree -- a rule about provenance, not about whether
+    the branch is disposable."""
+    for branch in ("worktree-fix-thing", "worktree-claude+fix-thing"):
+        assert ship.is_shippable(branch, "main") == (True, "")
+
+
+def test_the_bare_worktree_prefix_is_not_a_topic():
+    """`worktree-` alone names no task. Accepting it would turn the prefix test into a
+    substring check that any branch merely starting with it passes."""
+    ok, _ = ship.is_shippable("worktree-", "main")
+    assert not ok
+
+
 def test_default_branch_uses_shared_detection(monkeypatch):
     monkeypatch.setattr(ship.tb, "detect_default_branch", lambda git, fallback: "trunk")
     assert ship.default_branch() == "trunk"
@@ -61,6 +79,58 @@ def test_preflight_reports_branch_and_base(monkeypatch, capsys):
     _wire_main(monkeypatch)
     assert ship.main(["--preflight"]) == ship.EXIT_OK
     assert "branch=claude/x base=main" in capsys.readouterr().out
+
+
+# --- what a fresh worktree is missing ------------------------------------------
+# A linked worktree checks out tracked files only. The first thing to notice used to be
+# the commit-time pre-commit gate, whose `language: system` hooks resolve against a PATH
+# with no venv on it -- so `/ship` learned it at its commit rather than its preflight.
+
+
+def _fresh_worktree(tmp_path):
+    """A checkout with a lockfile, a switched-on frontend, and neither toolchain."""
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "p"\n', encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "web"\n', encoding="utf-8"
+    )
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_a_fresh_worktree_is_told_what_to_install_and_that_the_gates_need_it(tmp_path):
+    lines = ship.toolchain_report(_fresh_worktree(tmp_path))
+    assert lines[0].startswith("No .venv here")
+    assert "(fix: uv sync --all-extras --all-groups)" in lines[0]
+    assert lines[1].startswith("No web/node_modules")
+    assert "(fix: npm ci --prefix web)" in lines[1]
+    assert "pre-commit gate" in lines[-1] and "lint gate" in lines[-1]
+
+
+def test_a_provisioned_checkout_is_told_nothing(tmp_path):
+    root = _fresh_worktree(tmp_path)
+    (root / ".venv").mkdir()
+    (root / "web" / "node_modules").mkdir()
+    assert ship.toolchain_report(root) == []
+
+
+def test_preflight_prints_the_report_and_still_passes(monkeypatch, capsys):
+    """Reported on stderr beside the branch line, and never a refusal: a checkout whose
+    tools live outside `.venv` can still ship, and the gates fail on their own."""
+    _wire_main(monkeypatch)
+    monkeypatch.setattr(ship, "toolchain_report", lambda: ["No .venv here (fix: uv sync)"])
+    assert ship.main(["--preflight"]) == ship.EXIT_OK
+    captured = capsys.readouterr()
+    assert "branch=claude/x base=main" in captured.out
+    assert "ship: No .venv here (fix: uv sync)" in captured.err
+
+
+def test_preflight_is_quiet_about_a_provisioned_checkout(monkeypatch, capsys):
+    _wire_main(monkeypatch)
+    monkeypatch.setattr(ship, "toolchain_report", list)
+    assert ship.main(["--preflight"]) == ship.EXIT_OK
+    assert capsys.readouterr().err == ""
 
 
 def test_push_requires_clean_tree(monkeypatch):

@@ -335,3 +335,98 @@ def test_the_script_runs_as_a_script(tmp_path):
     assert result.returncode == 0
     assert "hi" in result.stdout
     assert (tmp_path / "logs" / "t.log").read_text(encoding="utf-8") == ""
+
+
+# --- an unattended failure reaches the ledger --------------------------------
+#
+# Only `harness_events` is touched here, which is vendored alongside this file. That
+# devkit's triage CLI lists the event is devkit's own question, and is asserted in
+# `tests/test_harness_triage.py` -- a consumer has no such file.
+
+
+def _ledger(tmp_path, monkeypatch):
+    """Point the events ledger at `tmp_path` and hand back its path."""
+    events = load_module("scripts/hooks/harness_events.py")
+    ledger = tmp_path / "harness-events.log"
+    monkeypatch.setattr(events, "ledger_path", lambda root=None: ledger)
+    return ledger
+
+
+def test_an_unattended_failure_is_recorded_for_triage(tmp_path, monkeypatch):
+    """The gap this closes: the artifact is overwritten per run, so a job failing every
+    night keeps one night's reason and nothing says it has been failing at all."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    code = lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
+
+    assert code == 2
+    line = ledger.read_text(encoding="utf-8").strip()
+    assert lw.FAILED_EVENT in line
+    assert "Nightly" in line
+    assert "exit=2" in line
+
+
+def test_a_clicked_task_leaves_no_event(tmp_path, monkeypatch):
+    """Without `--always` a person is watching and has already seen the failure. The
+    ledger is for what nobody watched; filling it with clicks makes a backlog nobody
+    reads."""
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    assert lw.main(["Clicked", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path) == 2
+    assert not ledger.exists()
+
+
+def test_a_passing_scheduled_run_leaves_no_event(tmp_path, monkeypatch):
+    """`--always` keeps the artifact on a pass; it must not also record a defect."""
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    assert lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (0, "ok"), root=tmp_path) == 0
+    assert not ledger.exists()
+
+
+def test_the_message_is_stable_so_nightly_failures_are_one_defect(tmp_path, monkeypatch):
+    """`Item.signature` groups on the message, so the exit code and artifact path ride in
+    their own fields -- three bad nights are one item recurring, not three items."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    for code in (2, 3, 2):
+        lw.main(["--always", "N", "--", "x"], run=lambda _c, c=code: (c, "b"), root=tmp_path)
+
+    messages = {
+        pair.partition("=")[2]
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        for pair in line.split("\t")
+        if pair.startswith("message=")
+    }
+    assert len(messages) == 1
+
+
+def test_a_ledger_that_cannot_be_written_does_not_fail_the_job(tmp_path, monkeypatch):
+    """Reporting never takes the job's exit code with it -- that would turn a gap in
+    reporting into a broken scheduled task."""
+    events = load_module("scripts/hooks/harness_events.py")
+
+    def explode(root=None):
+        raise OSError("no ledger here")
+
+    monkeypatch.setattr(events, "ledger_path", explode)
+
+    assert lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path) == 2
+
+
+def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
+    """Called directly rather than through `main`, because what a triaging agent reads is
+    these five fields: which task, what it ran, how it exited, and the file still holding
+    the output."""
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    lw.record_failure("Devkit: Cut Release", ["python", "x.py"], 2, "devkit-cut-release", tmp_path)
+
+    fields = dict(
+        pair.partition("=")[::2]
+        for pair in ledger.read_text(encoding="utf-8").strip().split("\t")
+        if "=" in pair
+    )
+    assert fields["event"] == lw.FAILED_EVENT
+    assert fields["exit"] == "2"
+    assert fields["artifact"] == "logs/devkit-cut-release.log"
+    assert fields["command"] == "python x.py"
+    assert "Devkit: Cut Release" in fields["message"]

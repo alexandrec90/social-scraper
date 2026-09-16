@@ -32,6 +32,16 @@ identical to one that stopped being scheduled at all, which is the failure
 passes as well; the file is still overwritten per run and still capped, so the cost is
 one bounded file rather than a growing one.
 
+**An unattended failure is also recorded on the harness-events ledger**, which is the
+half the artifact cannot cover. The artifact is overwritten per run, so a job that
+fails every night keeps only its most recent evidence and nothing anywhere says it has
+been failing since Tuesday. That is not hypothetical: the nightly release failed three
+nights running, each run erasing the previous one's reason, and the first anyone knew
+of it was a person trying to cut a release by hand and finding a stale branch. A
+`scheduled-job-failed` event is append-only and survives the next run, so
+`/triage-harness` finds it. Only `--always` callers record: a task someone clicked has
+already shown them the failure, and the ledger is for what nobody watched.
+
 Colour survives the wrapping. A captured child is talking to a pipe rather than a
 terminal, and most tools drop their colour the moment they notice -- so `FORCE_COLOR`
 and `PY_COLORS` are set (when the caller has not) to keep the live view readable, and
@@ -52,6 +62,10 @@ import time
 from pathlib import Path
 
 LOGS_DIR = "logs"
+
+# The ledger event an unattended failure leaves behind. Read by `harness_triage.py`,
+# which lists it in `TRIAGE_EVENTS`.
+FAILED_EVENT = "scheduled-job-failed"
 
 # The head and tail kept when a run is too long to store whole. Both ends matter and
 # the middle rarely does: the head carries what was run and the first thing to go
@@ -317,7 +331,46 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
         print(
             f"\nlog-wrap: FAILED (exit {code}) -- details in {LOGS_DIR}/{name}.log", file=sys.stderr
         )
+    if code != 0 and always:
+        record_failure(title, command, code, name, root)
     return code
+
+
+def record_failure(
+    title: str, command: list[str], code: int, name: str, root: Path | None = None
+) -> None:
+    """Leave an unattended failure on the harness-events ledger.
+
+    Best-effort twice over. `harness_events` swallows its own errors by contract, and
+    the import is guarded because this module is vendored into projects that may hold a
+    copy of `log-wrap.py` newer than their `scripts/hooks/` tier -- a wrapper that
+    crashed on a missing ledger would take the job's exit code with it, turning a
+    reporting gap into a broken job.
+
+    The message is deliberately stable across runs: `Item.signature` groups by its first
+    `SIGNATURE_WIDTH` characters, so a job failing nightly reads as one defect recurring
+    rather than as a new one every morning. The exit code and artifact path ride in
+    their own fields, where they do not disturb that grouping.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+        import harness_events
+    except ImportError:
+        # Specifically the module not being there. Anything else -- a `harness_events`
+        # that imports but is broken -- is a defect worth a traceback rather than a
+        # scheduled job that reports nothing and looks fine.
+        return
+    harness_events.record(
+        FAILED_EVENT,
+        (
+            ("project", harness_events.project_name(root or Path.cwd())),
+            ("command", " ".join(command)),
+            ("artifact", f"{LOGS_DIR}/{name}.log"),
+            ("exit", code),
+            ("message", f"unattended task {title!r} failed"),
+        ),
+        root=root,
+    )
 
 
 if __name__ == "__main__":
