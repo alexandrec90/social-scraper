@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.18",
+  "devkit_tag": "v0.11.19",
   "files": {
     ".claude/engineering-evidence.md": "f1ce174a29b3dbfbffa2c2c8d661910f6ad248696768cf41e65dec4460913de6",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
@@ -48,7 +48,7 @@
     "scripts/hooks/tests/test_structure_scan.py": "ee4eb5286384e308b2199b17a18657d7725e7ed294f23c4003d20f03705a4283",
     "scripts/hooks/tests/test_sync_codex_context.py": "bf93208ed82e5c717f5e1f70c61c4c37b9883812ff266b4c093e1a067adede4d",
     "scripts/hooks/tests/test_sync_codex_hooks.py": "7ba81023d1355708fdf046f371b148dbdb11f815485efdff0e298fac84b26280",
-    "scripts/hooks/tests/test_sync_devkit.py": "daba08d6404adea1a91b55153498aa9aee27e41b5b8ecd07fa023d0863ec12da",
+    "scripts/hooks/tests/test_sync_devkit.py": "418abd88adc92a3d1372460898e992741404ec815f1d8e91cd11fdccdc439ab4",
     "scripts/hooks/tests/test_task_branch.py": "3eca2aecddbda899f45f50de765cf3beb39f664c2dba61052bb5668cb29071a1",
     "scripts/hooks/tests/test_toolchain.py": "494e7b23e8f43d737614429a4f55c6367c5f051ab144ca6f9945edd02a70595e",
     "scripts/hooks/tests/test_untested_symbols.py": "f990e4b3567c58715a59beb81bdb8e5f8e6890d8323ae6950605c4c81f6cb052",
