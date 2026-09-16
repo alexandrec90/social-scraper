@@ -1736,6 +1736,7 @@ def _consumer_script(root: Path, with_config: bool):
 
 ON = "[frontend]\nenabled = true\n"
 ON_WEB = '[frontend]\nenabled = true\ndir = "web"\nsrc = "web/src/"\n'
+ON_FLAT = '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n'
 OFF = "[frontend]\nenabled = false\n"
 
 
@@ -1804,6 +1805,94 @@ def test_devkits_own_paths_for_the_gated_tier_never_depend_on_a_consumer():
     )
 
 
+def _gated_expectations(root: Path, vendored: bool) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(must_be_present, must_be_absent)` for the gated tier at `root`.
+
+    Pure, and split out so the *decision* can be tested against a consumer layout. The
+    check that used it inline could only ever run against the repo it lives in, and
+    devkit's own frontend tier is off -- so the consumer branch was never executed by
+    devkit's suite, which is how it shipped in v0.11.18 asking for devkit's path on a
+    consumer's disk.
+    """
+    if not vendored:
+        # devkit itself. The question is about ITS copy, so ask at devkit's layout.
+        return sh.gated_source_paths(), ()
+    # A consumer. `gated_paths` already answers both halves: the paths at THIS project's
+    # layout when the tier is on, and empty when it is off. devkit keeps the file under
+    # `frontend/src/`; a project with `dir = "."` and `src = "src/"` holds the same file
+    # at `src/worktreePort.ts`, and asking its disk with devkit's name is asking for
+    # something it was never meant to have.
+    expected = sh.gated_paths(root)
+    if expected:
+        return expected, ()
+    # Tier off, so a leak is looked for at devkit's layout -- where a file delivered by
+    # mistake would have landed.
+    return (), sh.gated_source_paths()
+
+
+def test_a_consumers_gated_path_is_not_devkits_and_the_two_are_not_interchangeable(tmp_path):
+    """The distinction the on-disk check below was missing.
+
+    `gated_source_paths()` answers "where does devkit keep it" and `gated_paths(root)`
+    answers "where should THIS project hold it". For a single-package consumer --
+    `dir = "."`, `src = "src/"`, which is roguelike -- those are different strings, and
+    asking the consumer's disk with devkit's string is asking for a file that project
+    was never meant to have.
+
+    Shipped in v0.11.18 and caught by roguelike's adoption PR, whose gate went red over
+    a file that was present, tracked and in the right place. Every consumer whose
+    frontend is not laid out like devkit's would have failed the same way, and a
+    vendored test cannot be fixed downstream -- the drift hook refuses the edit -- so
+    the only way out was another release.
+    """
+    flat = _consumer(tmp_path / "flat", ON_FLAT)
+    assert sh.gated_paths(flat) == ("src/worktreePort.ts", "src/worktreePort.test.ts")
+    assert set(sh.gated_paths(flat)).isdisjoint(sh.gated_source_paths())
+
+    # Where a consumer's layout DOES match devkit's the two agree, which is why the bug
+    # survived review and every default-layout project's gate stayed green.
+    assert sh.gated_paths(_consumer(tmp_path / "same", ON)) == sh.gated_source_paths()
+
+
+def test_the_on_disk_check_asks_a_flat_consumer_for_its_own_path(tmp_path):
+    """The reversion check for the bug itself, not just for the two helpers.
+
+    This is what shipped in v0.11.18: the on-disk check probed `gated_source_paths()` in
+    a consumer, so roguelike -- `dir = "."`, `src = "src/"` -- had its adoption gate go
+    red over a file that was present, tracked and in the right place. devkit's own suite
+    could not catch it, because devkit's frontend tier is off and the consumer branch
+    never ran here; extracting the decision is what makes it reachable.
+    """
+    flat = _consumer(tmp_path / "flat", ON_FLAT)
+    _seed(flat, sh.VERSION_FILE, "abc123")
+
+    present, absent = _gated_expectations(flat, vendored=True)
+
+    assert present == ("src/worktreePort.ts", "src/worktreePort.test.ts")
+    assert absent == ()
+    assert "frontend/src/worktreePort.ts" not in present
+
+
+def test_the_on_disk_check_still_asks_devkit_for_devkits_own_path(tmp_path):
+    """The other side: with no `DEVKIT_VERSION` the subject is devkit, whose copy really
+    does live under `frontend/src/`."""
+    present, absent = _gated_expectations(REPO_ROOT, vendored=False)
+    assert present == sh.gated_source_paths()
+    assert absent == ()
+
+
+def test_a_consumer_with_the_tier_off_is_checked_for_a_leak_at_devkits_layout(tmp_path):
+    """With the tier off there is no consumer-side path to name, so the only useful
+    question is whether devkit's copy leaked in."""
+    off = _consumer(tmp_path / "off", OFF)
+    _seed(off, sh.VERSION_FILE, "abc123")
+
+    present, absent = _gated_expectations(off, vendored=True)
+
+    assert present == ()
+    assert absent == sh.gated_source_paths()
+
+
 def test_every_gated_path_is_on_disk_exactly_where_it_should_be():
     """Whether a gated file is present is a question with an answer in every checkout --
     a different answer, which is why this is one assertion and not a skip.
@@ -1821,15 +1910,11 @@ def test_every_gated_path_is_on_disk_exactly_where_it_should_be():
     a file it was supposed to deliver. Asserting bare presence here instead is what
     turned every generated project's first gate red on arrival.
     """
-    vendored = (REPO_ROOT / sh.VERSION_FILE).exists()
-    for rel in sh.gated_source_paths():
-        present = (REPO_ROOT / rel).is_file()
-        if not vendored:
-            assert present, f"devkit vendors {rel} but does not carry it"
-        elif CFG.frontend.enabled:
-            assert present, f"[frontend] is on but {rel} is missing -- run sync-devkit.py --pull"
-        else:
-            assert not present, f"[frontend] is off yet {rel} arrived -- the manifest gate leaks"
+    present, absent = _gated_expectations(REPO_ROOT, (REPO_ROOT / sh.VERSION_FILE).exists())
+    for rel in present:
+        assert (REPO_ROOT / rel).is_file(), f"{rel} is missing -- run sync-devkit.py --pull"
+    for rel in absent:
+        assert not (REPO_ROOT / rel).is_file(), f"{rel} arrived -- the manifest gate leaks"
 
 
 def test_a_pull_delivers_the_gated_file_only_where_the_tier_is_on(tmp_path, monkeypatch):
