@@ -22,7 +22,7 @@ repos:
   # so one bad devkit commit cannot redden every consumer at once). Replace this with the
   # tag on the next `sync-devkit.py --pull` after devkit cuts a release.
   - repo: https://github.com/alexandrec90/devkit
-    rev: v0.11.14 # pragma: allowlist secret - git SHA, not a credential
+    rev: v0.11.18 # pragma: allowlist secret - git SHA, not a credential
     hooks:
       # Fails on a manifest the harness would otherwise ignore: unparseable TOML (the
       # loader falls back to neutral defaults rather than erroring), a path prefix missing

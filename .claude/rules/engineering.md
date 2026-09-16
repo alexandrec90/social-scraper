@@ -28,9 +28,17 @@ that has no test, write the test in the same commit even if the logic didn't cha
   that has never failed is asserting the wrong thing.
 - **Reversion check:** before calling a change complete, identify which test would
   fail if the changed behavior were reverted. If none would, it is not covered yet.
-- **Coverage floors are ratchets:** never lower it merely to make a change pass.
-- **Run targeted tests** — the module you touched — plus the linter. Leave full-suite runs
-  to CI; a fresh-venv full run surfaces version skew unrelated to your change.
+- **Coverage floors are ratchets:** never lower it merely to make a change pass. The
+  other end of the same rule is the one that slips quietly, because raising a ceiling —
+  a timeout, a retry count, a size or complexity limit, a baseline of known gaps — reads
+  as tuning rather than as relaxing a gate.
+  **A ceiling raised on three consecutive branches is a defect report, not a raise:**
+  find out what is filling it before moving it again, and say in the commit message what
+  you found.
+- **Run targeted tests** — the module you touched — plus the linter, while you work. The
+  whole gate runs once, at push time: the `devkit-push-gate` pre-commit hook runs
+  `lint-all.py`, `run-tests.py` and the hook tests before a push leaves, so a failure is
+  read from `logs/` here rather than from a CI artifact.
 - **Fix failures in the code, not in the assertion.** Relaxing an assertion to get green
   deletes the only evidence that something is wrong.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
@@ -75,6 +83,16 @@ satisfy it. Why it is a blocklist rather than a proof obligation, and what preem
 wrapping has cost, are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
+**A refusal that says the command "is too complex to verify that it stays inside the
+worktree", or "cannot be shown not to be git", is not this hook and not any devkit hook.**
+It is Claude Code's own isolation guard for a `claude --worktree` session, and it judges
+the shape of the command line rather than what it writes: a heredoc, a `cd … &&`
+composition and a `$HOME` in an argument are each refused on their own, whatever the
+command does. Put the file write through the Write or Edit tool and issue the rest as
+plain single commands. Report it to Claude Code, not to this harness — one week's
+backlog carried three of these filed as guard defects, and nothing in devkit can change
+what that guard accepts.
+
 ## Waiting on a CI gate: one blocking call, not a poll loop
 
 ```bash
@@ -90,14 +108,27 @@ This condemns neither **diagnosing a failure** (`gh run view --log-failed` and t
 after it are the work, not waiting — send them to a file where the volume warrants) nor
 **asking once**. The waste begins at the *second* identical poll.
 
-**"No checks reported" has two causes needing opposite responses**: a gate that has not
-started *yet*, and one that never will, because a `CONFLICTING` PR has no merge ref to
-build against. Ask once, after a push — `gh pr view <N> --json
-mergeStateStatus,statusCheckRollup`. `CONFLICTING` means merge `origin/<default>` and
-push. `BLOCKED`/`UNSTABLE`/`CLEAN` mean the run exists and `--watch` is right. `UNKNOWN` is
-the ordinary answer in the seconds after a push and says nothing either way. If you get the
-message anyway, tell the two apart by **how long the call took, not what it said**: a
-`--watch` back in about a second never waited, so re-issue it once.
+**"No checks reported" has three causes needing opposite responses.** Ask once, after a
+push — `gh pr view <N> --json mergeStateStatus,statusCheckRollup`:
+
+| What you see | What it is | What to do |
+| --- | --- | --- |
+| `CONFLICTING` | no merge ref to build against, so the gate never will run | merge `origin/<default>` and push |
+| `BLOCKED`/`CLEAN` | the run exists | `--watch` is right |
+| `UNKNOWN` | the ordinary answer in the seconds after a push | says nothing either way; ask again |
+| `UNSTABLE` **with an empty rollup** | a run exists that the PR cannot show you | `gh run list --branch <head> --event workflow_dispatch` |
+
+That last row is the one that reads as the first and is its opposite. **A push made with
+`GITHUB_TOKEN` raises no `pull_request` event**, so a workflow that commits to a PR branch
+— a lock repair, a generated-file sync — leaves the only gate evidence on a run it
+dispatched itself, and a `workflow_dispatch` run is not in the PR's check rollup. The PR
+reads exactly like one whose gate has not started. carameli #347 sat four days that way
+while its dispatched gate had *failed*, on a real test, with the fix a one-line command.
+`UNSTABLE` is the tell: a gate that has not started yet cannot make a PR unstable.
+
+If you get the message anyway, tell the not-started case from the rest by **how long the
+call took, not what it said**: a `--watch` back in about a second never waited, so
+re-issue it once.
 
 When the gate will outlast anything useful you could do meanwhile, stop: report that the
 branch is pushed and the gate is running, and let the result arrive in a fresh session.
@@ -123,9 +154,10 @@ same OS.
 ## Lint policy
 
 Lint catches **correctness and security** problems — the ones a human reviewer reads past.
-Style is not a judgement call worth an agent's turn: `ruff format` runs on every edit via
-the `lint-fix.py` PostToolUse hook and again in CI, so line length, quote style and import
-order never reach a review. **On** for correctness, security and resource-handling; **off**
+Style is not a judgement call worth an agent's turn: `ruff format` runs at commit time from
+`.pre-commit-config.yaml`, on every agent edit where the `lint-fix.py` PostToolUse hook is
+enabled, and again in CI, so line length, quote style and import order never reach a
+review. **On** for correctness, security and resource-handling; **off**
 for anything a formatter can decide. A rule that fires on something a formatter would fix
 is misconfigured — turn it off rather than teaching everyone to ignore it.
 

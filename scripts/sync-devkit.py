@@ -147,13 +147,18 @@ MANIFEST: tuple[str, ...] = (
     "scripts/hooks/tests/test_untested_symbols.py",
     # The structural ratchet: size, complexity, fan-out, cycles, boundaries and
     # suppression counts, held to `.devkit-structure.txt` on the same terms as the
-    # untested-symbol list above -- the file may only shrink, `--pull` seeds it, and
-    # the vendored test is what runs it in a consumer's gate. Two modules because the
+    # untested-symbol list above -- the file may only shrink, `--pull` seeds it once and
+    # tightens it on every pull after, and the vendored test is what runs it in a
+    # consumer's gate. Two modules because the
     # language scanners are testable against a snippet and the judging half is not.
     "scripts/hooks/structure_scan.py",
     "scripts/hooks/tests/test_structure_scan.py",
     "scripts/hooks/structure_check.py",
     "scripts/hooks/tests/test_structure_check.py",
+    # Where each agent CLI cuts a `--worktree` checkout, and which repo one belongs to.
+    # Ships ahead of its two importers, which import it plainly and fail closed without it.
+    "scripts/hooks/worktree_tiers.py",
+    "scripts/hooks/tests/test_worktree_tiers.py",
     "scripts/hooks/stop.py",
     "scripts/hooks/stop_session.py",
     "scripts/hooks/tests/test_stop.py",
@@ -209,6 +214,11 @@ MANIFEST: tuple[str, ...] = (
     # deletes these files, so it also has to drop the settings entries pointing at them.
     ".claude/hooks/session-start.sh",
     "scripts/hooks/tests/test_session_start.py",
+    # What a fresh worktree lacks and the command that installs it: the one ladder
+    # `session-start.sh` reports from and `ship.py --preflight` prints, so a session in a
+    # worktree with no `.venv` is told before its commit-time gate refuses the commit.
+    "scripts/hooks/toolchain.py",
+    "scripts/hooks/tests/test_toolchain.py",
     # The vendoring tool itself, so a project can drift-check / pull / push.
     "scripts/sync-devkit.py",
     "scripts/hooks/tests/test_sync_devkit.py",
@@ -367,6 +377,134 @@ RETIRED_PATHS: tuple[str, ...] = (
     + _RETIRED_CLAUDE_PATHS
     + tuple(path.replace(".claude/", ".agents/", 1) for path in _RETIRED_CLAUDE_PATHS)
 )
+
+
+# --- the gated tier -----------------------------------------------------------
+# MANIFEST is unconditional: every consumer holds every path, and `--check` reports a
+# missing one. Right for the harness, wrong for a file that only means anything in a
+# project with a particular tier -- the dev server's port derivation is nonsense in
+# devkit itself and in every stackless repo. It used to live in `templates/features/`,
+# the one-shot tier, where every later fix stayed behind and nothing reported the gap.
+#
+# An entry here is keyed on a `.devkit.toml` section and named RELATIVE to that
+# section's source prefix. `manifest_for` resolves it per consumer: present where
+# `[frontend]` is enabled, at that project's `[frontend] src`; absent where it is not,
+# which is the difference between a gate and a MISSING line. devkit's own copy lives at
+# the default prefix, and `source_map` is the translation between the two layouts --
+# every path outside this dict is spelled identically on both sides, so the map is empty
+# for most consumers and absent from every MANIFEST entry.
+FRONTEND_GATE = "frontend"
+DEFAULT_FRONTEND_SRC = "frontend/src/"
+# A LITERAL dict, keys spelled as strings: `structure_check.vendored_paths` reads this
+# off the source with `ast.literal_eval` in every consumer, and a `Name` key would make
+# the whole literal unreadable there -- silently, as an empty exemption.
+GATED_MANIFEST: dict[str, tuple[str, ...]] = {
+    # The host-Vite dev server's port derivation and its vitest file. Dependency-free by
+    # contract (`tests/test_worktree_port.py`), so it drops into any Vite project, and
+    # held equal to `scripts/hooks/worktree_tiers.py` by the same test.
+    "frontend": ("worktreePort.ts", "worktreePort.test.ts"),
+}
+
+
+def _load_harness_config(root: Path):
+    """The consumer's own `harness_config` module, or None when it cannot be loaded.
+
+    By path, not by import: this script is copied into a project as the bootstrap of a
+    first `--pull`, at a moment when `scripts/hooks/` does not exist there yet -- so a
+    top-level import would make the bootstrap unloadable. Registered in `sys.modules`
+    before `exec_module`, because that module is nothing but frozen dataclasses and
+    `@dataclass` looks its defining module up by name (`scripts/CLAUDE.md`).
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "hooks" / "harness_config.py"
+    if not path.is_file():
+        return None
+    name = "_sync_devkit_harness_config"
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    except (OSError, ImportError, SyntaxError, AttributeError, TypeError):
+        sys.modules.pop(name, None)
+        return None
+
+
+def frontend_src(root: Path) -> str:
+    """`[frontend] src` for the consumer at `root` when that tier is on; "" when it is
+    off, undeclared, or the config helper is not there to read it.
+
+    Normalised to a forward-slash prefix ending in `/`, which is how every path in the
+    manifest is spelled, so a gated entry joins onto it without a second spelling.
+    """
+    module = _load_harness_config(root)
+    if module is None:
+        return ""
+    try:
+        frontend = module.load(root).frontend
+    except (OSError, ValueError, AttributeError, TypeError):
+        return ""
+    if not frontend.enabled:
+        return ""
+    return str(frontend.src).replace("\\", "/").rstrip("/") + "/"
+
+
+def gated_paths(root: Path) -> tuple[str, ...]:
+    """The gated entries the consumer at `root` should hold, at that project's layout."""
+    src = frontend_src(root)
+    if not src:
+        return ()
+    return tuple(src + name for name in GATED_MANIFEST[FRONTEND_GATE])
+
+
+def source_map(root: Path) -> dict[str, str]:
+    """Consumer-relative path -> devkit-relative path, for entries whose layouts differ.
+
+    Empty for every MANIFEST entry, which is vendored at the same path on both sides,
+    and empty again for a consumer whose `[frontend] src` happens to be devkit's own
+    prefix. It has content only where the gated tier lands somewhere else: a
+    single-package project sets `dir = "."` and `src = "src/"`, so the entry it should
+    hold is `src/worktreePort.ts` while devkit's copy is at `frontend/src/`.
+
+    Until this existed both sides were probed with the *consumer's* path, so devkit was
+    asked for a file it has never had at that name. The pull skipped it as absent and
+    the commit gate then reported it MISSING from the shared repo -- which is what
+    stopped roguelike adopting v0.11.17 after the release itself had succeeded. The
+    comment above predicted exactly this and deferred it as a layout mapping nobody had
+    needed yet; roguelike is the consumer that needed it.
+
+    Keyed on the whole path rather than assembled by prefix arithmetic, so a `src` that
+    normalises oddly cannot produce a half-formed key that matches nothing.
+    """
+    src = frontend_src(root)
+    if not src or src == DEFAULT_FRONTEND_SRC:
+        return {}
+    return {src + name: DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE]}
+
+
+def gated_source_paths() -> tuple[str, ...]:
+    """Where every gated entry lives in devkit, whatever any consumer's layout.
+
+    For the readers that ask "which files does devkit vendor" about devkit itself --
+    the unreleased-change check in `new-project.py` and `upgrade-project.py` -- rather
+    than about a consumer. devkit's own `.devkit.toml` keeps the frontend tier off, so
+    `manifest_for(devkit)` would answer without these and the release check would wave
+    an unreleased edit to them through.
+    """
+    return tuple(DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE])
+
+
+def manifest_for(root: Path) -> tuple[str, ...]:
+    """Every path devkit vendors into the consumer at `root`: MANIFEST plus its gates.
+
+    `MANIFEST` is read at call time rather than captured, so a test that replaces the
+    module attribute still drives every mode through its own list.
+    """
+    return tuple(MANIFEST) + gated_paths(root)
 
 
 def resolve_src(arg: str | None, env: Mapping[str, str]) -> Path | None:
@@ -635,12 +773,18 @@ def classify(
 
     `missing_in_src` are files absent from the shared repo (it does not have them
     yet -- e.g. before a first `--push`); they are reported, never silently OK.
+
+    The shared repo is probed at *its* spelling of each path, which differs from the
+    consumer's only for the gated tier (`source_map`). Probing it at the consumer's
+    spelling is what made a project whose `[frontend] src` is not devkit's own report
+    two files as MISSING from a repo that has always had them.
     """
+    sources = source_map(repo_root)
     drifted: list[str] = []
     missing: list[str] = []
     ok: list[str] = []
     for rel in manifest:
-        src_bytes = _read(src / rel)
+        src_bytes = _read(src / sources.get(rel, rel))
         if src_bytes is None:
             missing.append(rel)
             continue
@@ -790,12 +934,27 @@ def sync_blocks(
     return written, failed
 
 
-def _copy(rel: str, from_root: Path, to_root: Path) -> bool:
-    """Copy one manifest file from_root -> to_root. False when the source is absent."""
-    source = from_root / rel
+def copy_ends(rel: str, sources: Mapping[str, str], pull: bool) -> tuple[str, str]:
+    """`(from_rel, to_rel)` for one entry, given the direction.
+
+    `manifest` is spelled at the consumer's layout throughout, because the receipt and
+    the retired sweep are about this project's own files. Only the devkit end is ever
+    remapped, and which end that is is the whole of the direction.
+    """
+    devkit_rel = sources.get(rel, rel)
+    return (devkit_rel, rel) if pull else (rel, devkit_rel)
+
+
+def _copy(from_rel: str, to_rel: str, from_root: Path, to_root: Path) -> bool:
+    """Copy one manifest file from_root -> to_root. False when the source is absent.
+
+    Two relative paths rather than one, because the gated tier does not live at the same
+    place on both sides -- see `source_map`. They are equal for every other entry.
+    """
+    source = from_root / from_rel
     if not source.exists():
         return False
-    dest = to_root / rel
+    dest = to_root / to_rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, dest)
     return True
@@ -1038,6 +1197,54 @@ def seed_structure_baseline(root: Path) -> int | None:
     return len(read_structure_baseline(root))
 
 
+def tighten_structure_baseline(root: Path) -> tuple[int, int] | None:
+    """Drop from an existing baseline what the code no longer earns. `None` if not run.
+
+    The seed's mirror, for every pull after the first. A release that shrinks a vendored
+    module -- or, as v0.11.15 did, stops scanning vendored paths at all -- leaves the
+    consumer's baseline holding numbers its code no longer earns, and the vendored
+    `test_the_baseline_holds_only_what_the_code_still_earns` reddens the adoption PR on
+    files the consumer never edited. Three releases running were re-tightened by hand.
+    `--tighten` only drops and lowers, so this can only shrink the debt a pull records,
+    and it runs out of process for the seed's reason: it is the scanner this pull just
+    delivered. `(dropped, lowered)` is read off the file rather than the exit code,
+    because the checker judges after it tightens -- debt the consumer added itself is
+    still its gate's to report, not a reason for the pull to leave the stale lines in.
+    """
+    script = root / "scripts/hooks/structure_check.py"
+    if not script.is_file() or not (root / STRUCTURE_BASELINE_FILE).is_file():
+        return None
+    before = structure_baseline_values(root)
+    try:
+        result = subprocess.run(
+            [console_python(), str(script), "--tighten"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            creationflags=NO_WINDOW,
+        )
+    except OSError:
+        return None
+    after = structure_baseline_values(root)
+    dropped = sum(1 for key in before if key not in after)
+    lowered = sum(1 for key, value in before.items() if key in after and after[key] < value)
+    # A red exit that moved nothing is a checker that did not get as far as tightening
+    # (a config error, a crash), not a baseline with nothing to drop.
+    if result.returncode != 0 and not (dropped or lowered):
+        return None
+    return dropped, lowered
+
+
+def structure_baseline_values(root: Path) -> dict[str, int]:
+    """`key -> recorded value` for every finding line, so a tighten can be measured."""
+    values: dict[str, int] = {}
+    for line in read_structure_baseline(root):
+        key, sep, value = line.rpartition(" = ")
+        if sep and value.strip().isdigit():
+            values[key.strip()] = int(value)
+    return values
+
+
 def read_structure_baseline(root: Path) -> list[str]:
     """The recorded findings, so a pull can report how much debt it just wrote down."""
     path = root / STRUCTURE_BASELINE_FILE
@@ -1192,11 +1399,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     src = resolve_src(args.src, os.environ)
+    manifest = manifest_for(REPO_ROOT)
 
     if args.list:
         print(f"source: {src or '(unset)'}")
         print(f"vendored version: {read_version(REPO_ROOT) or '(never pulled)'}")
-        for rel in MANIFEST:
+        for rel in manifest:
             print(f"  {rel}")
         if BLOCK_MANIFEST:
             print("vendored blocks (regions of per-project files):")
@@ -1263,10 +1471,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.pull or args.push:
         from_root, to_root = (src, REPO_ROOT) if args.pull else (REPO_ROOT, src)
         managed_removed, preserved, unvendored = (
-            remove_receipt_retired(REPO_ROOT, MANIFEST, src) if args.pull else ([], [], [])
+            remove_receipt_retired(REPO_ROOT, manifest, src) if args.pull else ([], [], [])
         )
-        copied = [rel for rel in MANIFEST if _copy(rel, from_root, to_root)]
-        skipped = [rel for rel in MANIFEST if rel not in copied]
+        sources = source_map(REPO_ROOT)
+        copied = [
+            rel
+            for rel in manifest
+            if _copy(*copy_ends(rel, sources, args.pull), from_root, to_root)
+        ]
+        skipped = [rel for rel in manifest if rel not in copied]
         removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
         # After the deletions, never before: pruning a hook whose script survived the
         # pull would disable a live hook.
@@ -1275,9 +1488,23 @@ def main(argv: list[str] | None = None) -> int:
         # those settings, so regenerating first would bake back in whatever the prune
         # is about to remove.
         codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
+        # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
+        # baseline seeded while the stamp is absent grandfathers every vendored module
+        # into the consumer's numbers -- and once the stamp lands the gate stops scanning
+        # them, so all 49 keys read as stale and a generated project is red on arrival.
+        if args.pull:
+            stamp = f"{git_head(src) or 'unknown'}\n"
+            (REPO_ROOT / VERSION_FILE).write_text(stamp, encoding="utf-8", newline="\n")
         # After the copy, because it runs the scanner this pull just delivered.
         seeded = seed_untested_baseline(REPO_ROOT) if args.pull else None
         seeded_structure = seed_structure_baseline(REPO_ROOT) if args.pull else None
+        # After the seed, on every pull that did not just seed: a fresh baseline is exact
+        # by construction, and an adopted one holds whatever the last release earned.
+        tightened = (
+            tighten_structure_baseline(REPO_ROOT)
+            if args.pull and seeded_structure is None
+            else None
+        )
         blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
         verb = "pulled" if args.pull else "pushed"
         print(
@@ -1312,18 +1539,23 @@ def main(argv: list[str] | None = None) -> int:
                 f"  (adopted the structure ratchet) {STRUCTURE_BASELINE_FILE}: "
                 f"{seeded_structure} finding(s) grandfathered"
             )
+        if tightened and any(tightened):
+            # Named because it is a project-owned file the pull just rewrote, and the
+            # numbers are what the adoption commit carries that the MANIFEST did not.
+            print(
+                f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
+                f"{tightened[0]} line(s) the code no longer earns, lowered {tightened[1]}"
+            )
         if args.pull:
-            # The SHA, always: DEVKIT_VERSION records the upstream *commit*, and
+            # The stamp itself is written above, before the baselines are seeded. It
+            # is the SHA, always: DEVKIT_VERSION records the upstream *commit*, and
             # the vendored `test_harness_version_records_a_commit` asserts exactly
             # that. The tag goes in the receipt instead, where `stale_pin` reads it.
-            (REPO_ROOT / VERSION_FILE).write_text(
-                f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
-            )
             # No tag recorded for an untagged or dirty pull: there is no release
             # those files correspond to, and `stale_pin` reporting "cannot tell"
             # beats it asserting something untrue.
             provisional = source_dirty(src)
-            write_receipt(REPO_ROOT, MANIFEST, tag="" if provisional else (tag or ""))
+            write_receipt(REPO_ROOT, manifest, tag="" if provisional else (tag or ""))
             # The third moving part. Files, stamp and pin land together or the pull
             # is a half-upgrade whose gate fails later pointing at the wrong cause.
             if tag:
@@ -1351,10 +1583,10 @@ def main(argv: list[str] | None = None) -> int:
     if available and vendored and vendored != available:
         # Informational only -- drift is decided by content below, not version.
         print(f"sync-harness: vendored {vendored}, shared repo at {available} (newer available).")
-    drifted, missing, _ = classify(src, REPO_ROOT, MANIFEST)
+    drifted, missing, _ = classify(src, REPO_ROOT, manifest)
     block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
     retired = retired_present(REPO_ROOT)
-    receipt_retired = receipt_retired_present(REPO_ROOT, MANIFEST)
+    receipt_retired = receipt_retired_present(REPO_ROOT, manifest)
     # Faults in this project's own files: not drift, since `--check` never compares
     # them, but red for the same reason -- an unwired edit guard has no other symptom.
     local, local_summary = local_faults(REPO_ROOT)
@@ -1362,7 +1594,7 @@ def main(argv: list[str] | None = None) -> int:
         drifted or missing or retired or receipt_retired or block_drifted or block_unusable or local
     ):
         blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
-        print(f"sync-harness: all {len(MANIFEST)} vendored files{blocks} in sync with {src}.")
+        print(f"sync-harness: all {len(manifest)} vendored files{blocks} in sync with {src}.")
         return 0
     # Named before the file list, because it changes what the file list *means*: a
     # stale pin makes every file added upstream since the pin look like drift, and

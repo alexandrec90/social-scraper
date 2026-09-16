@@ -532,6 +532,24 @@ def test_an_unparseable_pyproject_falls_back_to_the_directory_name(tmp_path):
     assert cfg.harness_version(root) == "source"
 
 
+def test_is_devkit_source_reads_the_project_name_and_falls_back_to_the_directory(tmp_path):
+    """The predicate `harness_version` and the ledger's attribution both turn on, named
+    directly: the manifest outranks the directory, and the directory decides only when
+    there is no manifest to read."""
+    box = tmp_path / "devkit--some-slug-0820"
+    box.mkdir()
+    (box / "pyproject.toml").write_text('[project]\nname = "devkit"\n', encoding="utf-8")
+    assert cfg.is_devkit_source(box) is True
+    consumer = tmp_path / "devkit"
+    consumer.mkdir()
+    (consumer / "pyproject.toml").write_text('[project]\nname = "carameli"\n', encoding="utf-8")
+    assert cfg.is_devkit_source(consumer) is False
+    bare = tmp_path / "elsewhere" / "devkit"
+    bare.mkdir(parents=True)
+    assert cfg.is_devkit_source(bare) is True
+    assert cfg.is_devkit_source(tmp_path / "elsewhere") is False
+
+
 def test_no_stamp_and_no_devkit_name_reports_nothing(tmp_path):
     """Callers omit the footer entirely rather than print a placeholder: a stamp that
     says `unknown` reads as a fact about the harness instead of a gap in it."""

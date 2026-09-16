@@ -49,6 +49,19 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+# Where each agent CLI cuts a `--worktree` checkout, and how to get from one back to the
+# repo it belongs to. A sibling in `scripts/hooks/` because it is vendored too:
+# `sweep.py`, which owned the nested half first, is a workspace script a consumer
+# checkout does not have.
+#
+# Unguarded, the way every hook imports `harness_config`: the two files are in one
+# `MANIFEST` and arrive in one `--pull`, and a `try` here would buy nothing but a second
+# code path that only a hand-assembled copy can reach. The `sys.path` line is required
+# even so -- this module is loaded BY PATH from `worktree-guard.py`, where
+# `scripts/hooks/` is not otherwise importable.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import worktree_tiers
+
 LEDGER_DIR = Path("logs")
 LEDGER_STEM = "harness-events"
 
@@ -114,7 +127,6 @@ REPORT_HINT = (
 # owns it. This is the stdlib-only half a hook can reach: hooks run before the venv
 # exists, so importing that module is not available to them.
 BOX_NAME_SEP = "--"
-
 
 # Which agent runtime the hook ran under. Spelled here as a literal for the reason
 # `codex-hook-adapter.py` spells it as one: that file is vendored and this one is too,
@@ -216,7 +228,19 @@ def project_name(root: Path) -> str:
     greppable as the repo the work was actually in. The guard already recorded the real
     name because it resolves a project to decide anything at all; the three writers that
     had no such reason to know were the ones that got it wrong.
+
+    A `--worktree` checkout is the same mistake in a second shape: Claude's lives at
+    `<repo>/.claude/worktrees/<random-name>/`, so `root.name` is a name like
+    `glowing-sparking-swing` that no grep for the repo will ever find. Five of one
+    week's thirteen open triage groups were filed under one. Codex's is the same failure
+    with none of the same path arithmetic available -- `<CODEX_HOME>/worktrees/<digest>/`
+    names no repo at all -- which is why `worktree_tiers` owns the resolution and this
+    only recurses on the answer. A hook still never asks git: the detached case is one
+    read of the worktree's `.git` pointer.
     """
+    checkout = worktree_tiers.owning_checkout(root)
+    if checkout is not None:
+        return project_name(checkout)
     return root.name.split(BOX_NAME_SEP, 1)[0] or root.name
 
 
@@ -241,22 +265,16 @@ def event_line(stamp: str, event: str, fields: tuple[tuple[str, object], ...]) -
 def _main_checkout(root: Path) -> Path:
     """`root`, or -- when it is a git worktree -- the checkout it was cut from.
 
-    A worktree's `.git` is a *file* holding `gitdir: <main>/.git/worktrees/<name>`, so
-    this is one read rather than a `git` subprocess in a hook. It matters because the
-    fallback below fires inside ephemeral boxes too, and a ledger written into a box is
-    destroyed with it: `worktree.py reconcile` reaps the box, and the report an agent
-    filed from it was never on the machine's ledger at all.
+    One read of the worktree's `.git` pointer rather than a `git` subprocess in a hook,
+    which is `worktree_tiers.git_checkout`'s job now that a second caller needs it. It
+    matters because the fallback below fires inside ephemeral boxes too, and a ledger
+    written into a box is destroyed with it: `worktree.py reconcile` reaps the box, and
+    the report an agent filed from it was never on the machine's ledger at all.
+
+    `root` rather than None when it is not a worktree, which is the difference from the
+    shared helper: this is asked where an answer is mandatory.
     """
-    with contextlib.suppress(OSError, ValueError, IndexError):
-        pointer = root / ".git"
-        if pointer.is_file():
-            line = pointer.read_text(encoding="utf-8").strip()
-            if line.startswith("gitdir:"):
-                gitdir = Path(line.split(":", 1)[1].strip())
-                for parent in gitdir.parents:
-                    if parent.name == ".git":
-                        return parent.parent
-    return root
+    return worktree_tiers.git_checkout(root) or root
 
 
 def _own_checkout_is_devkit() -> bool:

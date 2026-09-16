@@ -60,6 +60,13 @@ permissions:
   # PR's current head SHA, which is the same evidence the merge job gets handed by its
   # triggering event and has to go and find for itself on a schedule.
   actions: read
+  # `checks: read` is the sweep's too, and for the half of its evidence the runs API does
+  # not hold: `blocking_checks` asks `commits/{sha}/check-runs` whether anything *else*
+  # wired onto the PR is unfinished or red. A `permissions:` block grants only what it
+  # lists, so omitting this scope did not degrade the sweep -- it made every pass that
+  # reached a candidate PR die on `HTTP 403: Resource not accessible by integration`,
+  # which is the retry for stranded merges never running at all.
+  checks: read
   contents: write
   issues: write
   pull-requests: write

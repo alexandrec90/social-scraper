@@ -109,6 +109,93 @@ def test_vendored_paths_are_read_off_the_manifest_literal(tmp_path):
     assert sc.vendored_paths(tmp_path) == {"a.py", "b/c.py"}
 
 
+def test_vendored_paths_are_read_off_an_annotated_manifest(tmp_path):
+    """The shape `sync-devkit.py` actually uses -- `ast.AnnAssign`, not `ast.Assign`."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(
+        tmp_path,
+        "scripts/sync-devkit.py",
+        'MANIFEST: tuple[str, ...] = (\n    "a.py",\n    "b/c.py",\n)\n',
+    )
+    assert sc.vendored_paths(tmp_path) == {"a.py", "b/c.py"}
+
+
+def test_vendored_paths_survive_a_bare_manifest_declaration(tmp_path):
+    """`MANIFEST: tuple[str, ...]` with no value is an `AnnAssign` whose `value` is None."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", "MANIFEST: tuple[str, ...]\n")
+    assert sc.vendored_paths(tmp_path) == frozenset()
+
+
+def test_vendored_paths_read_this_repos_real_sync_script(tmp_path):
+    """The regression: every fixture above is synthetic, and the real file parsed to none.
+
+    A consumer is `DEVKIT_VERSION` plus devkit's own `sync-devkit.py`, so build exactly
+    that and assert the manifest comes back non-empty and naming a file devkit vendors.
+    """
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
+    write(tmp_path, "scripts/sync-devkit.py", real)
+    paths = sc.vendored_paths(tmp_path)
+    assert paths, "the real MANIFEST must be readable, or the vendored skip is inert"
+    assert ".claude/rules/engineering.md" in paths
+
+
+GATED_SCRIPT = (
+    'MANIFEST: tuple[str, ...] = (\n    "a.py",\n)\n'
+    "GATED_MANIFEST: dict[str, tuple[str, ...]] = {\n"
+    '    "frontend": ("port.ts", "port.test.ts"),\n}\n'
+)
+ON_WEB = '[frontend]\nenabled = true\ndir = "web"\nsrc = "web/src/"\n'
+ON = "[frontend]\nenabled = true\n"
+OFF = "[frontend]\nenabled = false\n"
+
+
+def test_vendored_paths_include_the_gated_tier_where_the_frontend_is_on(tmp_path):
+    """A gated file that reached the project through `--pull` is devkit's debt exactly as
+    an unconditional one is; unskipped, devkit's TypeScript lands in the consumer's
+    baseline. Resolved at that project's own `[frontend] src`, the way
+    `sync-devkit.manifest_for` resolves it."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", GATED_SCRIPT)
+    write(tmp_path, ".devkit.toml", ON_WEB)
+    assert sc.vendored_paths(tmp_path) == {"a.py", "web/src/port.ts", "web/src/port.test.ts"}
+
+
+def test_vendored_paths_leave_the_gated_tier_out_where_the_frontend_is_off(tmp_path):
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", GATED_SCRIPT)
+    write(tmp_path, ".devkit.toml", OFF)
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+    (tmp_path / ".devkit.toml").unlink()
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
+def test_a_gated_literal_that_will_not_evaluate_costs_only_the_gated_half(tmp_path):
+    """`ast.literal_eval` refuses a `Name` key. The unconditional manifest must still
+    be read -- losing the whole exemption over the gated half would redden a consumer
+    on files it cannot fix, the exact regression `vendored_paths` was rewritten for."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(
+        tmp_path,
+        "scripts/sync-devkit.py",
+        'MANIFEST = ("a.py",)\nGATE = "frontend"\nGATED_MANIFEST = {GATE: ("port.ts",)}\n',
+    )
+    write(tmp_path, ".devkit.toml", ON)
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
+def test_the_real_gated_manifest_is_a_literal_the_scanner_can_read(tmp_path):
+    """The synthetic fixtures prove the parser; this proves the real declaration keeps
+    the shape it needs -- a `Name` key in `sync-devkit.py` would pass every test above
+    and silently empty the exemption in every consumer."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
+    write(tmp_path, "scripts/sync-devkit.py", real)
+    write(tmp_path, ".devkit.toml", ON)
+    assert "frontend/src/worktreePort.ts" in sc.vendored_paths(tmp_path)
+
+
 def test_vendored_paths_survive_a_script_that_does_not_parse(tmp_path):
     write(tmp_path, "DEVKIT_VERSION", "abc\n")
     write(tmp_path, "scripts/sync-devkit.py", "def (:\n")
@@ -124,6 +211,17 @@ def test_source_files_pick_both_languages_and_skip_tooling_and_declarations(tmp_
     write(tmp_path, "src/readme.md")
     write(tmp_path, "tests/test_a.py")
     assert sc.source_files(tmp_path, config()) == ["src/a.py", "src/b.ts", "tests/test_a.py"]
+
+
+def test_source_files_accept_a_file_entry_in_paths(tmp_path):
+    """A module whose only importer sits outside every scanned tree -- roguelike's
+    `vite.config.ts` importing `src/worktreePort.ts` -- drew a false orphan, and naming
+    the importer in `[structure] paths` was dropped without a word by an `is_dir()` test.
+    A file entry is now scanned as itself; a name that is neither still costs nothing."""
+    write(tmp_path, "src/a.py")
+    write(tmp_path, "vite.config.ts", "import './src/worktreePort'\n")
+    files = sc.source_files(tmp_path, config(paths=("src", "vite.config.ts", "missing")))
+    assert files == ["src/a.py", "vite.config.ts"]
 
 
 def test_source_files_honour_exclude_as_a_prefix_or_a_directory_name(tmp_path):

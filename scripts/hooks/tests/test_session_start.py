@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import REPO_ROOT
+from conftest import REPO_ROOT, load_module
 
 SCRIPT = REPO_ROOT / ".claude" / "hooks" / "session-start.sh"
 BASH = shutil.which("bash")
@@ -57,22 +57,23 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
 
-    # The real config loader, so the manifest seam is exercised rather than faked.
+    # The real config loader and the toolchain report beside it, so the manifest seam
+    # and the missing-toolchain ladder are exercised rather than faked.
     (project / "scripts" / "hooks").mkdir(parents=True, exist_ok=True)
-    shutil.copy(
-        REPO_ROOT / "scripts" / "hooks" / "harness_config.py",
-        project / "scripts" / "hooks" / "harness_config.py",
-    )
+    for helper in ("harness_config.py", "toolchain.py"):
+        shutil.copy(
+            REPO_ROOT / "scripts" / "hooks" / helper, project / "scripts" / "hooks" / helper
+        )
 
     log = tmp_path / "calls.log"
     stub_bin = tmp_path / "bin"
 
-    # `python3` must stay real for `harness_config.py` (that call is the seam under
-    # test); anything else is logged and skipped.
+    # `python3` must stay real for the two helpers under `scripts/hooks/` (those calls
+    # are the seams under test); anything else is logged and skipped.
     _write_exec(
         stub_bin / "python3",
         f'#!/bin/sh\necho "python3 $*" >> "{log}"\n'
-        f'case "$*" in *harness_config.py*) exec "{sys.executable}" "$@";; esac\nexit 0\n',
+        f'case "$*" in *scripts/hooks/*) exec "{sys.executable}" "$@";; esac\nexit 0\n',
     )
     for tool in ("npm", "curl", "node", "pre-commit"):
         _write_exec(stub_bin / tool, f'#!/bin/sh\necho "{tool} $*" >> "{log}"\nexit 0\n')
@@ -164,11 +165,11 @@ def test_each_dependency_model_installs_and_still_exports_path(tmp_path, files, 
     assert PATH_EXPORT in written, f"provisioning died before the PATH export\n{output}"
 
 
-# The local branch's last act is `report_missing_toolchain`, which asks the manifest
-# about the frontend tier. Its call is therefore the marker for "the script ran"; the
-# `[session-start]` banner is not, because a project with no pre-commit config, a `.venv`
-# already present and no frontend correctly prints nothing at all.
-LOCAL_BRANCH_RAN = "frontend.enabled"
+# The local branch's last act is `report_missing_toolchain`, which runs the toolchain
+# probe. Its call is therefore the marker for "the script ran"; the `[session-start]`
+# banner is not, because a project with no pre-commit config, a `.venv` already present
+# and no frontend correctly prints nothing at all.
+LOCAL_BRANCH_RAN = "scripts/hooks/toolchain.py"
 
 
 @pytest.mark.parametrize("value", ["1", "all", "stop,session-start", "SESSION-START"])
@@ -558,6 +559,34 @@ def test_a_frontend_tier_missing_node_modules_is_reported_too(tmp_path):
     assert "npm install --prefix web" in output, output
     # Named, not run — the stub would have logged an invocation.
     assert "npm install --prefix web --no-audit" not in output, output
+
+
+def test_a_committed_frontend_lock_names_npm_ci(tmp_path):
+    """`npm install` rewrites the lockfile -- a tracked change in a worktree that has
+    edited nothing, and the dirty tree `ship.py` then refuses to push."""
+    project, log, env_file = _make_project(
+        tmp_path,
+        {
+            "pyproject.toml": PYPROJECT,
+            ".devkit.toml": '[frontend]\nenabled = true\ndir = "web"\n',
+            "web/package.json": "{}\n",
+            "web/package-lock.json": "{}\n",
+        },
+    )
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    assert "fix: npm ci --prefix web" in output, output
+
+
+def test_the_report_is_the_one_ship_preflight_prints(tmp_path):
+    """One ladder, two callers. The session-start line and the `/ship` line must name
+    the same command, or a fresh worktree is told two things by two tools."""
+    project, log, env_file = _unprovisioned(tmp_path, {"uv.lock": "", "pyproject.toml": PYPROJECT})
+    rc, output, _ = _run(project, log, env_file, remote=False)
+    assert rc == 0, output
+    toolchain = load_module("scripts/hooks/toolchain.py")
+    (gap,) = toolchain.missing_toolchain(project)
+    assert f"[session-start] {gap.line}" in output, output
 
 
 def test_a_frontend_tier_with_node_modules_is_not_reported(tmp_path):

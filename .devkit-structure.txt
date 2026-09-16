@@ -14,20 +14,7 @@
 # than a module's size, and every move is logged below with what it moved and why.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
-complexity::scripts/hooks/enforce-capped-bash.py::split_top_level = 29
-complexity::scripts/hooks/lint-fix.py::extract_paths = 16
-complexity::scripts/hooks/structure_check.py::_pyproject_dependencies = 26
-complexity::scripts/hooks/structure_check.py::resolve_python = 18
-complexity::scripts/hooks/structure_scan.py::mask_literals = 18
-complexity::scripts/hooks/structure_scan.py::scan_js = 19
 complexity::scripts/lint-all.py::main = 19
-complexity::scripts/sync-devkit.py::main = 69
-definitions::scripts/hooks/harness_config.py = 32
-definitions::scripts/hooks/stop.py = 51
-definitions::scripts/hooks/structure_check.py = 42
-definitions::scripts/hooks/structure_scan.py = 31
-definitions::scripts/report-workflow-failure.py = 27
-definitions::scripts/sync-devkit.py = 44
 dependency::pyproject.toml::boto3 = 1
 dependency::pyproject.toml::duckdb = 1
 dependency::pyproject.toml::mypy = 1
@@ -39,43 +26,8 @@ dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::pytest-cov = 1
 dependency::pyproject.toml::ruff = 1
 dependency::pyproject.toml::sqlalchemy = 1
-file_lines::scripts/hooks/enforce-capped-bash.py = 629
-file_lines::scripts/hooks/harness_config.py = 655
-file_lines::scripts/hooks/stop.py = 1110
-file_lines::scripts/hooks/structure_check.py = 1042
-file_lines::scripts/hooks/structure_scan.py = 669
-file_lines::scripts/report-workflow-failure.py = 614
-file_lines::scripts/sync-devkit.py = 1417
-function_lines::scripts/hooks/enforce-capped-bash.py::split_top_level = 96
 function_lines::scripts/lint-all.py::main = 99
-function_lines::scripts/sync-devkit.py::main = 246
-function_params::scripts/report-workflow-failure.py::apply = 7
-nesting_depth::scripts/hooks/harness_events.py::_main_checkout = 5
-nesting_depth::scripts/hooks/structure_check.py::strongly_connected = 5
-nesting_depth::scripts/hooks/structure_scan.py::_complexity = 5
-nesting_depth::scripts/hooks/structure_scan.py::_word_before = 5
-nesting_depth::scripts/hooks/structure_scan.py::mask_literals = 9
-nesting_depth::scripts/hooks/structure_scan.py::scan_python = 6
-skipped_tests::scripts/hooks/tests/test_codex_translation.py = 2
-skipped_tests::scripts/hooks/tests/test_hook_execution_contract.py = 3
-skipped_tests::scripts/hooks/tests/test_lint_fix.py = 1
-skipped_tests::scripts/hooks/tests/test_repo_contract.py = 7
-skipped_tests::scripts/hooks/tests/test_session_start.py = 2
-skipped_tests::scripts/hooks/tests/test_stop.py = 2
-skipped_tests::scripts/hooks/tests/test_structure_check.py = 1
-skipped_tests::scripts/hooks/tests/test_structure_scan.py = 3
-skipped_tests::scripts/hooks/tests/test_sync_codex_hooks.py = 2
-skipped_tests::scripts/hooks/tests/test_untested_symbols.py = 1
-suppressions::scripts/hooks/enforce-capped-bash.py = 2
-suppressions::scripts/hooks/harness_config.py = 1
-suppressions::scripts/hooks/harness_events.py = 1
-suppressions::scripts/hooks/invoke-capped.py = 1
-suppressions::scripts/hooks/lint-fix.py = 2
-suppressions::scripts/hooks/tests/test_sync_codex_hooks.py = 1
-suppressions::scripts/log-wrap.py = 2
 suppressions::scripts/notify-wrap.py = 1
-suppressions::scripts/task_branch.py = 1
-swallowed_errors::scripts/hooks/harness_events.py = 2
 swallowed_errors::scripts/notify.py = 1
 
 # --- recorded growth ------------------------------------------------

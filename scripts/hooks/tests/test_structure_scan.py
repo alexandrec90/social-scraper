@@ -227,6 +227,29 @@ def test_scan_js_a_brace_in_a_string_does_not_end_a_function():
     assert _symbol(ss.scan_js(src), "alpha").lines == 6
 
 
+def test_scan_js_a_helper_named_fit_is_not_a_focused_test():
+    """The reported false positive, in the shape it was reported in.
+
+    `frontend/src/tests/skins/bubbleFit.test.ts` defined a local `fit` over
+    `fitMessage` and was charged twelve focused tests for calling it, in a Vitest
+    suite where `fit` is not a runner global at all. The same collision is open for
+    `xit`, one line up in the scanner, so both are pinned here.
+    """
+    src = "const fit = (a, b) => fitMessage(a, b);\nconst m = fit(text, width);\nxit(again);\n"
+    counts = ss.scan_js(src).counts
+    assert counts["focused_tests"] == 0
+    assert counts["skipped_tests"] == 0
+
+
+def test_scan_js_a_real_focused_test_is_still_counted():
+    """The other half: narrowing to a quoted title must not blind the gate. All four
+    bare spellings take their title first, in whichever quote the file's style uses."""
+    src = "fit(\"a\", () => {});\nfdescribe(`b`, () => {});\nxit('c', () => {});\n"
+    counts = ss.scan_js(src).counts
+    assert counts["focused_tests"] == 2
+    assert counts["skipped_tests"] == 1
+
+
 def test_scan_js_a_todo_in_code_is_not_a_todo():
     src = "const TODO = 1; // TODO: rename\n"
     assert ss.scan_js(src).counts["todos"] == 1

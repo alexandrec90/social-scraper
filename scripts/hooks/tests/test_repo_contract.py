@@ -343,6 +343,155 @@ def test_frontend_commands_name_scripts_that_exist():
     )
 
 
+# --- the dev server's port survives a second worktree -------------------------
+
+# Config file names Vite itself resolves, in its own precedence order.
+VITE_CONFIG_NAMES = ("vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs")
+
+_LINE_COMMENT = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# `port:` as an object key. The lookbehind keeps `strictPort:` and any `x.port:` out;
+# the value runs to the first `,`, `}` or newline, which is where a Vite option ends.
+_PORT_ASSIGN = re.compile(r"(?<![A-Za-z_.])port\s*:\s*([^,\n}]+)")
+_LITERAL_PORT = re.compile(r"^\d+$")
+_STRICT_PORT_ON = re.compile(r"(?<![A-Za-z_.])strictPort\s*:\s*true\b")
+
+
+def _without_comments(text: str) -> str:
+    """`text` with `//` and `/* */` comments blanked out.
+
+    An approximation -- a `//` inside a string literal is stripped too -- and that is
+    the safe direction for both halves of this check: a commented-out `strictPort: true`
+    must not satisfy it, and prose about ports must not trip it.
+    """
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", text))
+
+
+def vite_port_findings(text: str) -> list[str]:
+    """What is wrong with the dev-server port in a Vite config, if anything.
+
+    Two agent sessions on one project run at once by design, each in its own worktree
+    under `.claude/worktrees/`, and each runs `npm run dev`. Vite's default is to take
+    the conventional port, and *silently* slide to the next free number when it is
+    taken -- so the second session serves on a port nobody told it about while the
+    conventional one still answers, with the first session's app. That is not a
+    startup error and nothing reports it; it is found by screenshotting a stale build,
+    which is what it cost before this check existed.
+
+    Three shapes produce it, so all three are findings:
+
+      - no `port:` at all -- the default is the conventional port, and it slides;
+      - a bare integer `port: 5173` -- every worktree asks for the same one;
+      - no `strictPort: true` -- sliding is what makes the collision silent, and a
+        derived port is still a hash, so a collision remains possible.
+
+    The remedy devkit ships is `worktreePort.ts`
+    (`templates/features/frontend/frontend/src/worktreePort.ts`), which derives a
+    stable offset from the checkout's own directory name. This asserts the *property*
+    rather than that file: the destination path is per-project (`[frontend] dir`), and
+    any derivation that leaves the port non-literal and strict fixes the failure.
+    """
+    body = _without_comments(text)
+    values = [m.group(1).strip() for m in _PORT_ASSIGN.finditer(body)]
+    findings = []
+    if not values:
+        findings.append(
+            "configures no `port`, so the dev server takes the conventional one and "
+            "slides to the next free number when a second worktree is already on it"
+        )
+    pinned = sorted({v for v in values if _LITERAL_PORT.match(v)})
+    if pinned:
+        findings.append(
+            f"pins a literal port ({', '.join(pinned)}), so every worktree of this "
+            "repo asks for the same number"
+        )
+    if values and not _STRICT_PORT_ON.search(body):
+        findings.append(
+            "does not set `strictPort: true`, so a collision is a server quietly "
+            "answering for another branch rather than a startup error"
+        )
+    return findings
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # The shape `worktreePort.ts` is wired into: derived, and strict.
+        ("server: { port: DEV_PORT + offset, strictPort: true }", 0),
+        ("server: { port: portFrom(env, 'VITE_PORT', DEV_PORT + offset), strictPort: true }", 0),
+        # An env override with a literal fallback is still derived, not pinned.
+        ("server: { port: Number(process.env.PORT) || 5173, strictPort: true }", 0),
+        # Derived but sliding.
+        ("server: { port: DEV_PORT + offset }", 1),
+        # Pinned but strict: loud, still every worktree fighting for one number.
+        ("server: { port: 5173, strictPort: true }", 1),
+        # Carameli's shape before the fix: pinned and sliding.
+        ("server: { port: 5173 }", 2),
+        # No port block at all.
+        ("server: { allowedHosts: ['host.docker.internal'] }", 1),
+        # `strictPort` must not satisfy the lookbehind's exclusion by accident.
+        ("server: { strictPort: true }", 1),
+        # A commented-out remedy satisfies nothing.
+        ("server: { port: 5173, // strictPort: true\n }", 2),
+        # Prose about ports is not configuration.
+        ("// the port: 5173 default is wrong here\nserver: { port: X, strictPort: true }", 0),
+    ],
+)
+def test_vite_port_findings_reads_the_shapes_that_actually_collide(source, expected):
+    assert len(vite_port_findings(source)) == expected
+
+
+def vite_configs(root: Path, frontend) -> dict[str, str]:
+    """`repo-relative path -> text` for the Vite config the frontend tier declares.
+
+    Empty -- so the caller asserts over nothing rather than skipping -- when the tier
+    is off, or when it declares no Vite config at all. The second case is a frontend
+    that is not Vite, which has its own answer to worktree ports; asserting against a
+    config we cannot read is the guessing this file's docstring rules out.
+
+    Deliberately not a `pytest.skip`: an empty mapping is the same signal without
+    spending a line of the `skipped_tests` budget, which the structural ratchet holds
+    this file to and refuses to baseline.
+    """
+    if not frontend.enabled:
+        return {}
+    front = root / frontend.dir
+    for name in VITE_CONFIG_NAMES:
+        candidate = front / name
+        # Vite resolves the first name that exists, so this checks what it would load.
+        if candidate.is_file():
+            rel = candidate.relative_to(root).as_posix()
+            return {rel: candidate.read_text(encoding="utf-8")}
+    return {}
+
+
+def test_vite_configs_is_empty_unless_the_tier_declares_a_vite_frontend(tmp_path):
+    off = cfg.FrontendConfig(enabled=False)
+    on = cfg.FrontendConfig(enabled=True, dir=".")
+    assert vite_configs(tmp_path, off) == {}
+    assert vite_configs(tmp_path, on) == {}, "tier on, but no Vite config to read"
+    (tmp_path / "vite.config.ts").write_text("server: { port: 5173 }", encoding="utf-8")
+    assert vite_configs(tmp_path, on) == {"vite.config.ts": "server: { port: 5173 }"}
+    assert vite_configs(tmp_path, off) == {}, "tier off wins over a config on disk"
+
+
+@consumes_harness
+def test_the_dev_server_port_survives_a_second_worktree():
+    """A Vite frontend must not hand two worktrees the same dev port silently."""
+    problems = {
+        rel: findings
+        for rel, text in vite_configs(REPO_ROOT, CFG.frontend).items()
+        if (findings := vite_port_findings(text))
+    }
+    assert not problems, (
+        "; ".join(f"{rel} {'; and '.join(f)}" for rel, f in problems.items())
+        + ". Two agent worktrees running `npm run dev` then serve on ports neither was "
+        "told about. Derive the port from the checkout directory and set "
+        "`strictPort: true` -- devkit ships "
+        "`templates/features/frontend/frontend/src/worktreePort.ts` for this."
+    )
+
+
 # --- generated Codex handlers -------------------------------------------------
 
 
@@ -436,6 +585,7 @@ POLICY_CLAUSES = (
     "gaps are not acceptable",
     "fail if the changed behavior were reverted",
     "never lower it merely to make a change pass",
+    "raised on three consecutive branches is a defect report",
     "silently work around a bad instruction",
 )
 
@@ -593,6 +743,37 @@ def test_skill_references_are_one_level_deep_and_exist():
                 f"{reference.relative_to(REPO_ROOT)} links to another local Markdown file; "
                 "skill references must stay one level deep"
             )
+
+
+def test_rule_references_exist():
+    """A rule's Markdown link target is a claim too, and nothing checked it.
+
+    `test_skill_references_are_one_level_deep_and_exist` covers `SKILL.md`, and
+    `tests/test_doc_claims.py` covers cited paths -- but only the *backticked* ones,
+    which in a link like ``[`.claude/engineering-evidence.md`](../engineering-evidence.md)``
+    is the link **text**. The target is never read, so a typo or a rename in it dangles
+    in silence. `authoring.md` telling authors to "link references with normal Markdown
+    links so the contract can resolve them" reads as though this was already checked.
+    It matters more now than it did: a rule pointer is the prescribed remedy for the
+    500-line contract, so the pattern is spreading rather than holding still.
+
+    **Existence only**, deliberately, and neither half of the skill assertion may be
+    reused here:
+
+    * Not the sibling assertion. Every `.md` under `.claude/rules/` loads *as a rule*,
+      so a rule's reference has to live outside that directory -- the one place the
+      skill check requires it to be.
+    * Not the one-level-deep assertion. `engineering-evidence.md` links onward to
+      `scripts/*.md`, which is existing, intended content.
+    """
+    missing: list[str] = []
+    for rule in _rule_files():
+        for reference in _local_markdown_references(rule):
+            if not reference.is_file():
+                missing.append(f"{rule.relative_to(REPO_ROOT).as_posix()} -> {reference}")
+    assert not missing, "rules link to Markdown files that do not exist:\n  " + "\n  ".join(
+        sorted(missing)
+    )
 
 
 def test_long_skill_references_have_a_linked_table_of_contents():
@@ -1031,4 +1212,41 @@ def test_every_vendored_hook_decodes_its_payload_as_utf8():
         + " -- read sys.stdin.buffer and decode('utf-8', errors='replace') once, or "
         "reconfigure the stream first, per the codec note under VERIFY_IMPORT in "
         "scripts/hooks/stop.py"
+    )
+
+
+# --- the repo ignores the worktrees Claude Code cuts for itself ---------------
+# Ungated: `claude --worktree` needs no harness wiring, so a repo that has not adopted
+# the hooks can still acquire one of these.
+
+
+def test_claude_code_s_own_worktrees_are_ignored():
+    """`claude --worktree <name>` (and a Remote Control server started with
+    `--spawn worktree`) cuts a git worktree at `.claude/worktrees/<name>` -- *inside*
+    this checkout, not beside it. A linked worktree is not ignored by git on its
+    parent's behalf, so without an ignore rule the whole nested checkout is untracked:
+    it shows up in every `git status`, `git add -A` stages all of it, and anything that
+    decides by dirtiness (a pre-push gate, `sweep.classify`, a session-start banner)
+    reads this repo as holding uncommitted work for as long as the worktree lives.
+
+    The rule is asserted rather than vendored because a `.gitignore` cannot be: every
+    project's differs, so it is rendered from a template once and never pulled again.
+    A test is what survives that.
+    """
+    gitignore = REPO_ROOT / ".gitignore"
+    assert gitignore.is_file(), (
+        "no .gitignore, so a `claude --worktree` session would leave this checkout "
+        "permanently dirty -- add one containing `.claude/worktrees/`"
+    )
+    patterns = {
+        line.strip().rstrip("/")
+        for line in gitignore.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    # `.claude/` would also cover it, but it buries the harness's own committed files
+    # (settings.json, rules/, skills/), so it is not an acceptable way to pass this.
+    assert ".claude/worktrees" in patterns, (
+        "add `.claude/worktrees/` to .gitignore -- `claude --worktree` and "
+        "`remote-control --spawn worktree` both cut a nested checkout there, and an "
+        "un-ignored one makes this repo read as dirty to everything that looks"
     )
