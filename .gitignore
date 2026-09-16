@@ -45,3 +45,7 @@ Thumbs.db
 # Only the per-user bits are ignored.
 .vscode/*.log
 .vscode/.ropeproject/
+
+# `claude --worktree` and `remote-control --spawn worktree` cut a nested
+# checkout here; un-ignored it makes this repo read as dirty to everything that looks.
+.claude/worktrees/

@@ -64,7 +64,6 @@ scripts/sync-codex-hooks.py::adapter_command
 scripts/sync-codex-hooks.py::is_redundant_handler
 scripts/sync-codex-hooks.py::port_handler
 scripts/sync-codex-hooks.py::root_expression
-scripts/sync-devkit.py::read_receipt
 scripts/sync-devkit.py::receipt_retired_present
 scripts/sync-devkit.py::remove_retired
 scripts/sync-devkit.py::retired_present
