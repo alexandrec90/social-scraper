@@ -2078,3 +2078,327 @@ def test_a_push_sends_the_gated_file_back_to_devkits_layout(tmp_path, monkeypatc
         encoding="utf-8"
     ) == "authored here"
     assert not (src / "src").exists()
+
+
+# --- the seams main() was split along -----------------------------------------
+# Seven consecutive raises of this module's structural baseline recorded the same
+# deferral, each citing the bootstrap constraint -- `sync-devkit.py` is copied ALONE
+# into a project for its first `--pull`, so it cannot import a sibling. That was never
+# why `main` was 271 lines at complexity 74: the shape was one function holding four
+# independent modes, and splitting *within the file* costs the bootstrap nothing. The
+# end-to-end tests above still drive `main`; these name the pieces, so a later change
+# to one of them fails here rather than somewhere downstream of a mode nobody ran.
+
+
+def test_the_parser_answers_every_mode_and_defaults_to_check():
+    parser = sh.build_parser()
+    assert parser.parse_args([]).check is False, "--check is the default by absence"
+    for flag in ("--pull", "--push", "--list", "--check"):
+        chosen = parser.parse_args([flag])
+        assert getattr(chosen, flag.lstrip("-")) is True
+    assert parser.parse_args(["--pull", "--allow-dirty"]).allow_dirty is True
+    assert parser.parse_args(["--pull", "--allow-untagged"]).allow_untagged is True
+
+
+def test_the_modes_are_mutually_exclusive(capsys):
+    """One argparse group, so a contradictory invocation fails at parse time rather
+    than picking whichever branch `main` happened to test first."""
+    with pytest.raises(SystemExit):
+        sh.build_parser().parse_args(["--pull", "--push"])
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_run_list_prints_the_manifest_and_where_it_would_compare(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "local")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    assert sh.run_list(tmp_path / "src", ("scripts/hooks/x.py",)) == 0
+    out = capsys.readouterr().out
+    assert "scripts/hooks/x.py" in out
+    assert str(tmp_path / "src") in out
+
+
+def test_run_list_without_a_source_still_lists(tmp_path, monkeypatch, capsys):
+    """`--list` is the one mode that must answer before adoption: it is how somebody
+    finds out what adopting would copy."""
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+    assert sh.run_list(None, ("scripts/hooks/x.py",)) == 0
+    assert "(unset)" in capsys.readouterr().out
+
+
+def test_an_unadopted_project_with_no_source_is_clean(tmp_path, monkeypatch, capsys):
+    """Before adoption there is nothing to compare, and every mode no-ops clean -- so a
+    project generated an hour ago passes its own PR gate."""
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+    assert sh.unconfigured_verdict() == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_an_adopted_project_with_no_source_says_nothing_was_checked(tmp_path, monkeypatch, capsys):
+    """The same silence is a lie once the stamp exists: the project HAS vendored files
+    and `--check` is the gate over them, so exit 0 would report a comparison that never
+    ran. `DEVKIT_VERSION` is what separates the two, and it is committed -- an unset
+    source is a property of the machine."""
+    (tmp_path / sh.VERSION_FILE).write_text("abc1234\n", encoding="utf-8")
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+
+    assert sh.unconfigured_verdict() == 1
+    assert "NOTHING WAS CHECKED" in capsys.readouterr().out
+
+
+def test_pull_refusal_names_each_refusal_and_each_override(tmp_path, capsys):
+    """Both guards, at the seam rather than through `main`, including that each
+    `--allow-` flag lifts exactly its own refusal and not the other's."""
+    dirty = _repo(tmp_path / "dirty", tag="v9.9.9")
+    (dirty / "f.txt").write_text("uncommitted")
+    assert sh.pull_refusal(dirty, allow_dirty=False, allow_untagged=False) == 2
+    assert "uncommitted changes" in capsys.readouterr().err
+    assert sh.pull_refusal(dirty, allow_dirty=True, allow_untagged=False) == 0
+
+    untagged = _repo(tmp_path / "untagged")
+    assert sh.pull_refusal(untagged, allow_dirty=False, allow_untagged=False) == 2
+    assert "not tagged" in capsys.readouterr().err
+    assert sh.pull_refusal(untagged, allow_dirty=True, allow_untagged=False) == 2, (
+        "--allow-dirty must not excuse an untagged source"
+    )
+    assert sh.pull_refusal(untagged, allow_dirty=False, allow_untagged=True) == 0
+
+    clean = _repo(tmp_path / "clean", tag="v9.9.9")
+    assert sh.pull_refusal(clean, allow_dirty=False, allow_untagged=False) == 0
+
+
+def test_copy_manifest_swaps_only_the_ends(tmp_path, monkeypatch):
+    """The one genuinely symmetric half, which is why both directions share it and
+    nothing else."""
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "local")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    copied, _, failed = sh.copy_manifest(src, ("scripts/hooks/x.py",), pull=True)
+    assert copied == ["scripts/hooks/x.py"] and not failed
+    assert (repo / "scripts/hooks/x.py").read_text() == "upstream"
+
+    (repo / "scripts/hooks/x.py").write_text("authored here", encoding="utf-8")
+    sh.copy_manifest(src, ("scripts/hooks/x.py",), pull=False)
+    assert (src / "scripts/hooks/x.py").read_text() == "authored here"
+
+
+def test_apply_push_does_none_of_what_adoption_does(tmp_path, monkeypatch):
+    """A push is a devkit author sending one change home. Every other side effect in
+    `apply_pull` describes a consumer adopting a release, and doing any of them here
+    would have this project rewrite its own source."""
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "authored here")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    outcome = sh.apply_push(src, ("scripts/hooks/x.py",))
+    assert outcome.pull is False
+    assert outcome.copied == ["scripts/hooks/x.py"]
+    assert (outcome.removed, outcome.unwired, outcome.seeded) == ([], [], None)
+    assert not (repo / sh.VERSION_FILE).exists(), "a push must never stamp the pusher"
+
+
+def test_apply_sync_routes_to_the_direction_it_was_given(tmp_path, monkeypatch):
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "local")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.apply_sync(src, ("scripts/hooks/x.py",), pull=False).pull is False
+    assert sh.apply_sync(src, ("scripts/hooks/x.py",), pull=True).pull is True
+
+
+def test_apply_pull_stamps_before_it_seeds(tmp_path, monkeypatch):
+    """The ordering constraint the ternaries used to hide. `structure_check` keys its
+    vendored-path skip off `DEVKIT_VERSION`, so a baseline seeded while the stamp is
+    absent grandfathers every vendored module into the consumer's numbers -- and the
+    moment the stamp lands the gate stops scanning them, so every one of those keys
+    reads as stale and a freshly generated project is red on arrival."""
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "local")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+    order: list[str] = []
+
+    def note_seed(_root):
+        order.append("seed")
+        assert (repo / sh.VERSION_FILE).is_file(), "the stamp must land before the seeds"
+        return None
+
+    monkeypatch.setattr(sh, "seed_untested_baseline", note_seed)
+    monkeypatch.setattr(sh, "seed_structure_baseline", lambda _root: order.append("structure"))
+    monkeypatch.setattr(sh, "tighten_structure_baseline", lambda _root: None)
+
+    outcome = sh.apply_pull(src, ("scripts/hooks/x.py",))
+    assert order == ["seed", "structure"]
+    assert outcome.pull is True
+
+
+def test_finalise_pull_records_the_tag_in_the_receipt_not_the_stamp(tmp_path, monkeypatch):
+    """`DEVKIT_VERSION` is the SHA, always. The tag goes in the receipt, where
+    `stale_pin` reads it."""
+    src = _repo(tmp_path / "src", tag="v0.5.3")
+    repo = tmp_path / "proj"
+    _seed(repo, sh.PRECOMMIT_FILE, CONFIG)
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    sh.finalise_pull(src, ("scripts/hooks/x.py",))
+    assert "v0.5.3" in (repo / sh.RECEIPT_FILE).read_text(encoding="utf-8")
+    assert "v0.5.3" in (repo / sh.PRECOMMIT_FILE).read_text(encoding="utf-8")
+
+
+def test_report_sync_names_every_file_a_reader_could_act_on(capsys):
+    outcome = sh.SyncOutcome(
+        copied=["a.py"],
+        skipped=["b.py"],
+        removed=[],
+        preserved=["c.py"],
+        unvendored=["d.py"],
+        unwired=["unwired a hook"],
+        blocks_written=[],
+        blocks_failed=[],
+        codex_regenerated=True,
+        seeded=3,
+        seeded_structure=4,
+        tightened=(2, 1),
+        pull=True,
+    )
+    sh.report_sync(outcome)
+    out = capsys.readouterr().out
+    assert "pulled 1 file(s)" in out
+    assert "(absent) b.py" in out
+    assert "(preserved local edit) c.py" in out
+    assert "now yours" in out and "d.py" in out
+    assert "unwired a hook" in out
+    assert sh.CODEX_HOOKS_FILE in out
+    assert "3 symbol(s)" in out
+    assert "4 finding(s) grandfathered" in out
+    assert "dropped 2 line(s)" in out
+
+
+def test_report_failed_blocks_is_silent_and_green_when_every_block_landed(capsys):
+    assert sh.report_failed_blocks([]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_a_block_that_did_not_land_is_red_and_names_the_missing_markers(capsys):
+    """`--pull` cannot fix this and the exit code must not claim success: a configured
+    block that could not be spliced leaves the destination carrying no policy at all."""
+    assert sh.report_failed_blocks(["CLAUDE.md#engineering"]) == 1
+    err = capsys.readouterr().err
+    assert "CLAUDE.md#engineering" in err
+    assert "devkit:begin" in err
+
+
+def test_check_findings_gathers_without_saying_anything(tmp_path, monkeypatch, capsys):
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "drifted")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    found = sh.check_findings(src, ("scripts/hooks/x.py",))
+    assert found.drifted == ["scripts/hooks/x.py"]
+    assert found.upstream is True and found.clean is False
+    assert capsys.readouterr().out == "", "gathering must not print; reporting prints"
+
+
+def test_findings_with_nothing_wrong_are_clean(tmp_path, monkeypatch):
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "same"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "same")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+
+    found = sh.check_findings(src, ("scripts/hooks/x.py",))
+    assert found.clean and not found.upstream
+
+
+def test_local_faults_alone_are_red_but_not_upstream_drift(tmp_path, monkeypatch):
+    """`--pull` fixes a local fault only incidentally. Telling someone to adopt upstream
+    when nothing upstream differs is the advice that gets a red gate reclassified as
+    noise, so the two are separate properties."""
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "same"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "same")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "local_faults", lambda _root: ([("x", "a hook is unwired")], "1 fault"))
+
+    found = sh.check_findings(src, ("scripts/hooks/x.py",))
+    assert not found.upstream
+    assert not found.clean
+
+
+def test_report_findings_gives_upstream_drift_the_pull_remedy(capsys):
+    sh.report_findings(
+        sh.CheckFindings(
+            drifted=["a.py"],
+            missing=["b.py"],
+            retired=["c.py"],
+            receipt_retired=["d.py"],
+            block_drifted=["CLAUDE.md#x"],
+            block_unusable=["CLAUDE.md#y"],
+            block_ok=[],
+            local=[],
+            local_summary="",
+        )
+    )
+    err = capsys.readouterr().err
+    assert "DRIFT   a.py" in err
+    assert "MISSING b.py" in err
+    assert "RETIRED c.py" in err and "RETIRED d.py" in err
+    assert "--pull cannot fix this" in err
+    assert "to adopt upstream" in err
+
+
+def test_report_findings_does_not_send_a_local_fault_at_upstream(capsys):
+    sh.report_findings(
+        sh.CheckFindings(
+            drifted=[],
+            missing=[],
+            retired=[],
+            receipt_retired=[],
+            block_drifted=[],
+            block_unusable=[],
+            block_ok=[],
+            local=[("x", "a hook is unwired")],
+            local_summary="1 local fault",
+        )
+    )
+    err = capsys.readouterr().err
+    assert "a hook is unwired" in err
+    assert "adopt upstream" not in err
+    assert "1 local fault" in err
+
+
+def test_report_stale_pin_is_silent_when_the_pin_is_current(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+    sh.report_stale_pin()
+    assert capsys.readouterr().err == ""
+
+
+def test_a_stale_pin_is_named_before_the_file_list(tmp_path, monkeypatch, capsys):
+    """It changes what the file list *means*: every file added upstream since the pin
+    looks like drift, and re-pulling -- the fix the listing implies -- fixes none of it."""
+    monkeypatch.setattr(sh, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sh, "stale_pin", lambda _root: ("v0.1.0", "v0.9.9"))
+    sh.report_stale_pin()
+    err = capsys.readouterr().err
+    assert "pins v0.1.0" in err and "bump the pin to v0.9.9" in err
+    assert "re-pulling will not fix them" in err
+
+
+def test_run_check_and_run_sync_are_what_main_dispatches_to(tmp_path, monkeypatch):
+    """The dispatch itself, so a mode wired to the wrong helper fails here."""
+    src = _repo(tmp_path / "src", tag="v9.9.9", files={"scripts/hooks/x.py": "same"})
+    repo = tmp_path / "proj"
+    _seed(repo, "scripts/hooks/x.py", "same")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.run_check(src, ("scripts/hooks/x.py",)) == 0
+    assert sh.main(["--check", "--src", str(src)]) == 0
+    assert sh.run_sync(src, ("scripts/hooks/x.py",), pull=False) == 0

@@ -207,3 +207,68 @@ class TestDefaultRoot:
         """`default_root` would have to invent a runtime's digest for a detached tier.
         The first row of `TIERS` being nested is what makes it total."""
         assert not wt.DEFAULT_TIER.detached
+
+
+class TestBoxTier:
+    """The third tier: `<workspace>/.worktrees/<project>--<topic>`, cut by devkit's own
+    `worktree.py`. Its name lives here because six modules had spelled it privately, none
+    of which could import the workspace script that owned the tier -- a Stop hook in a
+    consumer checkout, the Codex hook generator, two ratchets, a tree walk and a disk
+    reclaimer."""
+
+    def _box(self, workspace="C:/ws", name="devkit--topic-0916"):
+        return Path(f"{workspace}/{wt.BOXES_DIR_NAME}/{name}")
+
+    def test_the_box_tier_is_not_in_the_list_match_answers_for(self):
+        """The whole reason it is a separate constant. A box in `TIERS` would be offered
+        `git worktree remove` by the delete menu -- which leaks the port lease and leaves
+        the container stack up -- and would resolve its `owning_checkout` to the
+        workspace, which is not a checkout at all."""
+        assert wt.BOX_TIER not in wt.TIERS
+        assert wt.match(self._box(), CLAUDE_ENV) is None
+        assert wt.tier_of(self._box(), CLAUDE_ENV) is None
+        assert not wt.is_worktree(self._box(), CLAUDE_ENV)
+        assert wt.owning_checkout(self._box(), CLAUDE_ENV) is None
+
+    def test_all_tiers_is_the_two_plus_the_box_in_that_order(self):
+        """`tests/test_worktree_port.py` in devkit holds the TypeScript mirror equal to
+        this tuple, so a tier added to `TIERS` reaches the Vite port derivation without
+        anyone editing a second list."""
+        assert wt.ALL_TIERS == (*wt.TIERS, wt.BOX_TIER)
+
+    def test_the_box_tier_is_one_directory_immediately_above_the_box(self):
+        assert wt.BOX_TIER.segments == (wt.BOXES_DIR_NAME,)
+        assert wt.BOX_TIER.depth == 1
+        assert not wt.BOX_TIER.detached
+
+    def test_is_box_is_true_for_a_box_and_false_for_everything_else(self):
+        assert wt.is_box(self._box())
+        assert not wt.is_box(Path("C:/ws/devkit"))
+        assert not wt.is_box(_claude())
+        assert not wt.is_box(_codex())
+
+    def test_is_box_does_not_call_the_boxes_directory_itself_a_box(self):
+        """`.worktrees/` holds boxes; it is not one. The same distinction `match` draws
+        for `.claude/worktrees/`."""
+        assert not wt.is_box(Path(f"C:/ws/{wt.BOXES_DIR_NAME}"))
+
+    def test_is_box_answers_for_a_path_that_is_already_gone(self):
+        """Pure, like `match`: the callers that ask are deciding whether to *install*
+        something against a directory, and a reaped box is the case they exist for."""
+        assert wt.is_box(Path("C:/nowhere/.worktrees/devkit--reaped-0101"))
+
+
+class TestMarkerNames:
+    def test_marker_names_is_every_tiers_innermost_directory(self):
+        """What a tree walk skips. Both spellings, because the box tier sits beside a
+        checkout and the nested tier sits inside one -- a walk from a checkout root can
+        only ever meet the second, and spelling only the first (which is what
+        `instruction-budget.py` did) skips nothing it can reach."""
+        assert wt.MARKER_NAMES == frozenset({"worktrees", wt.BOXES_DIR_NAME})
+
+    def test_marker_names_leaves_dot_claude_out(self):
+        """It is the Claude tier's OUTER segment and it also holds the rules, skills and
+        settings a walk is usually there to find. Skipping it would be skipping the
+        point -- `harness_state.SKIP_DIRS` splices this set in and would stop finding
+        every `.claude/rules/*.md` in the repo."""
+        assert ".claude" not in wt.MARKER_NAMES

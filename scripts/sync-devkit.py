@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 # For `project_settings.py`, which the three functions below import **on use** rather
@@ -1372,7 +1373,21 @@ def remove_receipt_retired(
     return removed, preserved, unvendored
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI. Split out of `main` with the four mode bodies below it.
+
+    Seven consecutive raises of this module's structural baseline recorded the same
+    deferral, each citing the bootstrap constraint: `sync-devkit.py` is copied ALONE
+    into a project for its first `--pull`, before any sibling exists, so it cannot
+    import one and the usual remedy -- a second module -- is unavailable.
+
+    That constraint was never the reason `main` was 271 lines at complexity 74. Of
+    the 53 definitions here the other 52 average 14 lines; the shape was one
+    function holding four independent modes, and splitting *within the file* costs
+    the bootstrap nothing. `file_lines` barely moves and `definitions` rises, which
+    is the trade the 2026-09-06 record already named: the per-function half is the
+    one worth winning.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true", help="fail on drift (default)")
@@ -1396,238 +1411,406 @@ def main(argv: list[str] | None = None) -> int:
             "stale, because there is no tag to move it to"
         ),
     )
-    args = parser.parse_args(argv)
+    return parser
 
-    src = resolve_src(args.src, os.environ)
-    manifest = manifest_for(REPO_ROOT)
 
-    if args.list:
-        print(f"source: {src or '(unset)'}")
-        print(f"vendored version: {read_version(REPO_ROOT) or '(never pulled)'}")
-        for rel in manifest:
+def run_list(src: Path | None, manifest: tuple[str, ...]) -> int:
+    """`--list`: the manifest and where it would be compared against, then stop."""
+    print(f"source: {src or '(unset)'}")
+    print(f"vendored version: {read_version(REPO_ROOT) or '(never pulled)'}")
+    for rel in manifest:
+        print(f"  {rel}")
+    if BLOCK_MANIFEST:
+        print("vendored blocks (regions of per-project files):")
+        for host, block_id in BLOCK_MANIFEST:
+            print(f"  {host}#{block_id}")
+    if RETIRED_PATHS:
+        print("retired on pull:")
+        for rel in RETIRED_PATHS:
             print(f"  {rel}")
-        if BLOCK_MANIFEST:
-            print("vendored blocks (regions of per-project files):")
-            for host, block_id in BLOCK_MANIFEST:
-                print(f"  {host}#{block_id}")
-        if RETIRED_PATHS:
-            print("retired on pull:")
-            for rel in RETIRED_PATHS:
-                print(f"  {rel}")
+    return 0
+
+
+def unconfigured_verdict() -> int:
+    """What an unset `$DEVKIT_DIR` means, which depends entirely on the stamp."""
+    # Unconfigured. Before adoption that is correct and every mode no-ops clean, so a
+    # project generated an hour ago -- no vendored files, and nothing to compare them
+    # against -- passes its own PR gate.
+    #
+    # After adoption the same silence is a lie. A stamped project HAS vendored files,
+    # `--check` is the gate over them, and exit 0 reports a comparison that never ran.
+    #
+    # The stamp is the one signal that separates the two, and the reason it works is
+    # that it is committed. `$DEVKIT_DIR` is a property of the *machine* -- a second
+    # workstation, a fresh clone, a CI job whose `env:` block was dropped -- and every
+    # one of those is a place where the gate goes quiet exactly when the project has
+    # the most vendored code to compare. `DEVKIT_VERSION` travels with the repo, so it
+    # can tell "not adopted yet" from "adopted, and this machine cannot check it".
+    stamped = read_version(REPO_ROOT)
+    if stamped is None:
+        print(f"sync-harness: ${SRC_ENV} unset and no --src; nothing to do (skipping).")
         return 0
+    print(
+        f"sync-harness: this project vendors devkit ({VERSION_FILE} = {stamped}), but "
+        f"${SRC_ENV} is unset and no --src was given. There is nothing to compare "
+        f"against, so NOTHING WAS CHECKED.\n"
+        f"  point it at a devkit checkout:  {SRC_ENV}=<path> python scripts/sync-devkit.py\n"
+        f"  or drift-check without a clone: pre-commit run devkit-drift --all-files\n"
+        f"(that hook compares against the devkit rev pinned in {PRECOMMIT_FILE}, so it "
+        f"needs no ${SRC_ENV} and no local devkit at all)"
+    )
+    return 1
 
-    if src is None:
-        # Unconfigured. Before adoption that is correct and every mode no-ops clean, so a
-        # project generated an hour ago -- no vendored files, and nothing to compare them
-        # against -- passes its own PR gate.
-        #
-        # After adoption the same silence is a lie. A stamped project HAS vendored files,
-        # `--check` is the gate over them, and exit 0 reports a comparison that never ran.
-        #
-        # The stamp is the one signal that separates the two, and the reason it works is
-        # that it is committed. `$DEVKIT_DIR` is a property of the *machine* -- a second
-        # workstation, a fresh clone, a CI job whose `env:` block was dropped -- and every
-        # one of those is a place where the gate goes quiet exactly when the project has
-        # the most vendored code to compare. `DEVKIT_VERSION` travels with the repo, so it
-        # can tell "not adopted yet" from "adopted, and this machine cannot check it".
-        stamped = read_version(REPO_ROOT)
-        if stamped is None:
-            print(f"sync-harness: ${SRC_ENV} unset and no --src; nothing to do (skipping).")
-            return 0
+
+def pull_refusal(src: Path, allow_dirty: bool, allow_untagged: bool) -> int:
+    """`2` when this source may not be pulled from, `0` when it may.
+
+    Both guards run *before* anything is copied: a refusal must leave the project
+    exactly as it was, not half-upgraded with a stamp to match.
+    """
+    # Both guards run *before* anything is copied: a refusal must leave the
+    # project exactly as it was, not half-upgraded with a stamp to match.
+    if source_dirty(src) and not allow_dirty:
         print(
-            f"sync-harness: this project vendors devkit ({VERSION_FILE} = {stamped}), but "
-            f"${SRC_ENV} is unset and no --src was given. There is nothing to compare "
-            f"against, so NOTHING WAS CHECKED.\n"
-            f"  point it at a devkit checkout:  {SRC_ENV}=<path> python scripts/sync-devkit.py\n"
-            f"  or drift-check without a clone: pre-commit run devkit-drift --all-files\n"
-            f"(that hook compares against the devkit rev pinned in {PRECOMMIT_FILE}, so it "
-            f"needs no ${SRC_ENV} and no local devkit at all)"
+            f"sync-harness: {src} has uncommitted changes. Pulling from it copies "
+            f"files that are at no upstream revision, while the stamp claims HEAD "
+            f"-- the state that made a consumer's drift gate unfixable. Commit "
+            f"there first, or pass --allow-dirty to stamp it as provisional.",
+            file=sys.stderr,
         )
-        return 1
-
-    if args.pull:
-        # Both guards run *before* anything is copied: a refusal must leave the
-        # project exactly as it was, not half-upgraded with a stamp to match.
-        if source_dirty(src) and not args.allow_dirty:
-            print(
-                f"sync-harness: {src} has uncommitted changes. Pulling from it copies "
-                f"files that are at no upstream revision, while the stamp claims HEAD "
-                f"-- the state that made a consumer's drift gate unfixable. Commit "
-                f"there first, or pass --allow-dirty to stamp it as provisional.",
-                file=sys.stderr,
-            )
-            return 2
-        tag = source_tag(src)
-        if tag is None and not args.allow_untagged:
-            print(
-                f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
-                f"tag, so an untagged pull can never be pinned to what it vendored. "
-                f"Tag the release first, or pass --allow-untagged to pull anyway "
-                f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
-                file=sys.stderr,
-            )
-            return 2
-
-    if args.pull or args.push:
-        from_root, to_root = (src, REPO_ROOT) if args.pull else (REPO_ROOT, src)
-        managed_removed, preserved, unvendored = (
-            remove_receipt_retired(REPO_ROOT, manifest, src) if args.pull else ([], [], [])
-        )
-        sources = source_map(REPO_ROOT)
-        copied = [
-            rel
-            for rel in manifest
-            if _copy(*copy_ends(rel, sources, args.pull), from_root, to_root)
-        ]
-        skipped = [rel for rel in manifest if rel not in copied]
-        removed = (remove_retired(REPO_ROOT) + managed_removed) if args.pull else []
-        # After the deletions, never before: pruning a hook whose script survived the
-        # pull would disable a live hook.
-        unwired = settings_pass(REPO_ROOT) if args.pull else []
-        # After the settings pass, never before: the Codex file is generated *from*
-        # those settings, so regenerating first would bake back in whatever the prune
-        # is about to remove.
-        codex_regenerated = regenerate_codex_hooks(REPO_ROOT) if args.pull else False
-        # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
-        # baseline seeded while the stamp is absent grandfathers every vendored module
-        # into the consumer's numbers -- and once the stamp lands the gate stops scanning
-        # them, so all 49 keys read as stale and a generated project is red on arrival.
-        if args.pull:
-            stamp = f"{git_head(src) or 'unknown'}\n"
-            (REPO_ROOT / VERSION_FILE).write_text(stamp, encoding="utf-8", newline="\n")
-        # After the copy, because it runs the scanner this pull just delivered.
-        seeded = seed_untested_baseline(REPO_ROOT) if args.pull else None
-        seeded_structure = seed_structure_baseline(REPO_ROOT) if args.pull else None
-        # After the seed, on every pull that did not just seed: a fresh baseline is exact
-        # by construction, and an adopted one holds whatever the last release earned.
-        tightened = (
-            tighten_structure_baseline(REPO_ROOT)
-            if args.pull and seeded_structure is None
-            else None
-        )
-        blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
-        verb = "pulled" if args.pull else "pushed"
+        return 2
+    tag = source_tag(src)
+    if tag is None and not allow_untagged:
         print(
-            f"sync-harness: {verb} {len(copied)} file(s) and {len(blocks_written)} "
-            f"block(s); removed {len(removed)} retired; skipped {len(skipped)} absent."
+            f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
+            f"tag, so an untagged pull can never be pinned to what it vendored. "
+            f"Tag the release first, or pass --allow-untagged to pull anyway "
+            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
+            file=sys.stderr,
         )
-        for rel in skipped:
-            print(f"  (absent) {rel}")
-        for rel in preserved:
-            print(f"  (preserved local edit) {rel}")
-        for rel in unvendored:
-            # Named on every pull, not just the one that moved it. The file is this
-            # project's own from here on -- devkit will not update it again, and the
-            # only thing that could tell you so is this line.
-            print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
-        for note in unwired:
-            print(f"  {note}")
-        if codex_regenerated:
-            # Named, because it is the one file the pull rewrote that was never copied
-            # from the source: it is generated here, from this project's own settings.
-            print(f"  (regenerated from {SETTINGS_FILE}) {CODEX_HOOKS_FILE}")
-        if seeded is not None:
-            # Only on the pull that adopts the gate. Named because it is a claim about
-            # this repo that nobody wrote by hand, and because the number is the debt
-            # the project is now expected to burn down rather than add to.
-            print(
-                f"  (adopted the untested-symbol ratchet) {UNTESTED_BASELINE_FILE}: "
-                f"{seeded} symbol(s) with no test naming them"
-            )
-        if seeded_structure is not None:
-            print(
-                f"  (adopted the structure ratchet) {STRUCTURE_BASELINE_FILE}: "
-                f"{seeded_structure} finding(s) grandfathered"
-            )
-        if tightened and any(tightened):
-            # Named because it is a project-owned file the pull just rewrote, and the
-            # numbers are what the adoption commit carries that the MANIFEST did not.
-            print(
-                f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
-                f"{tightened[0]} line(s) the code no longer earns, lowered {tightened[1]}"
-            )
-        if args.pull:
-            # The stamp itself is written above, before the baselines are seeded. It
-            # is the SHA, always: DEVKIT_VERSION records the upstream *commit*, and
-            # the vendored `test_harness_version_records_a_commit` asserts exactly
-            # that. The tag goes in the receipt instead, where `stale_pin` reads it.
-            # No tag recorded for an untagged or dirty pull: there is no release
-            # those files correspond to, and `stale_pin` reporting "cannot tell"
-            # beats it asserting something untrue.
-            provisional = source_dirty(src)
-            write_receipt(REPO_ROOT, manifest, tag="" if provisional else (tag or ""))
-            # The third moving part. Files, stamp and pin land together or the pull
-            # is a half-upgrade whose gate fails later pointing at the wrong cause.
-            if tag:
-                _retarget(REPO_ROOT, PRECOMMIT_FILE, tag, bump_pin)
-                _retarget(REPO_ROOT, PR_GATE_FILE, tag, bump_gate_ref)
-        if blocks_failed:
-            # Reported after the stamp is written, not instead of it: the files that
-            # did land are on disk either way, and a receipt that omits them would
-            # misdescribe the tree. The exit code is what must not claim success --
-            # a configured block that could not be spliced leaves the destination
-            # carrying no policy at all, which `--check` alone would find far later.
-            for entry in blocks_failed:
-                print(f"BLOCK   {entry}", file=sys.stderr)
-            print(
-                f"sync-harness: {len(blocks_failed)} block(s) did not land. Add the "
-                f"missing `{BLOCK_BEGIN.format(block_id='<id>')}` / "
-                f"`{BLOCK_END.format(block_id='<id>')}` markers to the host file.",
-                file=sys.stderr,
-            )
-            return 1
+        return 2
+    return 0
+
+
+@dataclass(frozen=True)
+class SyncOutcome:
+    """What one `--pull`/`--push` did, separated from saying so.
+
+    The copy is a sequence of side effects whose *order* is the whole correctness
+    argument -- deletions before the settings prune, the prune before the Codex
+    regeneration, the stamp before the baseline seeds -- and it used to be interleaved
+    with twenty print statements enforcing no order at all. Splitting the two is what
+    takes `run_sync` off the structural baseline, and it also means the ordering
+    comments now sit in a function short enough to read end to end.
+    """
+
+    copied: list[str]
+    skipped: list[str]
+    removed: list[str]
+    preserved: list[str]
+    unvendored: list[str]
+    unwired: list[str]
+    blocks_written: list[str]
+    blocks_failed: list[str]
+    codex_regenerated: bool
+    seeded: int | None
+    seeded_structure: int | None
+    tightened: tuple[int, int] | None
+    pull: bool
+
+
+def copy_manifest(
+    src: Path, manifest: tuple[str, ...], *, pull: bool
+) -> tuple[list[str], list[str], list[str]]:
+    """`(copied, blocks written, blocks that could not be spliced)`, either direction.
+
+    The one genuinely symmetric half: the ends swap and nothing else does. Everything
+    a pull additionally does -- deleting, pruning, stamping, seeding, pinning -- a push
+    has no business doing, which is why the two callers below share only this.
+    """
+    from_root, to_root = (src, REPO_ROOT) if pull else (REPO_ROOT, src)
+    sources = source_map(REPO_ROOT)
+    copied = [rel for rel in manifest if _copy(*copy_ends(rel, sources, pull), from_root, to_root)]
+    blocks_written, blocks_failed = sync_blocks(from_root, to_root, BLOCK_MANIFEST)
+    return copied, list(blocks_written), list(blocks_failed)
+
+
+def apply_push(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
+    """`--push`: copy this project's files up, and stop.
+
+    No deletions, no stamp, no seeds, no pin. A push is a devkit author sending one
+    change home; every other side effect in `apply_pull` describes a consumer adopting
+    a release, and doing any of them here would have this project rewrite the source.
+    """
+    copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=False)
+    return SyncOutcome(
+        copied=copied,
+        skipped=[rel for rel in manifest if rel not in copied],
+        removed=[],
+        preserved=[],
+        unvendored=[],
+        unwired=[],
+        blocks_written=blocks_written,
+        blocks_failed=blocks_failed,
+        codex_regenerated=False,
+        seeded=None,
+        seeded_structure=None,
+        tightened=None,
+        pull=False,
+    )
+
+
+def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
+    """`--pull`: copy upstream's files down, then every side effect adoption needs.
+
+    **The order is the correctness argument**, and each step's comment says what it is
+    ordered against. Written as a straight line rather than as `apply_push` with nine
+    `if pull` ternaries hung off it, which is what it was: the ternaries carried the
+    ordering constraints past the eye and cost complexity 32 in a function whose
+    sequence is the only thing a reader is here for.
+    """
+    managed_removed, preserved, unvendored = remove_receipt_retired(REPO_ROOT, manifest, src)
+    copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=True)
+    removed = remove_retired(REPO_ROOT) + managed_removed
+    # After the deletions, never before: pruning a hook whose script survived the
+    # pull would disable a live hook.
+    unwired = settings_pass(REPO_ROOT)
+    # After the settings pass, never before: the Codex file is generated *from*
+    # those settings, so regenerating first would bake back in whatever the prune
+    # is about to remove.
+    codex_regenerated = regenerate_codex_hooks(REPO_ROOT)
+    # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
+    # baseline seeded while the stamp is absent grandfathers every vendored module
+    # into the consumer's numbers -- and once the stamp lands the gate stops scanning
+    # them, so all 49 keys read as stale and a generated project is red on arrival.
+    (REPO_ROOT / VERSION_FILE).write_text(
+        f"{git_head(src) or 'unknown'}\n", encoding="utf-8", newline="\n"
+    )
+    # After the copy, because it runs the scanner this pull just delivered.
+    seeded = seed_untested_baseline(REPO_ROOT)
+    seeded_structure = seed_structure_baseline(REPO_ROOT)
+    # After the seed, on every pull that did not just seed: a fresh baseline is exact
+    # by construction, and an adopted one holds whatever the last release earned.
+    tightened = tighten_structure_baseline(REPO_ROOT) if seeded_structure is None else None
+    finalise_pull(src, manifest)
+    return SyncOutcome(
+        copied=copied,
+        skipped=[rel for rel in manifest if rel not in copied],
+        removed=removed,
+        preserved=preserved,
+        unvendored=unvendored,
+        unwired=unwired,
+        blocks_written=blocks_written,
+        blocks_failed=blocks_failed,
+        codex_regenerated=codex_regenerated,
+        seeded=seeded,
+        seeded_structure=seeded_structure,
+        tightened=tightened,
+        pull=True,
+    )
+
+
+def apply_sync(src: Path, manifest: tuple[str, ...], *, pull: bool) -> SyncOutcome:
+    """Copy the manifest one way and run whatever that direction owes."""
+    return apply_pull(src, manifest) if pull else apply_push(src, manifest)
+
+
+def finalise_pull(src: Path, manifest: tuple[str, ...]) -> None:
+    """The receipt and the two pins -- the pull's third moving part.
+
+    The stamp itself is written by `apply_sync`, before the baselines are seeded. It is
+    the SHA, always: `DEVKIT_VERSION` records the upstream *commit*, and the vendored
+    `test_harness_version_records_a_commit` asserts exactly that. The tag goes in the
+    receipt instead, where `stale_pin` reads it. No tag is recorded for an untagged or
+    dirty pull: there is no release those files correspond to, and `stale_pin` reporting
+    "cannot tell" beats it asserting something untrue.
+
+    `source_tag` is read here rather than handed down from `pull_refusal`, which asks
+    the same question to decide whether to refuse. Two cheap `git` reads beat a guard
+    that returns a value as well as a verdict.
+    """
+    tag = source_tag(src)
+    provisional = source_dirty(src)
+    write_receipt(REPO_ROOT, manifest, tag="" if provisional else (tag or ""))
+    # Files, stamp and pin land together or the pull is a half-upgrade whose gate
+    # fails later pointing at the wrong cause.
+    if tag:
+        _retarget(REPO_ROOT, PRECOMMIT_FILE, tag, bump_pin)
+        _retarget(REPO_ROOT, PR_GATE_FILE, tag, bump_gate_ref)
+
+
+def report_sync(outcome: SyncOutcome) -> None:
+    """Say what `apply_sync` did, one line per thing a reader could act on."""
+    verb = "pulled" if outcome.pull else "pushed"
+    print(
+        f"sync-harness: {verb} {len(outcome.copied)} file(s) and "
+        f"{len(outcome.blocks_written)} block(s); removed {len(outcome.removed)} "
+        f"retired; skipped {len(outcome.skipped)} absent."
+    )
+    for rel in outcome.skipped:
+        print(f"  (absent) {rel}")
+    for rel in outcome.preserved:
+        print(f"  (preserved local edit) {rel}")
+    for rel in outcome.unvendored:
+        # Named on every pull, not just the one that moved it. The file is this
+        # project's own from here on -- devkit will not update it again, and the
+        # only thing that could tell you so is this line.
+        print(f"  (now yours -- un-vendored, devkit no longer updates it) {rel}")
+    for note in outcome.unwired:
+        print(f"  {note}")
+    if outcome.codex_regenerated:
+        # Named, because it is the one file the pull rewrote that was never copied
+        # from the source: it is generated here, from this project's own settings.
+        print(f"  (regenerated from {SETTINGS_FILE}) {CODEX_HOOKS_FILE}")
+    if outcome.seeded is not None:
+        # Only on the pull that adopts the gate. Named because it is a claim about
+        # this repo that nobody wrote by hand, and because the number is the debt
+        # the project is now expected to burn down rather than add to.
+        print(
+            f"  (adopted the untested-symbol ratchet) {UNTESTED_BASELINE_FILE}: "
+            f"{outcome.seeded} symbol(s) with no test naming them"
+        )
+    if outcome.seeded_structure is not None:
+        print(
+            f"  (adopted the structure ratchet) {STRUCTURE_BASELINE_FILE}: "
+            f"{outcome.seeded_structure} finding(s) grandfathered"
+        )
+    if outcome.tightened and any(outcome.tightened):
+        # Named because it is a project-owned file the pull just rewrote, and the
+        # numbers are what the adoption commit carries that the MANIFEST did not.
+        print(
+            f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
+            f"{outcome.tightened[0]} line(s) the code no longer earns, lowered "
+            f"{outcome.tightened[1]}"
+        )
+
+
+def report_failed_blocks(blocks_failed: list[str]) -> int:
+    """`1` and a remedy when a configured block could not be spliced, else `0`.
+
+    Reported after the stamp is written, not instead of it: the files that did land are
+    on disk either way, and a receipt that omits them would misdescribe the tree. The
+    exit code is what must not claim success -- a configured block that could not be
+    spliced leaves the destination carrying no policy at all, which `--check` alone
+    would find far later.
+    """
+    if not blocks_failed:
         return 0
+    for entry in blocks_failed:
+        print(f"BLOCK   {entry}", file=sys.stderr)
+    print(
+        f"sync-harness: {len(blocks_failed)} block(s) did not land. Add the "
+        f"missing `{BLOCK_BEGIN.format(block_id='<id>')}` / "
+        f"`{BLOCK_END.format(block_id='<id>')}` markers to the host file.",
+        file=sys.stderr,
+    )
+    return 1
 
-    # Default: --check
-    vendored, available = read_version(REPO_ROOT), git_head(src)
-    if available and vendored and vendored != available:
-        # Informational only -- drift is decided by content below, not version.
-        print(f"sync-harness: vendored {vendored}, shared repo at {available} (newer available).")
+
+def run_sync(src: Path, manifest: tuple[str, ...], *, pull: bool) -> int:
+    """`--pull` or `--push`: copy the manifest one way, then report what moved."""
+    outcome = apply_sync(src, manifest, pull=pull)
+    report_sync(outcome)
+    return report_failed_blocks(outcome.blocks_failed)
+
+
+@dataclass(frozen=True)
+class CheckFindings:
+    """Everything `--check` compared, before anything is said about it.
+
+    Gathered apart from the reporting for the same reason `SyncOutcome` is: the
+    comparisons are cheap and unconditional, while the *order* the findings are
+    announced in is the whole usability argument -- the stale pin first, because it
+    changes what the file list means. Interleaved, the function was complexity 26.
+    """
+
+    drifted: list[str]
+    missing: list[str]
+    retired: list[str]
+    receipt_retired: list[str]
+    block_drifted: list[str]
+    block_unusable: list[str]
+    block_ok: list[str]
+    local: list[tuple[str, str]]
+    local_summary: str
+
+    @property
+    def upstream(self) -> bool:
+        """Anything `--pull` or `--push` would resolve. `local` is deliberately out."""
+        return bool(
+            self.drifted
+            or self.missing
+            or self.retired
+            or self.receipt_retired
+            or self.block_drifted
+            or self.block_unusable
+        )
+
+    @property
+    def clean(self) -> bool:
+        return not (self.upstream or self.local)
+
+
+def check_findings(src: Path, manifest: tuple[str, ...]) -> CheckFindings:
+    """Compare this project's vendored tier against `src`, saying nothing."""
     drifted, missing, _ = classify(src, REPO_ROOT, manifest)
     block_drifted, block_unusable, block_ok = classify_blocks(src, REPO_ROOT, BLOCK_MANIFEST)
-    retired = retired_present(REPO_ROOT)
-    receipt_retired = receipt_retired_present(REPO_ROOT, manifest)
     # Faults in this project's own files: not drift, since `--check` never compares
     # them, but red for the same reason -- an unwired edit guard has no other symptom.
     local, local_summary = local_faults(REPO_ROOT)
-    if not (
-        drifted or missing or retired or receipt_retired or block_drifted or block_unusable or local
-    ):
-        blocks = f" and {len(block_ok)} block(s)" if BLOCK_MANIFEST else ""
-        print(f"sync-harness: all {len(manifest)} vendored files{blocks} in sync with {src}.")
-        return 0
-    # Named before the file list, because it changes what the file list *means*: a
-    # stale pin makes every file added upstream since the pin look like drift, and
-    # re-pulling -- the fix the listing implies -- cannot resolve any of it.
+    return CheckFindings(
+        drifted=list(drifted),
+        missing=list(missing),
+        retired=list(retired_present(REPO_ROOT)),
+        receipt_retired=list(receipt_retired_present(REPO_ROOT, manifest)),
+        block_drifted=list(block_drifted),
+        block_unusable=list(block_unusable),
+        block_ok=list(block_ok),
+        local=list(local),
+        local_summary=local_summary,
+    )
+
+
+def report_stale_pin() -> None:
+    """Named before the file list, because it changes what the file list *means*.
+
+    A stale pin makes every file added upstream since the pin look like drift, and
+    re-pulling -- the fix the listing implies -- cannot resolve any of it.
+    """
     stale = stale_pin(REPO_ROOT)
-    if stale:
-        pinned, vendored = stale
-        print(
-            f"sync-harness: {PRECOMMIT_FILE} pins {pinned} but these files were "
-            f"vendored from {vendored}. The pin is stale, so the differences below "
-            f"are measured against the wrong revision -- bump the pin to {vendored}; "
-            f"re-pulling will not fix them.",
-            file=sys.stderr,
-        )
-    for rel in drifted:
+    if not stale:
+        return
+    pinned, vendored = stale
+    print(
+        f"sync-harness: {PRECOMMIT_FILE} pins {pinned} but these files were "
+        f"vendored from {vendored}. The pin is stale, so the differences below "
+        f"are measured against the wrong revision -- bump the pin to {vendored}; "
+        f"re-pulling will not fix them.",
+        file=sys.stderr,
+    )
+
+
+def report_findings(found: CheckFindings) -> None:
+    """One line per difference, then the remedy that actually resolves this set."""
+    for rel in found.drifted:
         print(f"DRIFT   {rel}", file=sys.stderr)
-    for rel in missing:
+    for rel in found.missing:
         print(f"MISSING {rel} (not in shared repo)", file=sys.stderr)
-    for rel in retired:
+    for rel in found.retired:
         print(f"RETIRED {rel} (run --pull to remove)", file=sys.stderr)
-    for rel in receipt_retired:
+    for rel in found.receipt_retired:
         print(f"RETIRED {rel} (recorded by {RECEIPT_FILE})", file=sys.stderr)
-    for label in block_drifted:
+    for label in found.block_drifted:
         print(f"DRIFT   {label} (vendored block)", file=sys.stderr)
-    for label in block_unusable:
+    for label in found.block_unusable:
         # Distinct from DRIFT on purpose: `--pull` fixes drift, and cannot fix a
         # missing marker pair. Saying so here saves the pull that would not help.
         print(f"BLOCK   {label} -- not comparable; --pull cannot fix this", file=sys.stderr)
-    for _, message in local:
+    for _, message in found.local:
         # Never DRIFT: `--pull` fixes these, but nothing upstream differs, so the file
         # list and the advice that goes with it would both point at the wrong thing.
         print(message, file=sys.stderr)
-    if drifted or missing or retired or receipt_retired or block_drifted or block_unusable:
+    if found.upstream:
         print(
             "sync-harness: vendored harness drifted from the shared repo. "
             "Run `python scripts/sync-devkit.py --pull` to adopt upstream, "
@@ -1639,10 +1822,43 @@ def main(argv: list[str] | None = None) -> int:
         # someone to adopt upstream when nothing upstream differs is the kind of advice
         # that gets a red gate reclassified as noise.
         print(
-            f"sync-harness: every vendored file is in sync; {local_summary}.",
+            f"sync-harness: every vendored file is in sync; {found.local_summary}.",
             file=sys.stderr,
         )
+
+
+def run_check(src: Path, manifest: tuple[str, ...]) -> int:
+    """The default mode: compare, and say what differs in the words of its remedy."""
+    vendored, available = read_version(REPO_ROOT), git_head(src)
+    if available and vendored and vendored != available:
+        # Informational only -- drift is decided by content below, not version.
+        print(f"sync-harness: vendored {vendored}, shared repo at {available} (newer available).")
+    found = check_findings(src, manifest)
+    if found.clean:
+        blocks = f" and {len(found.block_ok)} block(s)" if BLOCK_MANIFEST else ""
+        print(f"sync-harness: all {len(manifest)} vendored files{blocks} in sync with {src}.")
+        return 0
+    report_stale_pin()
+    report_findings(found)
     return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    src = resolve_src(args.src, os.environ)
+    manifest = manifest_for(REPO_ROOT)
+
+    if args.list:
+        return run_list(src, manifest)
+    if src is None:
+        return unconfigured_verdict()
+    if args.pull:
+        refused = pull_refusal(src, args.allow_dirty, args.allow_untagged)
+        if refused:
+            return refused
+    if args.pull or args.push:
+        return run_sync(src, manifest, pull=args.pull)
+    return run_check(src, manifest)
 
 
 if __name__ == "__main__":

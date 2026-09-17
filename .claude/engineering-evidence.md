@@ -101,6 +101,39 @@ returns in about a second never waited for anything. A `CONFLICTING` PR gives th
 message and does not get better on a retry — which is what asking `mergeStateStatus`
 once, at the front, settles before the ambiguity can arise.
 
+## The worktree isolation guard: what it actually reads
+
+Read out of the installed Claude Code binary and reproduced by hand in a worktree
+session. The guard is one function, reached only when the session has an isolation root,
+and the call site selects it on the shell: the PowerShell tool reaches the
+working-directory check that sits above it and nothing else.
+
+Two spellings of one path, one session, the same target directory:
+
+```
+git -C ~/…/eager-kindling-russell rev-parse       → refused, "computed at runtime"
+git -C "$HOME/…/eager-kindling-russell" rev-parse → C:/Users/…/eager-kindling-russell
+```
+
+The tilde is never expanded before the check — the path predicate rejects any string
+containing `~` outright, alongside `/proc/self`, `/dev/fd` and a leading `/../`.
+
+The substring match is the expensive one. A statement the parser cannot reduce to a
+simple list is tested against `/git/i` over the entire line, unanchored:
+
+```
+for f in a b; do echo "$f"; done && echo done-ok     → runs
+for f in a b; do echo "$f"; done && echo legitimate  → "names git in a form too complex"
+```
+
+Both ran seconds apart in the same session. **The earlier wording of this rule was wrong
+on two of its three examples** — it named a heredoc and a `$HOME` argument as refusals in
+their own right, and each of them runs. Only the `cd … &&` example held up, and the guard
+has a branch for exactly that shape. The two wrong ones pointed the wrong way: an agent
+reading them avoids `$HOME` for the tilde, which is the one spelling that is actually
+refused. Nothing gates a sentence like that, which is why it survived until a session
+ran the commands instead of believing it.
+
 ## Why capped Bash is a blocklist, not a proof obligation
 
 **This gate used to work the other way round**, and the reversal is worth knowing

@@ -33,8 +33,34 @@ from conftest import REPO_ROOT, load_module
 SCRIPT = REPO_ROOT / ".claude" / "hooks" / "session-start.sh"
 BASH = shutil.which("bash")
 
+
+def _bash_runs() -> bool:
+    """Can `bash` actually execute something, as opposed to merely being on PATH?
+
+    On Windows `which("bash")` finds `C:\\WINDOWS\\system32\\bash.EXE`, the WSL
+    launcher, which is present on every machine with the optional feature enabled --
+    including many with no distribution installed. There it exits non-zero with
+    `execvpe(/bin/bash) failed: No such file or directory`, so a `BASH is None` guard
+    passes and all 45 tests in this module fail, every run, on a fact about the
+    workstation that no change to the repository can alter. Reported from a consumer
+    whose whole hook tier was red for it.
+
+    Probed rather than sniffed for a platform: a WSL *with* a distribution runs these
+    correctly and must keep doing so, and CI's Linux bash must never be skipped.
+    """
+    if BASH is None:
+        return False
+    try:
+        return (
+            subprocess.run([BASH, "-c", "exit 0"], capture_output=True, timeout=30).returncode == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    BASH is None or not SCRIPT.exists(), reason="needs bash and .claude/hooks/session-start.sh"
+    not _bash_runs() or not SCRIPT.exists(),
+    reason="needs a working bash and .claude/hooks/session-start.sh",
 )
 
 # The line whose absence *is* the bug: provisioning must reach the end of the

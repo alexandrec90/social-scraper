@@ -2,7 +2,7 @@
 name: ship
 description: 'Ship the completed task branch: verify it, commit the intended diff, push it, and open or reuse its GitHub pull request.'
 argument-hint: 'Optional PR title, or context such as which box/worktree to ship from'
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Ship the current task
