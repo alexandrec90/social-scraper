@@ -287,11 +287,12 @@ def test_a_failed_api_call_surfaces_with_its_stderr():
 # `HTTP 403: Resource not accessible by integration`, and the retry for stranded
 # auto-merges had not run since in any repo holding an `automerge` PR.
 #
-# `scheduled-failure-issue.yml` reported it correctly and immediately -- one repo's issue
-# had been open for over a month, updated hourly -- which is worth stating because it
-# locates the gap precisely. Nothing here failed to *notice*. What was missing was the
-# thing that would have made the bug impossible to ship: the permission a call needs is
-# not in the file you add the call to, and no test spanned the two.
+# `scheduled-failure-issue.yml` reported it correctly and immediately -- social-scraper#3
+# was opened the first night it fired, 2026-09-07, and updated hourly for the nine days
+# until the PR it was stranding merged -- which is worth stating because it locates the
+# gap precisely. Nothing here failed to *notice*. What was missing was the thing that
+# would have made the bug impossible to ship: the permission a call needs is not in the
+# file you add the call to, and no test spanned the two.
 #
 # Deriving the routes from the source rather than listing them is the whole point. A test
 # that pinned today's five paths would pass the day a sixth is added -- which is exactly

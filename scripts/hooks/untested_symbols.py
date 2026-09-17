@@ -234,20 +234,45 @@ def module_pattern(module: Path) -> re.Pattern[str]:
     this module's opening claims it does not have -- and the ratchet turns it into
     pressure to delete a real gap from the baseline as "now covered".
 
-    The file-name spelling is still a plain substring, because that is how a test
-    loading the module by path spells it. It is matched against the file's **code**,
-    never its docstrings or comments: `read_tests` strips both through `code_only`
-    before any pattern sees the text. A docstring explaining that a sibling script is
-    *not* what a file tests used to put that file in the sibling's corpus, where an
-    unrelated `.main()` then read as coverage of the sibling's `main` -- the same false
-    "now covered" verdict as the bare-stem match above, reached through prose instead
-    of a path, and it cost a reporter three diagnostic cycles because the prose moved
-    with the tests when they were split into another file.
+    The file-name spelling is matched against the file's **code**, never its docstrings
+    or comments: `read_tests` strips both through `code_only` before any pattern sees the
+    text. A docstring explaining that a sibling script is *not* what a file tests used to
+    put that file in the sibling's corpus, where an unrelated `.main()` then read as
+    coverage of the sibling's `main` -- the same false "now covered" verdict as the
+    bare-stem match above, reached through prose instead of a path, and it cost a
+    reporter three diagnostic cycles because the prose moved with the tests when they
+    were split into another file.
+
+    Closing the prose route left the **code** route open, and it is the more natural one
+    to hit: the file name was a plain substring of the code, so a script's path written
+    as an ordinary string -- an argv element, an `--ignore=` value, an assertion about a
+    log line -- joined that script's corpus, where any `x.main(` in the same file read as
+    coverage of its `main`. Writing `scripts/run-tests.py` inside a realistic wrapped
+    command, in a test of `notify-wrap.py`, was enough to make the gate demand
+    `run-tests.py::main` be deleted from the baseline as "now covered".
+
+    So the path spelling now has to sit where a module is *reached*, not merely named:
+    immediately after `(` -- a call's first argument, which is every loader
+    (`load_module("scripts/x.py")`, `load_script(...)`, `Action(...)`) -- or after `/`,
+    which is the `REPO_ROOT / "scripts/hooks/x.py"` join the live-hook tests use. An
+    argv element, a mapping key, a membership check and a quoted log line all stop
+    counting. The three binding spellings below are unchanged: a test that imports the
+    module, or binds it, was never reachable through this route.
+
+    **The residual, named so it is not rediscovered as a defect:** `x.endswith(
+    "scripts/acme-tool.py")` is a call's first argument too, and still joins the corpus.
+    Position cannot tell it from a loader, and the alternative -- an allow-list of loader
+    names -- would be a rule about devkit's own test idiom in a file every consumer
+    vendors, where `load_script` may not exist. One assertion form left admitting is a
+    far smaller surface than every mention in the file, and narrowing it further wants
+    the call's *callee*, which means parsing rather than matching.
     """
     filename = re.escape(module.name)
     snake = re.escape(module.stem.replace("-", "_"))
     return re.compile(
-        rf"\b{filename}\b"  # path spelling: 'scripts/sync-devkit.py'
+        # path spelling, in the position that reaches a module rather than names one:
+        # load_module('scripts/sync-devkit.py'), REPO_ROOT / 'scripts/sync-devkit.py'
+        rf"""[(/]\s*["'][^"']*{filename}["']"""
         rf"|^\s*(?:import|from)\s+.*\b{snake}\b"  # import sync_devkit / from x import ...
         rf"|\b{snake}\s*\."  # sync_devkit.main
         rf"|\b{snake}\b\s*=",  # sync_devkit = load(...)

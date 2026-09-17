@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import time
 from pathlib import Path
 
 import pytest
@@ -197,6 +196,13 @@ def test_the_corpus_is_only_the_tests_that_name_the_module():
         "assert '--ignore=tests/acme_tool' in ADDOPTS",  # a path that merely contains it
         "# acme_tool is the one this does NOT cover",  # prose naming the module
         "acme_tool_helpers.alpha()",  # a longer name that starts with it
+        # The **code route**: the path spelled as an ordinary string, in a position that
+        # names the script without reaching it. Each of these was enough to join the
+        # corpus while the file-name alternative was a plain substring.
+        "wrapped = ['python', 'scripts/acme-tool.py', '--changed']",  # an argv element
+        "assert out == 'ran scripts/acme-tool.py'",  # a log line quoting it
+        "ARTIFACTS = {'scripts/acme-tool.py': 'logs/acme.log'}",  # a mapping key
+        "assert 'scripts/acme-tool.py' in manifest",  # a membership check
     ],
 )
 def test_a_module_named_only_in_passing_does_not_join_its_corpus(text):
@@ -240,7 +246,9 @@ def test_corpus_files_names_the_files_the_corpus_is_made_of():
 @pytest.mark.parametrize(
     "text",
     [
-        "load_module('scripts/acme-tool.py')",  # the file name
+        "load_module('scripts/acme-tool.py')",  # the file name, as a loader's argument
+        'load_script("scripts/acme-tool.py")',  # the same, double-quoted
+        "hook = REPO_ROOT / 'scripts/acme-tool.py'",  # the path-join spelling
         "import acme_tool",  # an import
         "acme_tool.alpha()",  # an attribute off it
         "acme_tool = load_module('x')",  # a binding
@@ -615,16 +623,64 @@ adopted = pytest.mark.skipif(
 
 @adopted
 def test_every_public_symbol_is_named_by_a_test():
-    started = time.monotonic()
     uncovered, _ = us.verdict(REPO_ROOT, us.CFG)
-    elapsed = time.monotonic() - started
     assert not uncovered, (
         "write a test naming these, do not add them to the baseline: " + ", ".join(uncovered)
     )
-    # This gate runs on every push, so its cost is paid on every push. One verdict took
-    # 25s before `referenced_names`; the bound is loose enough for a slow runner and
-    # tight enough that a return to per-symbol regex scans cannot pass it.
-    assert elapsed < 10, f"the live scan took {elapsed:.1f}s; see referenced_names"
+
+
+@adopted
+def test_the_live_scan_reads_each_test_file_once_rather_than_once_per_symbol(monkeypatch):
+    """The cost guard, counted rather than timed.
+
+    This gate runs on every push, so its cost is paid on every push, and one verdict took
+    25s before `referenced_names`: the scan ran `reference_pattern(symbol).search(corpus)`
+    for every public symbol in the repo. What makes that shape impossible is structural --
+    one pass per test file, no per-symbol regex at all -- so that is what is asserted.
+
+    It replaces `assert elapsed < 10`, which measured the machine and not the code. The
+    true cost on an ordinary Windows laptop is 5-7s warm and 11.7s cold, and the cold
+    overrun reproduced on `main` in a clean worktree: a bound with no margin over the
+    passing case cannot tell a 25s regression from a cold page cache, so it failed
+    randomly while protecting nothing. Raising 10 to N would have been the ceiling-raise
+    `.claude/rules/engineering.md` refuses; counting the work removes the ceiling instead.
+
+    An intervening change on `main` had moved the same assertion from wall clock to
+    `time.process_time()`, which fixes the half this test met while the gate was being
+    parallelised -- eight xdist workers descheduling the scan and a wall-clock read
+    charging it for the other seven. It is a real improvement and it is not this one: a
+    CPU-time bound is still a number about the machine, so the same test stays green on
+    a fast core and red on a slow one while saying nothing about whether the per-symbol
+    scan came back. This counts the scan instead, which no clock can be wrong about.
+
+    Reversion check: put a `reference_pattern(symbol).search(...)` back in `gaps` and the
+    second assertion fails -- immediately, on any machine, in any cache state.
+    """
+    reads: list[int] = []
+    patterns: list[str] = []
+    real_referenced_names, real_reference_pattern = us.referenced_names, us.reference_pattern
+
+    def counted_referenced_names(text):
+        reads.append(len(text))
+        return real_referenced_names(text)
+
+    def counted_reference_pattern(symbol):
+        patterns.append(symbol)
+        return real_reference_pattern(symbol)
+
+    monkeypatch.setattr(us, "referenced_names", counted_referenced_names)
+    monkeypatch.setattr(us, "reference_pattern", counted_reference_pattern)
+    us.verdict(REPO_ROOT, us.CFG)
+
+    corpus = len(us.test_files(REPO_ROOT, us.CFG))
+    assert len(reads) == corpus, (
+        f"the scan made {len(reads)} passes over a {corpus}-file corpus; it must make one "
+        "per file -- see referenced_names"
+    )
+    assert not patterns, (
+        f"the scan built {len(patterns)} per-symbol patterns; that is the 25s shape "
+        "`referenced_names` replaced"
+    )
 
 
 @adopted

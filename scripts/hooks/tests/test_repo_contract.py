@@ -589,6 +589,18 @@ POLICY_CLAUSES = (
     "silently work around a bad instruction",
 )
 
+# The feedback loop's load-bearing half, asserted positively rather than as an
+# anti-restatement: these are the clauses that make filing mandatory instead of merely
+# available, and each one replaced a softer sentence that an agent could satisfy without
+# writing anything down. Matched against whitespace-collapsed prose, because these
+# clauses span a line break at today's wrap and re-wrapping the paragraph is an edit
+# nobody should have to notice breaks a test.
+FEEDBACK_LOOP_CLAUSES = (
+    "Saying it in your reply does not file it",
+    "in the turn you noticed it",
+    "The harness itself is in scope",
+)
+
 
 def _instruction_files() -> list[Path]:
     """Every CLAUDE.md in the repo, skipping generated and vendor trees."""
@@ -847,6 +859,37 @@ def test_vendored_policy_is_present():
     """
     assert (REPO_ROOT / VENDORED_POLICY).is_file(), (
         f"{VENDORED_POLICY} is missing -- run `python scripts/sync-devkit.py --pull`"
+    )
+
+
+@consumes_harness
+def test_feedback_loop_requires_the_ledger_and_not_just_the_reply():
+    """A harness defect has to be *filed*, and the policy has to say so bindingly.
+
+    The failure this pins is not an agent ignoring the rule -- it is the rule being
+    agreeable. The clause used to read "give the flag a durable copy too", which an
+    agent can satisfy by mentioning the defect in its reply and moving on; the operator
+    then carries the report in their head until they forget it, which is the one outcome
+    the central ledger exists to prevent. So the mandate, the mechanism and the consumer
+    are asserted together: soften any one of the three and this goes red.
+    """
+    raw = (REPO_ROOT / VENDORED_POLICY).read_text(encoding="utf-8")
+    policy_text = " ".join(raw.split())
+    for clause in FEEDBACK_LOOP_CLAUSES:
+        assert clause in policy_text, (
+            f"{VENDORED_POLICY} no longer says {clause!r} -- the feedback loop is only "
+            "worth its lines while filing to the ledger is mandatory rather than "
+            "encouraged. Restore the clause or change this test deliberately."
+        )
+
+    reporter = "scripts/hooks/report-harness-defect.py"
+    assert (REPO_ROOT / reporter).is_file(), (
+        f"{VENDORED_POLICY} tells every agent to run {reporter}, which is not here"
+    )
+    sync = load_module("scripts/sync-devkit.py")
+    assert reporter in sync.MANIFEST, (
+        f"{reporter} is out of the MANIFEST, so the policy that every project vendors "
+        "names a script those projects do not get -- the report dies in the transcript."
     )
 
 

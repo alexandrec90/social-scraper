@@ -229,6 +229,13 @@ def sync(src: Path, dest: Path, root: str = "") -> int:
 
 USER_CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 USER_CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
+# `worktree_tiers.BOXES_DIR_NAME`, spelled rather than imported, and the reason is not
+# the one that used to be written here (that a consuming project has no `sweep.py`).
+# It is that `sync-devkit.py` SPAWNS this file as a subprocess in the consumer's tree --
+# `codex_hooks_stale` on every `--check`, which is the PR gate -- so an import of a
+# sibling that has not landed yet is an `ImportError` in somebody else's gate, reported
+# as a stale Codex artifact. `tests/test_worktree_tiers_single_source.py` pins this copy
+# equal to the owner instead.
 BOXES_DIR_NAME = ".worktrees"
 
 

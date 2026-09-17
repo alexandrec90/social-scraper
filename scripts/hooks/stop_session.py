@@ -47,7 +47,11 @@ REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 # worktree and register the result nowhere. Where each of them puts one is
 # `worktree_tiers.TIERS`, imported above rather than spelled here: Claude's lands inside
 # the checkout and Codex's outside it, so there is no one directory name to name.
-BOXES_DIR_NAME = ".worktrees"
+#
+# The box tier does have one, and it comes off the same module for the same reason: this
+# file is vendored into checkouts that have no `sweep.py` and no `worktree.py`, and a
+# private copy here was one of six spellings of it.
+BOXES_DIR_NAME = worktree_tiers.BOXES_DIR_NAME
 LEASE_FILE_NAME = "leases.json"
 # `worktree.SESSION_PREFIX_MIN`: a box cut by hand carries `--session <first 8 hex>`, and
 # the abbreviation has to keep naming the session that abbreviated it.

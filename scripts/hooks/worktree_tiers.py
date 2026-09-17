@@ -1,12 +1,20 @@
-"""Where each agent CLI cuts its worktrees, and which checkout one of them belongs to.
+"""Every directory a worktree is cut into on this machine, and which checkout one of
+them belongs to.
 
-Two runtimes on this machine hand a session an isolated checkout, and they do it in
-shapes that are not variations of each other:
+Three tiers, in shapes that are not variations of each other:
 
-| Runtime | Where a worktree lands |
-| --- | --- |
-| `claude --worktree <topic>` | `<checkout>/.claude/worktrees/<name>` -- *nested* |
-| `codex --worktree` | `<CODEX_HOME>/worktrees/<repo-hash>/<name>` -- *detached* |
+| Tier | Where a worktree lands | Reaped by |
+| --- | --- | --- |
+| claude | `<checkout>/.claude/worktrees/<name>` -- *nested* | nothing |
+| codex | `<CODEX_HOME>/worktrees/<repo-hash>/<name>` -- *detached* | nothing |
+| box | `<workspace>/.worktrees/<project>--<topic>` | `worktree.py reconcile` |
+
+Four things cut into them and only one is devkit: `claude --worktree <topic>`, a Remote
+Control server started with `--spawn worktree`, and this harness's own quick-pick
+(`agent-worktree.py new`, `fix-prs.py`) all land in the claude tier; `codex --worktree`
+lands in its own; `worktree.py new` cuts a box. The third column is why that matters --
+a box carries a lease and is destroyed on a schedule, and the other two rows are cut by
+programs that register the result nowhere and clean up nothing.
 
 **The difference is not the directory name, it is whether the path names the checkout.**
 A nested worktree answers "which checkout owns me" by counting directories upward, which
@@ -20,13 +28,27 @@ registered against a checkout that gets reaped. So both halves live here: `TIERS
 shape, `owning_checkout` is the resolver that prefers arithmetic and falls back to git's
 own pointer.
 
+**`TIERS` is the first two rows; `ALL_TIERS` is all three.** The box tier is deliberately
+outside the list `match()` answers for, because a box is not a variant of the others --
+it anchors on the *workspace* rather than on a checkout, so `owning_checkout` has no
+answer for one, and it carries a port lease and a container stack that only
+`worktree.py reap` knows how to release. Every `TIERS` reader would be wrong about a box
+in a different way: the delete menu would offer `git worktree remove` on it and leak the
+lease, the Stop gate would verify the wrong tree, the ledger would file its rows under
+the workspace. What all three tiers do share is their **names**, and that is what is
+shared here: `BOXES_DIR_NAME` for the one directory the box tier is, `MARKER_NAMES` for
+a tree walk that must not descend into any of them, and `ALL_TIERS` for a caller whose
+question really is "every worktree root on this machine" -- the mirror in
+`frontend/src/worktreePort.ts` and, one day, a reaper for the two rows that have none.
+
 **Stdlib only, and in `scripts/hooks/` for that reason.** Hooks run before a virtualenv
 exists and from consumer checkouts that ship no workspace scripts, so this could not live
 beside `sweep.py` where its first caller was. It is in `sync-devkit.py`'s `MANIFEST`:
-`harness_events.py` and `stop_session.py` both import it, and a consumer that pulled one
-without the other gets an `ImportError` inside a hook, which exits non-2 and silently
-disables the gate it lives in. Both importers guard the import anyway, for the release
-in which a partial pull is possible.
+the other vendored files import it plainly, the way every hook imports `harness_config`,
+and a consumer that pulled one without the other gets an `ImportError` inside a hook,
+which exits non-2 and silently disables the gate it lives in. They arrive in one
+`--pull`, so a guard would buy nothing but a second code path only a hand-assembled copy
+can reach.
 
 Every function here is pure apart from `git_checkout`, which reads one file. Tested in
 `scripts/hooks/tests/test_worktree_tiers.py`.
@@ -51,10 +73,12 @@ class Tier:
     `("worktrees",)` at depth 2, and the extra level is the digest that makes the tier
     detached.
 
-    `home_env`/`home_default` are empty for a tier anchored at the checkout, and that
-    emptiness is the flag every function here branches on -- it is exactly the
-    distinction between a tier whose owner can be computed and one whose owner must be
-    read.
+    `home_env`/`home_default` are empty for a tier anchored at a directory the path
+    itself names, and that emptiness is the flag every function here branches on -- it is
+    exactly the distinction between a tier whose owner can be computed and one whose
+    owner must be read. For the two tiers in `TIERS` that anchor is the owning checkout;
+    for `BOX_TIER`, which is not in `TIERS` and which nothing below is applied to, it is
+    the workspace root.
     """
 
     agent: str
@@ -91,6 +115,31 @@ TIERS: tuple[Tier, ...] = (
 )
 
 DEFAULT_TIER = TIERS[0]
+
+# The box tier: `<workspace>/.worktrees/<project>--<topic>`, cut by `worktree.py new`,
+# holding a port lease and a `COMPOSE_PROJECT_NAME`, destroyed by `worktree.py reconcile`
+# once its PR merges. Kept OUT of `TIERS` -- see the module docstring: it anchors on the
+# workspace, and every function below would answer for it wrongly.
+#
+# The name is here rather than in `worktree.py` because `worktree.py` is a workspace
+# script and the copies that needed it were not -- a Stop hook in a consumer checkout, a
+# disk reclaimer and a tree walk that both run before any virtualenv, the Codex hook
+# generator, two ratchets: six private spellings of one directory. Three now read this
+# constant; the three that cannot are pinned equal to it by
+# `tests/test_worktree_tiers_single_source.py`, which carries the reason for each.
+BOXES_DIR_NAME = ".worktrees"
+BOX_TIER = Tier(agent="devkit", segments=(BOXES_DIR_NAME,), depth=1)
+
+# Every root a worktree is cut into on this machine. `TIERS` is what `match()` answers
+# for; this is what a caller enumerating the machine wants -- `tests/test_worktree_port.py`
+# holds the TypeScript mirror equal to exactly this tuple.
+ALL_TIERS: tuple[Tier, ...] = (*TIERS, BOX_TIER)
+
+# The innermost directory name of every tier, for a tree walk that must not descend into
+# another checkout's copy of the repo. `.claude` is deliberately absent: it is the Claude
+# tier's OUTER segment, and it also holds the rules, skills and settings a walk is
+# usually there to find -- skipping it would be skipping the point.
+MARKER_NAMES = frozenset(tier.segments[-1] for tier in ALL_TIERS)
 
 # What `label` puts in front of a worktree's directory name when it is not in the default
 # tier. A forward slash because it cannot occur in a directory name on either platform,
@@ -169,6 +218,24 @@ def is_worktree(path: Path | str, env: dict | None = None) -> bool:
     forever, and the failure is invisible because nobody is watching the scheduler.
     """
     return match(path, env) is not None
+
+
+def is_box(path: Path | str) -> bool:
+    """Whether `path` is one of the workspace's ephemeral boxes.
+
+    Shape only, like `match`, and the shape is one directory: a box is whatever sits
+    directly under `<workspace>/.worktrees/`. No `env`, because unlike the Codex tier
+    this one's location is not configurable -- it is wherever the workspace file is.
+
+    Separate from `is_worktree` rather than folded into it because the two answers lead
+    opposite ways. A box is *managed*: it has a lease, a port and a reaper, and the
+    remedy for a stale one is `worktree.py reap`. An agent CLI's worktree has none of
+    those, so a caller asking "may I install a scheduled task against this directory"
+    wants both and a caller asking "what may I `git worktree remove`" wants only the
+    second. `tests/support.in_an_ephemeral_box` is the first kind and asks both here
+    rather than testing a parent directory's name itself, which is what it used to do.
+    """
+    return Path(path).parent.name == BOXES_DIR_NAME
 
 
 def nested_checkout(path: Path | str, env: dict | None = None) -> Path | None:
