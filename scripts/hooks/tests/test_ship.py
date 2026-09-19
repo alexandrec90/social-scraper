@@ -234,3 +234,119 @@ def test_an_empty_branch_diff_keeps_the_old_behaviour():
 def test_runner_support_is_read_from_its_own_help():
     assert ship.runner_supports_paths("  --paths FILE [FILE ...]")
     assert not ship.runner_supports_paths("  --changed  lint only the working-tree diff")
+
+
+# --- the commit stage, run before the commit ----------------------------------
+# Where the edit-time `lint-fix.py` hook is off (`DEVKIT_HOOKS_OFF`, Codex), the
+# commit-stage fixers are the first thing to format a file, and a fixer that rewrites
+# fails the commit by design -- so every commit took two passes. `--fix` runs the same
+# stage over the changed paths first, and reruns once to tell a rewrite from a finding.
+
+
+def test_changed_paths_are_what_the_commit_stage_will_see():
+    porcelain = " M app.py\nA  new.py\n?? untracked.py\nR  old.py -> renamed.py\n D gone.py\nD  staged-gone.py\n"
+    assert ship.changed_paths(porcelain) == ["app.py", "new.py", "untracked.py", "renamed.py"]
+
+
+def test_a_path_git_quoted_is_handed_over_unquoted():
+    assert ship.changed_paths('?? "with space.py"\n') == ["with space.py"]
+    assert ship.changed_paths("") == []
+
+
+def test_pre_commit_is_looked_for_where_the_dispatcher_looks(tmp_path):
+    """Own `.venv` first, then the checkout's -- a plain worktree has none of its own --
+    then PATH, then this interpreter. The order is the dispatcher's, so the fixers this
+    step applies are the fixers the commit will meet."""
+    tree, checkout = tmp_path / "wt", tmp_path / "co"
+    nothing = {"which": lambda name: None, "find_spec": lambda name: None}
+    assert ship.pre_commit_command(tree, checkout, **nothing) is None
+
+    on_path = {"which": lambda name: "/usr/bin/pre-commit", "find_spec": lambda name: None}
+    assert ship.pre_commit_command(tree, checkout, **on_path) == ["/usr/bin/pre-commit"]
+
+    importable = {"which": lambda name: None, "find_spec": lambda name: object()}
+    assert ship.pre_commit_command(tree, checkout, **importable)[-2:] == ["-m", "pre_commit"]
+
+    (checkout / ".venv" / "bin").mkdir(parents=True)
+    (checkout / ".venv" / "bin" / "pre-commit").write_text("", encoding="utf-8")
+    assert ship.pre_commit_command(tree, checkout, **nothing) == [
+        str(checkout / ".venv" / "bin" / "pre-commit")
+    ]
+
+    (tree / ".venv" / "Scripts").mkdir(parents=True)
+    (tree / ".venv" / "Scripts" / "pre-commit.exe").write_text("", encoding="utf-8")
+    assert ship.pre_commit_command(tree, checkout, **nothing) == [
+        str(tree / ".venv" / "Scripts" / "pre-commit.exe")
+    ]
+
+
+def _fixers(*codes: int):
+    """A fake runner answering the given exit codes in order, and the argv it saw."""
+    results = [_Result(code) for code in codes]
+    seen: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        seen.append(argv)
+        return results.pop(0)
+
+    return runner, seen
+
+
+def test_a_quiet_first_pass_is_one_run_over_exactly_the_changed_paths():
+    runner, seen = _fixers(0)
+    code, verdict = ship.run_fixers(["a.py", "b.md"], ["pre-commit"], runner=runner)
+    assert code == ship.EXIT_OK
+    assert seen == [["pre-commit", "run", "--files", "a.py", "b.md"]]
+    assert "quiet" in verdict
+
+
+def test_a_rewrite_on_the_first_pass_is_a_success_on_the_second():
+    """The point of the rerun: pre-commit exits 1 for a rewrite and for a finding
+    alike, and a rewrite leaves nothing to rewrite."""
+    runner, seen = _fixers(1, 0)
+    code, verdict = ship.run_fixers(["a.py"], ["pre-commit"], runner=runner)
+    assert code == ship.EXIT_OK
+    assert len(seen) == 2
+    assert "stage the rewrites" in verdict
+
+
+def test_a_finding_that_survives_the_rerun_fails_the_step():
+    runner, seen = _fixers(1, 1)
+    code, verdict = ship.run_fixers(["a.py"], ["pre-commit"], runner=runner)
+    assert code == ship.EXIT_FIXERS_FAILED
+    assert len(seen) == 2
+    assert "code change" in verdict
+
+
+def test_no_changed_paths_means_nothing_is_run():
+    def never(argv, **kwargs):
+        raise AssertionError("ran pre-commit over nothing")
+
+    code, _ = ship.run_fixers([], ["pre-commit"], runner=never)
+    assert code == ship.EXIT_OK
+
+
+def test_a_pre_commit_that_cannot_start_is_a_failure_with_the_reason():
+    def gone(argv, **kwargs):
+        raise OSError("not executable")
+
+    code, verdict = ship.run_fixers(["a.py"], ["pre-commit"], runner=gone)
+    assert code == ship.EXIT_FIXERS_FAILED
+    assert "not executable" in verdict
+
+
+def test_fix_is_a_mode_of_main_taking_optional_paths(monkeypatch):
+    _wire_main(monkeypatch)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(ship, "_fix", lambda paths: seen.append(paths) or ship.EXIT_OK)
+    assert ship.main(["--fix"]) == ship.EXIT_OK
+    assert ship.main(["--fix", "a.py", "b.py"]) == ship.EXIT_OK
+    assert seen == [[], ["a.py", "b.py"]]
+
+
+def test_fix_refuses_with_a_remedy_when_no_pre_commit_exists(monkeypatch, capsys):
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M x.py\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: None)
+    assert ship._fix([]) == ship.EXIT_FIXERS_FAILED
+    assert "provision first" in capsys.readouterr().err
