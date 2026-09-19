@@ -36,9 +36,10 @@ that has no test, write the test in the same commit even if the logic didn't cha
   find out what is filling it before moving it again, and say in the commit message what
   you found.
 - **Run targeted tests** — the module you touched — plus the linter, while you work. The
-  whole gate runs once, at push time: the `devkit-push-gate` pre-commit hook runs
-  `lint-all.py`, `run-tests.py` and the hook tests before a push leaves, so a failure is
-  read from `logs/` here rather than from a CI artifact.
+  whole gate runs once, in CI, on the PR the fix pass opens for you: a session never
+  pushes, so it never waits on a gate. When the gate is red, the pass downloads the
+  artifact and sends a fresh session at the failure with the failing tests named. The
+  `devkit-push-gate` pre-commit hook still guards a push a person makes by hand.
 - **Fix failures in the code, not in the assertion.** Relaxing an assertion to get green
   deletes the only evidence that something is wrong.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
@@ -238,39 +239,19 @@ install step.
 The stamp rule, the switch's values and reach, and the drift check for a machine with no
 devkit clone are in [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-## Guardrail: the harness feedback loop
+## Guardrail: the harness is not your job
 
-If an instruction in a skill, a rule or a `CLAUDE.md` sent you into a dead end or a wasted
-operation — or a mistake you made would have been prevented by one that isn't there — flag
-it in your report with the file, the line, and a proposed edit. **The harness itself is in
-scope on the same terms**, and this is the half that goes unfiled because it does not look
-like prose: a hook that blocked a correct command, a vendored script that crashed or
-reported success while doing nothing, a guard that refused an edit it should have allowed,
-a scheduled job whose artifact disagrees with what it did.
+A session in a project makes the change the user asked for and nothing else. It does not
+maintain the harness, does not fix a gate, and does not file its defects: the scheduled
+fix pass (`scripts/fix-pass.py` in devkit) reads every gate, records every refusal on the
+machine's ledger itself, and sends a devkit session at the harness before any project
+session at a project. That ordering is the whole design, and a project session that
+"just fixes" a vendored file breaks it twice — once by editing what the drift gate will
+reject, and once by hiding the defect from the pass that would have fixed it everywhere.
 
-**Never silently work around a bad instruction.** That fixes your turn and leaves the next
-agent at the same wall; these files only improve if the failures they cause are reported as
-defects in them.
-
-**Saying it in your reply does not file it.** A reply is read once, by someone who is
-mid-task and did not ask to be a bug tracker; the next agent to hit the same wall sees
-none of it. So every flag gets a durable copy on this machine's central ledger, **in the
-turn you noticed it** rather than at the end of the task you may not finish. This
-complements the flag in your reply rather than replacing it, and exits 0 on a machine with
-no `$DEVKIT_DIR`:
-
-```bash
-python scripts/hooks/report-harness-defect.py --message "<what went wrong>" --command "<the exact command, when one triggered it>"
-```
-
-The ledger is machine-wide rather than per-project, and a devkit session works it down
-with `/triage-harness` — which is why a report is worth filing from a repo that cannot fix
-the thing it is about, and why "I mentioned it in chat" is the one outcome that leaves the
-defect exactly where it was.
-
-When the defect is in the **vendored harness** rather than in prose, run
-`python scripts/sync-devkit.py --check` first and put its answer, with `DEVKIT_VERSION`, in
-the report: this copy is routinely weeks of fixes behind devkit, and why that decides
-whether a report can be triaged at all is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md). An old copy is still worth
-reporting once you know that is what it is — never a reason to route around a hook.
+**Never silently work around a bad instruction or a refusal.** If a skill, a rule, a
+`CLAUDE.md`, a hook or a vendored script sent you into a dead end — blocked a correct
+command, refused an edit it should have allowed, crashed, reported success while doing
+nothing — say so in your report with the file or the exact command, and stop there. A
+workaround fixes your turn and leaves the next agent at the same wall; a report is what
+the devkit session works from.

@@ -596,9 +596,9 @@ POLICY_CLAUSES = (
 # clauses span a line break at today's wrap and re-wrapping the paragraph is an edit
 # nobody should have to notice breaks a test.
 FEEDBACK_LOOP_CLAUSES = (
-    "Saying it in your reply does not file it",
-    "in the turn you noticed it",
-    "The harness itself is in scope",
+    "the harness is not your job",
+    "Never silently work around a bad instruction or a refusal",
+    "say so in your report",
 )
 
 
@@ -863,33 +863,30 @@ def test_vendored_policy_is_present():
 
 
 @consumes_harness
-def test_feedback_loop_requires_the_ledger_and_not_just_the_reply():
-    """A harness defect has to be *filed*, and the policy has to say so bindingly.
+def test_the_guardrail_keeps_the_harness_off_the_sessions_plate():
+    """A project session makes the change it was asked for; the harness is the pass's.
 
-    The failure this pins is not an agent ignoring the rule -- it is the rule being
-    agreeable. The clause used to read "give the flag a durable copy too", which an
-    agent can satisfy by mentioning the defect in its reply and moving on; the operator
-    then carries the report in their head until they forget it, which is the one outcome
-    the central ledger exists to prevent. So the mandate, the mechanism and the consumer
-    are asserted together: soften any one of the three and this goes red.
+    The failure this pins is the rule drifting back toward "fix it while you are
+    there": a session that edits a vendored file breaks the drift gate and hides the
+    defect from the fix pass that would have fixed it everywhere, and one that quietly
+    works around a refusal leaves the next agent at the same wall. So the three clauses
+    are asserted together -- not your job, never work around it, say so and stop -- and
+    softening any one of them goes red. The ledger is written by the harness's own
+    scripts now, which is why no clause here asks a session to run a reporter.
     """
     raw = (REPO_ROOT / VENDORED_POLICY).read_text(encoding="utf-8")
     policy_text = " ".join(raw.split())
     for clause in FEEDBACK_LOOP_CLAUSES:
         assert clause in policy_text, (
-            f"{VENDORED_POLICY} no longer says {clause!r} -- the feedback loop is only "
-            "worth its lines while filing to the ledger is mandatory rather than "
-            "encouraged. Restore the clause or change this test deliberately."
+            f"{VENDORED_POLICY} no longer says {clause!r} -- the guardrail is only worth "
+            "its lines while a session is told to report a harness failure and stop "
+            "rather than fix or route around it. Restore the clause or change this test "
+            "deliberately."
         )
-
-    reporter = "scripts/hooks/report-harness-defect.py"
-    assert (REPO_ROOT / reporter).is_file(), (
-        f"{VENDORED_POLICY} tells every agent to run {reporter}, which is not here"
-    )
-    sync = load_module("scripts/sync-devkit.py")
-    assert reporter in sync.MANIFEST, (
-        f"{reporter} is out of the MANIFEST, so the policy that every project vendors "
-        "names a script those projects do not get -- the report dies in the transcript."
+    assert "report-harness-defect.py" not in policy_text, (
+        f"{VENDORED_POLICY} asks a session to file harness defects itself; that is the "
+        "fix pass's job, and a session told to do it spends its context on the harness "
+        "instead of the change it was asked for."
     )
 
 
