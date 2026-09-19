@@ -53,9 +53,17 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    nothing about it. Run `pytest scripts/hooks/tests/` too: it applies gates a project
    suite does not, such as requiring every public symbol in a script to be named by a
    test. Skipping it does not get you past that gate — it moves the failure to the
-   Stop hook or CI, after the push. Stage only the intended files, then
-   commit with an imperative subject and a body explaining why, written to a file and
-   passed with `git commit -F`. The skill argument, when supplied, is only the subject
+   Stop hook or CI, after the push. **Then run `python scripts/ship.py --fix` before
+   staging anything.** It runs the commit stage's fixers — `ruff format`, `ruff check
+   --fix`, line endings, trailing whitespace — over every changed path, from the same
+   `pre-commit` the commit will meet, and reruns once so a rewrite reads as success and
+   a surviving finding as a failure to fix in the code. Without it the commit-time
+   hooks are the first thing to format the files wherever the edit-time `lint-fix.py`
+   hook is off (`DEVKIT_HOOKS_OFF`, Codex), and a fixer that rewrites fails the commit
+   by design, so the commit takes two passes every time. Stage only the intended files,
+   the rewrites included, then commit with an imperative subject and a body explaining
+   why, written to a file and passed with `git commit -F`. The skill argument, when
+   supplied, is only the subject
    when it *reads* as one — imperative, about the change. An argument that names
    context instead (a box path, a worktree, task notes) scopes where and what to
    ship; author the subject from the change as usual. This clause used to say "use
@@ -65,10 +73,20 @@ Run each step in order. Stop on failure; never open a PR for an unverified branc
    lint gate, and pushes the current branch with retry handling. Fix any failure and
    rerun this step.
 4. Run `gh pr view --json number,url,state` to find an existing PR for the branch.
-   Reuse it when present. Otherwise inspect the repository's PR template and run
-   `gh pr create` with the detected base branch, current branch, commit subject (or
-   the argument, when it reads as a title), and a concise body covering the change and
-   verification — written to a file and passed with `--body-file`.
+   Reuse it when present. Otherwise run `gh pr create` with the detected base branch,
+   current branch, commit subject (or the argument, when it reads as a title), and a
+   body written to a file and passed with `--body-file`. **That body is two things and
+   no more:** what changed and why, then how it was verified — the step 2 tests you
+   actually ran and what they reported.
+
+   **Do not go looking for a PR template.** `--body-file` overrides one, so a
+   `.github/pull_request_template.md` is never applied to a PR opened this way; the
+   search costs a glob and a read on every ship and can change nothing about the body
+   you send. The shape above is the template, and it lives here rather than in each
+   project because this file is vendored and drift-checked while a per-project
+   template would be neither. A generic instruction to hunt for one also reaches you
+   from the GitHub MCP server, which is describing the web UI's prefill and does not
+   know about this step.
 5. Apply the `automerge` label: `gh pr edit <number> --add-label automerge`. When that
    fails because the repository has no such label, create it once and retry —
    `gh label create automerge --color 0e8a16 --description "PR the harness may merge once the gate passes"`,

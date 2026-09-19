@@ -9,6 +9,8 @@ next prompt on a spent branch to warn.
 
 from __future__ import annotations
 
+import importlib.util
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +29,10 @@ EXIT_NOT_SHIPPABLE = 3
 EXIT_DIRTY_TREE = 4
 EXIT_LINT_FAILED = 5
 EXIT_PUSH_FAILED = 6
+EXIT_FIXERS_FAILED = 7
+
+# Where a venv puts pre-commit's console script: `Scripts/` on Windows, `bin/` elsewhere.
+PRE_COMMIT_TAILS = (Path("Scripts") / "pre-commit.exe", Path("bin") / "pre-commit")
 
 
 # What `claude --worktree <name>` names the branch it cuts: the literal string
@@ -220,10 +226,112 @@ def _push(branch: str, sleep=time.sleep) -> bool:
     return False
 
 
+def changed_paths(porcelain: str) -> list[str]:
+    """Every path `git status --porcelain` reports, deletions dropped: what the commit
+    stage is run over before any of it is staged.
+
+    Untracked (`??`) paths count -- a new file is exactly the one no hook has formatted
+    yet. A deletion is skipped for the reason `branch_diff_files` gives, a rename is read
+    at its destination, and a path git quoted for a space is unquoted.
+    """
+    paths: list[str] = []
+    for line in porcelain.splitlines():
+        if len(line) < 4 or "D" in line[:2]:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if len(path) >= 2 and path[0] == path[-1] == '"':
+            path = path[1:-1]
+        paths.append(path)
+    return paths
+
+
+def pre_commit_command(
+    root: Path,
+    checkout: Path | None = None,
+    which=shutil.which,
+    find_spec=importlib.util.find_spec,
+) -> list[str] | None:
+    """Where this project's `pre-commit` is, looked for the way the global dispatcher
+    looks (`git_policy.framework._pre_commit_command`): `.venv` of this tree, then of
+    the checkout it was cut from, then `PATH`, then this interpreter.
+
+    Mirrored rather than imported because `ship.py` is vendored into projects that do
+    not carry the policy package -- and the two have to agree on *which* pre-commit
+    runs, so that the fixers this step applies are the fixers the commit will meet.
+    """
+    bases = [root] if checkout is None or checkout == root else [root, checkout]
+    for base in bases:
+        for tail in PRE_COMMIT_TAILS:
+            candidate = base / ".venv" / tail
+            if candidate.is_file():
+                return [str(candidate)]
+    found = which("pre-commit")
+    if found:
+        return [found]
+    if find_spec("pre_commit") is not None:
+        return [sys.executable, "-m", "pre_commit"]
+    return None
+
+
+def run_fixers(paths: list[str], command: list[str], runner=subprocess.run) -> tuple[int, str]:
+    """Run the commit stage over `paths` until it is quiet: (exit code, the verdict).
+
+    pre-commit exits 1 for a fixer that rewrote a file and for a check that failed, and
+    only a second run tells them apart: a rewrite leaves nothing left to rewrite, a
+    finding is still there. So the first pass is allowed to fail and the second decides.
+    Streamed rather than captured -- pre-commit's own report is what the reader acts on.
+
+    This is the step the edit-time `lint-fix.py` hook used to make unnecessary. Where
+    that hook is off (`DEVKIT_HOOKS_OFF`, Codex), the commit-stage fixers are the first
+    thing to format a file, and a fixer that rewrites fails the commit by design -- so
+    every commit took two passes, with the rewrites staged by hand between them.
+    """
+    if not paths:
+        return EXIT_OK, "nothing to fix: no changed paths in the working tree"
+    argv = [*command, "run", "--files", *paths]
+    for attempt in (1, 2):
+        try:
+            done = runner(argv, cwd=REPO_ROOT, check=False)
+        except OSError as exc:
+            return EXIT_FIXERS_FAILED, f"could not run pre-commit: {exc}"
+        if done.returncode == 0:
+            if attempt == 1:
+                return EXIT_OK, "commit stage quiet: nothing rewritten, nothing reported"
+            return EXIT_OK, (
+                "fixers rewrote files on the first pass and are quiet now; "
+                "stage the rewrites with the change"
+            )
+    return EXIT_FIXERS_FAILED, (
+        "the commit stage still fails after the fixers ran: what is reported above "
+        "needs a code change, not a re-run"
+    )
+
+
+def _fix(explicit: list[str]) -> int:
+    paths = explicit or changed_paths(_porcelain())
+    common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    where = (common.stdout or "").strip()
+    checkout = Path(where).parent if common.returncode == 0 and where else None
+    command = pre_commit_command(REPO_ROOT, checkout)
+    if command is None:
+        print(
+            "ship: pre-commit was not found in this tree's .venv, the checkout's, PATH or "
+            "this interpreter; provision first (--preflight names the command).",
+            file=sys.stderr,
+        )
+        return EXIT_FIXERS_FAILED
+    code, verdict = run_fixers(paths, command)
+    print(f"ship: {verdict}", file=sys.stderr if code else sys.stdout)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv not in ([], ["--preflight"]):
-        print("usage: ship.py [--preflight]", file=sys.stderr)
+    mode, rest = (argv[0], argv[1:]) if argv else ("", [])
+    if mode not in ("", "--preflight", "--fix") or (mode != "--fix" and rest):
+        print("usage: ship.py [--preflight | --fix [PATH ...]]", file=sys.stderr)
         return EXIT_USAGE
 
     branch = current_branch()
@@ -233,7 +341,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ship: {reason}", file=sys.stderr)
         return EXIT_NOT_SHIPPABLE
 
-    if argv == ["--preflight"]:
+    if mode == "--fix":
+        return _fix(rest)
+    if mode == "--preflight":
         print(f"ship: branch={branch} base={base}")
         # Reported, not enforced: a checkout whose tools live outside `.venv` can still
         # ship, and the gates that need the toolchain fail on their own if it is absent.
