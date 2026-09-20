@@ -57,11 +57,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import harness_config
 import structure_scan as scan_mod
+from structure_baseline import (
+    BASELINE_NAME,
+    baseline_path,
+    existing_notes,
+    read_baseline,
+    reason_lines,
+    render_baseline,
+)
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 CFG = harness_config.load(REPO_ROOT)
 
-BASELINE_NAME = ".devkit-structure.txt"
 ARTIFACT = "logs/structure-check.log"
 
 DEFAULT_LIMITS: dict[str, int] = {
@@ -107,29 +114,6 @@ REMEDIES: dict[str, str] = {
     "restrict": "this call belongs behind the wrapper the rule names",
     "dependency": "a new dependency needs a reason in the PR; then re-seed the line",
 }
-
-BASELINE_HEADER = """\
-# Structural findings the code already had when it adopted the gate.
-#
-# Debt, not configuration. This file SHRINKS on its own: a new key fails the gate, a
-# value that grew fails the gate, and a line the code no longer earns fails it too,
-# so fixing a finding forces its line out (`structure_check.py --tighten` does that).
-# Never add or raise a line to make new code pass; fix the code. `dependency::` is one
-# exception -- adding a package is a line here, so the PR diff shows it.
-#
-# `--record --reason "..."` is the other, and it is the deliberate hole. A module far
-# past `file_lines` cannot gain a line, so a bug whose fix belongs in one has nowhere
-# to go, and the split the finding asks for is a separate body of work. Recording says
-# so out loud: the reason is mandatory, counter rules (`suppressions`, `todos`,
-# `skipped_tests`, ...) are refused because those are always somebody giving up rather
-# than a module's size, and every move is logged below with what it moved and why.
-#
-# Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
-"""
-
-# What `existing_notes` reads back, and what separates the machine-readable lines above
-# it from the `--record` log below. Both halves are comments to `read_baseline`.
-RECORD_MARKER = "# --- recorded growth ------------------------------------------------\n"
 
 TOOLING_DIRS = frozenset(
     {
@@ -790,37 +774,6 @@ def findings(root: Path, cfg: harness_config.Config) -> list[Finding]:
     return [by_key[k] for k in sorted(by_key)]
 
 
-def baseline_path(root: Path) -> Path:
-    return root / BASELINE_NAME
-
-
-def read_baseline(path: Path) -> dict[str, int]:
-    """`key -> value`; comments, blanks and malformed lines dropped."""
-    if not path.exists():
-        return {}
-    out: dict[str, int] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, sep, value = line.rpartition(" = ")
-        if sep and value.strip().isdigit():
-            out[key.strip()] = int(value)
-    return out
-
-
-def render_baseline(entries: dict[str, int], notes: list[str] | None = None) -> str:
-    """The whole file: header, the sorted findings, then the `--record` log.
-
-    The log goes *after* the entries so the sorted block stays a clean diff -- a note
-    inserted between two lines would move every line under it.
-    """
-    body = BASELINE_HEADER + "".join(f"{k} = {entries[k]}\n" for k in sorted(entries))
-    if not notes:
-        return body
-    return body + "\n" + RECORD_MARKER + "\n" + "\n\n".join(notes) + "\n"
-
-
 def seed(root: Path, cfg: harness_config.Config | None = None) -> int | None:
     """Write the baseline for a project adopting the gate. `None` if one exists:
     re-seeding would launder everything added since adoption into the debt list."""
@@ -905,30 +858,13 @@ def record(
     entries.update({f.key: f.value for f in allowed})
     stamp = datetime.datetime.now(datetime.UTC).date().isoformat()
     note = "\n".join(
-        [f"# {stamp}  recorded: {reason.strip()}"]
+        reason_lines(reason, stamp)
         + [f"#   {f.key} -> {f.value}" for f in sorted(allowed, key=lambda f: f.key)]
     )
     path.write_text(
         render_baseline(entries, [*existing_notes(path), note]), encoding="utf-8", newline="\n"
     )
     return allowed, []
-
-
-def existing_notes(path: Path) -> list[str]:
-    """The `--record` notes already in the file, so a later one appends rather than wins.
-
-    Read back out of the file rather than kept beside it: a second state file would be
-    one more thing that can disagree with the baseline it annotates, and the whole point
-    of this tier is that one file is the record.
-    """
-    if not path.exists():
-        return []
-    body = path.read_text(encoding="utf-8")
-    _, marker, tail = body.partition(RECORD_MARKER)
-    if not marker:
-        return []
-    blocks = [b.strip("\n") for b in tail.split("\n\n") if b.strip()]
-    return [b for b in blocks if b.startswith("#")]
 
 
 def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:

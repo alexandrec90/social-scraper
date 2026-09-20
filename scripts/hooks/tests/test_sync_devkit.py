@@ -1421,10 +1421,14 @@ def test_the_baseline_is_not_vendored(tmp_path):
 
 STRUCTURE_CHECKER = "scripts/hooks/structure_check.py"
 STRUCTURE_SCANNER = "scripts/hooks/structure_scan.py"
+# The checker imports it plainly, so a project that received one without the other has
+# a gate that raises inside a hook rather than one that judges. Copied here for the
+# same reason the MANIFEST ships them together.
+STRUCTURE_BASELINE = "scripts/hooks/structure_baseline.py"
 
 
 def _structure_project(root: Path, source: str = "x = 1  # noqa\n") -> Path:
-    for rel in (STRUCTURE_CHECKER, STRUCTURE_SCANNER, CONFIG_MODULE):
+    for rel in (STRUCTURE_CHECKER, STRUCTURE_SCANNER, STRUCTURE_BASELINE, CONFIG_MODULE):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text((sh.REPO_ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
