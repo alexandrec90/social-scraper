@@ -42,6 +42,19 @@ of it was a person trying to cut a release by hand and finding a stale branch. A
 `/triage-harness` finds it. Only `--always` callers record: a task someone clicked has
 already shown them the failure, and the ledger is for what nobody watched.
 
+**And the event needs evidence still on disk when it is triaged**, which is the half
+that was missing. The ledger entry survived; the file it pointed at did not. `Scheduled:
+Devkit Release` failed on 2026-09-18 with exit 2, the next night's run passed and
+overwrote `logs/scheduled-devkit-release.log` with its own success, and the sweep that
+reached the event a day later could say only that it no longer reproduced -- no PR was
+opened, so the failure was somewhere in `release.prepare`, and which branch of it is now
+unknowable. So an unattended failure is kept a second time, at
+`logs/<slug>.failed.log`, and **that** is the path the event names. It is written only
+on a failure, so a pass never clears it and the next failure is the only thing that
+replaces it; the header says so, because a file whose mtime is a week old is evidence
+for the event a week old, not for this morning's run. One extra bounded file per job
+that has ever failed unattended.
+
 Colour survives the wrapping. A captured child is talking to a pipe rather than a
 terminal, and most tools drop their colour the moment they notice -- so `FORCE_COLOR`
 and `PY_COLORS` are set (when the caller has not) to keep the live view readable, and
@@ -66,6 +79,11 @@ LOGS_DIR = "logs"
 # The ledger event an unattended failure leaves behind. Read by `harness_triage.py`,
 # which lists it in `TRIAGE_EVENTS`.
 FAILED_EVENT = "scheduled-job-failed"
+
+# Suffix of the kept copy an unattended failure leaves beside its per-run artifact, and
+# the path the ledger event names. See the docstring: the event outlives the artifact,
+# and a triage sweep that reaches it a day later needs the reason, not the next run's.
+FAILED_SUFFIX = ".failed"
 
 # The head and tail kept when a run is too long to store whole. Both ends matter and
 # the middle rarely does: the head carries what was run and the first thing to go
@@ -170,7 +188,7 @@ def cap(text: str, head: int = HEAD_LINES, tail: int = TAIL_LINES) -> str:
 
 
 def artifact_body(
-    title: str, command: list[str], code: int, output: str, always: bool = False
+    title: str, command: list[str], code: int, output: str, always: bool = False, kept: bool = False
 ) -> str:
     """The file's full text -- **empty when the command succeeded**, unless `always`.
 
@@ -182,12 +200,23 @@ def artifact_body(
     an agent can do. Under `always` it also carries the timestamp, which is the whole
     question for an unattended job: a passing report with no clock on it cannot be told
     apart from the same report written a fortnight ago.
+
+    `kept` writes the `<slug>.failed.log` copy instead of the per-run one, and the only
+    thing that changes is the `# fix:` line -- which has to stop saying "overwritten per
+    run", because that is exactly what this copy is not. A reader who believes it is
+    looking at this morning's run when the file is from Tuesday is worse off than one
+    with no file at all.
     """
     if code == 0 and not always:
         return ""
     stamped = f"# when: {_now()}\n" if always else ""
+    freshness = (
+        "kept until the NEXT failure -- a pass does not clear it, so read `# when:` above"
+        if kept
+        else "this file is overwritten per run"
+    )
     verdict = (
-        f"# fix: re-run `{' '.join(command)}` -- this file is overwritten per run\n"
+        f"# fix: re-run `{' '.join(command)}` -- {freshness}\n"
         if code
         else "# result: passed -- kept because this task runs unattended\n"
     )
@@ -332,14 +361,35 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             f"\nlog-wrap: FAILED (exit {code}) -- details in {LOGS_DIR}/{name}.log", file=sys.stderr
         )
     if code != 0 and always:
-        record_failure(title, command, code, name, root)
+        # The kept copy first, so the event never names a path that is not there yet.
+        # `since` is not passed: this file is only ever written by a failure, so it has
+        # no retraction to hold back and the concurrency case `write_artifact` guards
+        # cannot arise.
+        kept = write_artifact(
+            root or Path.cwd(),
+            name + FAILED_SUFFIX,
+            artifact_body(title, command, code, output, always, kept=True),
+        )
+        record_failure(title, command, code, name, root, kept=kept is not None)
     return code
 
 
 def record_failure(
-    title: str, command: list[str], code: int, name: str, root: Path | None = None
+    title: str,
+    command: list[str],
+    code: int,
+    name: str,
+    root: Path | None = None,
+    kept: bool = True,
 ) -> None:
     """Leave an unattended failure on the harness-events ledger.
+
+    `artifact=` names the **kept** copy, not the per-run one, because the two have
+    different lifetimes and only one of them outlives the event: a sweep reaching this
+    row tomorrow finds the reason there and finds the next run's output in the other.
+    `kept=False` falls back to the per-run path -- a `logs/` that could not be written
+    is not a reason to file no event, and a pointer to the ordinary artifact is still
+    better than none.
 
     Best-effort twice over. `harness_events` swallows its own errors by contract, and
     the import is guarded because this module is vendored into projects that may hold a
@@ -365,7 +415,7 @@ def record_failure(
         (
             ("project", harness_events.project_name(root or Path.cwd())),
             ("command", " ".join(command)),
-            ("artifact", f"{LOGS_DIR}/{name}.log"),
+            ("artifact", f"{LOGS_DIR}/{name}{FAILED_SUFFIX if kept else ''}.log"),
             ("exit", code),
             ("message", f"unattended task {title!r} failed"),
         ),

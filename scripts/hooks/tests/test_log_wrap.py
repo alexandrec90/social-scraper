@@ -365,6 +365,45 @@ def test_an_unattended_failure_is_recorded_for_triage(tmp_path, monkeypatch):
     assert "exit=2" in line
 
 
+def test_an_unattended_failure_is_kept_where_the_next_run_cannot_erase_it(tmp_path, monkeypatch):
+    """The regression. `Scheduled: Devkit Release` failed with exit 2 on 2026-09-18, the
+    next night's run passed and overwrote the artifact with its own success, and the
+    sweep that reached the ledger row a day later had the event and no reason for it.
+    A pass must leave the kept copy exactly as the failure wrote it."""
+    _ledger(tmp_path, monkeypatch)
+    logs = tmp_path / lw.LOGS_DIR
+
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "the reason"), root=tmp_path)
+    kept = logs / f"nightly{lw.FAILED_SUFFIX}.log"
+    assert "the reason" in kept.read_text(encoding="utf-8")
+
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (0, "all fine"), root=tmp_path)
+    assert "the reason" in kept.read_text(encoding="utf-8")
+    assert "all fine" in (logs / "nightly.log").read_text(encoding="utf-8")
+
+
+def test_the_kept_copy_does_not_claim_to_be_this_mornings_run(tmp_path, monkeypatch):
+    """A reader who believes a Tuesday file is today's is worse off than one with no
+    file, so the copy that a pass does not clear must not say `overwritten per run`."""
+    _ledger(tmp_path, monkeypatch)
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
+
+    kept = (tmp_path / lw.LOGS_DIR / f"nightly{lw.FAILED_SUFFIX}.log").read_text(encoding="utf-8")
+    assert "overwritten per run" not in kept
+    assert "NEXT failure" in kept and "# when:" in kept
+
+
+def test_a_clicked_failure_leaves_no_kept_copy(tmp_path, monkeypatch):
+    """The second file exists for the ledger row, and a click files none: the person
+    watched it fail and `logs/` is not a place to accumulate what nobody will read."""
+    _ledger(tmp_path, monkeypatch)
+
+    lw.main(["Clicked", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
+
+    assert not (tmp_path / lw.LOGS_DIR / f"clicked{lw.FAILED_SUFFIX}.log").exists()
+    assert "boom" in (tmp_path / lw.LOGS_DIR / "clicked.log").read_text(encoding="utf-8")
+
+
 def test_a_clicked_task_leaves_no_event(tmp_path, monkeypatch):
     """Without `--always` a person is watching and has already seen the failure. The
     ledger is for what nobody watched; filling it with clicks makes a backlog nobody
@@ -427,6 +466,20 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     )
     assert fields["event"] == lw.FAILED_EVENT
     assert fields["exit"] == "2"
-    assert fields["artifact"] == "logs/devkit-cut-release.log"
+    # The KEPT copy, not the per-run one: the event outlives the artifact, and the sweep
+    # that reads this row tomorrow needs this run's reason rather than tonight's.
+    assert fields["artifact"] == "logs/devkit-cut-release.failed.log"
     assert fields["command"] == "python x.py"
     assert "Devkit: Cut Release" in fields["message"]
+
+
+def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
+    tmp_path, monkeypatch
+):
+    """A `logs/` that cannot be written is never a reason to file no event, and a
+    pointer to the ordinary artifact still beats none."""
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    lw.record_failure("N", ["x"], 2, "n", tmp_path, kept=False)
+
+    assert "artifact=logs/n.log\t" in ledger.read_text(encoding="utf-8")

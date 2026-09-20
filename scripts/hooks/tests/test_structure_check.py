@@ -666,6 +666,32 @@ def test_recording_twice_keeps_both_reasons(tmp_path):
     assert "first reason" in body and "second reason" in body
 
 
+def test_a_multi_line_reason_is_commented_on_every_line(tmp_path):
+    """The reason is prose an agent was asked to measure, so it arrives in paragraphs.
+    Only the first line used to be prefixed: the rest landed in the baseline as bare
+    English, `--record` still printed `structure-check: clean`, and the damage surfaced
+    later as `test_the_baseline_is_sorted_and_unique` failing on a sentence at index 0.
+    """
+    _oversized(tmp_path)
+    write(tmp_path, sc.BASELINE_NAME, "")
+    reason = "the split is its own PR\nthree imports fill it\n\nmeasured 2026-09-19"
+
+    sc.record(tmp_path, config(limits={"file_lines": 10}), reason)
+
+    path = sc.baseline_path(tmp_path)
+    body = path.read_text(encoding="utf-8")
+    for fragment in ("the split is its own PR", "three imports fill it", "measured 2026-09-19"):
+        assert fragment in body
+    # Every non-comment line is still a sorted, unique `key = value`, which is what
+    # `test_the_baseline_is_sorted_and_unique` asserts in the repo this ships into.
+    entries = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith("#")]
+    assert entries == sorted(set(entries)), f"prose reached the baseline as data: {entries}"
+    assert "file_lines::src/big.py" in sc.read_baseline(path)
+    # The whole reason reads back as ONE note -- a blank line inside it must not split
+    # the log, because `existing_notes` partitions on blank lines.
+    assert len(sc.existing_notes(path)) == 1
+
+
 def test_tighten_carries_the_record_log_through(tmp_path):
     """A tighten that dropped the log would leave the next reader with raised numbers and
     no account of who raised them."""

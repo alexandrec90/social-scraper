@@ -150,10 +150,16 @@ MANIFEST: tuple[str, ...] = (
     # suppression counts, held to `.devkit-structure.txt` on the same terms as the
     # untested-symbol list above -- the file may only shrink, `--pull` seeds it once and
     # tightens it on every pull after, and the vendored test is what runs it in a
-    # consumer's gate. Two modules because the
+    # consumer's gate. Three modules because the
     # language scanners are testable against a snippet and the judging half is not.
     "scripts/hooks/structure_scan.py",
     "scripts/hooks/tests/test_structure_scan.py",
+    # The baseline FILE is the third, cut out of the judge, which had recorded a
+    # `file_lines` raise on three branches. All three arrive in one `--pull`: a consumer
+    # holding the judge without this gets an `ImportError` inside a hook, which exits
+    # non-2 and silently disables the gate it lives in.
+    "scripts/hooks/structure_baseline.py",
+    "scripts/hooks/tests/test_structure_baseline.py",
     "scripts/hooks/structure_check.py",
     "scripts/hooks/tests/test_structure_check.py",
     # Where each agent CLI cuts a `--worktree` checkout, and which repo one belongs to.
