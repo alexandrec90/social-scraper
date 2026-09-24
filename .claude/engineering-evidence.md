@@ -136,6 +136,9 @@ ran the commands instead of believing it.
 
 ## Why capped Bash is a blocklist, not a proof obligation
 
+`enforce-capped-bash.py` is vendored but no longer wired as a hook; this is the record
+of why its design is what it is, should it ever be wired again.
+
 **This gate used to work the other way round**, and the reversal is worth knowing
 because the old design is the intuitive one. It required every call to *prove* it was
 bounded and blocked whatever it could not recognise — which means modelling the shell,
@@ -166,8 +169,8 @@ pinned in `.pre-commit-config.yaml` rather than against a checkout.
 
 ## Reporting a *harness* defect: name the copy's age
 
-The hook scripts are a **vendored copy**, and every consuming project is routinely weeks
-of fixes behind devkit — so a block or a crash you hit there may already be fixed
+The harness scripts are a **vendored copy**, and every consuming project is routinely weeks
+of fixes behind devkit — so a refusal or a crash you hit there may already be fixed
 upstream, and a report of one costs a human a relay and a false-positive triage. Spend
 one command before reporting one, and put its answer in the report:
 
@@ -176,87 +179,46 @@ python scripts/sync-devkit.py --check     # clean = this copy matches upstream
 ```
 
 A report that names `DEVKIT_VERSION` and what `--check` said can be triaged; one that
-does not cannot. Blocks from the capped-Bash gate carry this footer themselves, so the
-version is usually already in front of you. An old copy is still worth reporting once
-you know that is what it is — this is **not** a reason to route around the hook.
+does not cannot. An old copy is still worth reporting once you know that is what it is —
+this is **not** a reason to route around the defect.
 
 ## Why a vendored file may depend on one the project owns
 
-`lint-all.py` and `run-tests.py` are the project's, not devkit's, and the vendored hooks
+`lint-all.py` and `run-tests.py` are the project's, not devkit's, and vendored scripts
 call them. Those dependencies are asserted by
 `scripts/hooks/tests/test_repo_contract.py`, because at runtime a missing one is a
 silent skip by design — the gate reports green having run nothing.
 
 ## Switching the harness off: `DEVKIT_HOOKS_OFF`
 
-The harness is a cost as well as a guarantee, and the cost is not always worth paying:
-the Stop gate reproduces the PR gate locally and blocks the session on what it finds, so
-a red tree turns every stop into another round of fixing. Before this switch the only way
-to stop paying was to delete hook entries out of each project's `.claude/settings.json` —
-N files to strip and N to reconstruct from memory — so nobody did, and the harness was
-effectively unconditional. It is read from the **environment** for exactly that reason:
-one line reaches every project, and deleting the line restores them.
-
-Put it in the `env` block of whichever `settings.json` should carry it — `~/.claude` for
-every project on the machine, the project's own for one repo.
+**No coding-agent hook is wired** — not in devkit, not in a generated project, and
+`sync-devkit.py --pull` strips a consumer's `hooks` block — so today this switch has
+nothing live to stand down. The hook scripts that consult it are still vendored, and
+the switch is kept so that re-wiring one would come back switchable. It is read from the
+**environment** so one line reaches every project, and deleting the line restores them.
 
 | Value | Effect |
 | --- | --- |
 | unset, or `0`/`false`/`no`/`off` | every hook runs — the default, and the only thing a value that reads as "off" to a human may mean |
 | `1`, `all`, `*`, `true`, `yes`, `on` | every switchable hook stands down |
-| `stop`, `lint-fix`, `capped-bash`, `session-start`, `failure-retro`, `branch-tier` | that hook only; comma- or semicolon-separated for several |
+| `stop`, `lint-fix`, `capped-bash`, `session-start`, `branch-tier` | that hook only; comma- or semicolon-separated for several |
 
 `SWITCHABLE_HOOKS` in `harness_config.py` is the list this table copies, and the one to
-believe when the two disagree. A name in it that no hook reads would be a value an
-operator can set and watch do nothing, so
+believe when the two disagree. A name in it that no hook script reads would be a value
+an operator can set and watch do nothing, so
 `test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch` searches the
-hook sources for each — both spellings, since `session-start` and `failure-retro` ask
-through the `--hook-off` arm rather than importing.
+hook sources for each. Shell callers ask through `harness_config.py --hook-off <name>`
+rather than re-reading the variable, so the aliases and the off-values asymmetry have
+one owner.
 
-Selective is the state it comes back through: the Stop gate is the expensive one and
-`lint-fix` is nearly free, so they are re-enabled apart. Shell callers ask through
-`harness_config.py --hook-off <name>` rather than re-reading the variable, so the aliases
-and the off-values asymmetry have one owner instead of a copy in bash free to drift.
+`branch-tier` covers both `worktree-guard.py` and `task_slug.py`: the slug exists to name
+the box the guard cuts. With neither wired, a box is cut on purpose — `claude
+--worktree`, `/ship`, or `agent-box.py spawn`/`ship` behind the `Agent:` workspace tasks.
+`test_the_branch_tier_consults_the_harness_kill_switch` and
+`test_a_stood_down_branch_tier_returns_before_it_reads_stdin` in
+`tests/test_worktree_guard.py` keep the scripts honouring it.
 
-**The branch tier is switchable too, under one name — and once was not.**
-`worktree-guard.py`, which routes an agent edit into an ephemeral box, and
-`task_slug.py`, which names its branch, both stand down on `branch-tier`. One name
-rather than two: the slug exists to name the box the guard cuts, so a recorded slug with
-no guard to spend it is a file written before every prompt for nothing — and a vendored
-copy has no `task_slug.py` to switch separately anyway. Consumers get the switch through
-the `worktree-guard-launch.py` shim, which returns before it resolves devkit, so an
-operator who stood the tier down does not still pay a Python start on every mutating
-call.
-
-The old exemption was real, and its reasoning still is: standing the tier down does not
-make a session quieter — it lands agent work on a checkout's home branch with nothing
-under it, surfacing days later as a `needs-branch` verdict nobody can attribute to a
-session. What changed is that the tier stopped being the only thing that cuts a box.
-`claude --worktree`, `/ship`, and `agent-box.py spawn`/`ship` behind the `Agent:`
-workspace tasks all cut and deliver one without a hook, so the operator who switches the
-tier off keeps the guarantee by hand rather than losing it. The safety property moved; it
-was not deleted.
-
-Both halves are asserted on in `tests/test_worktree_guard.py` —
-`test_the_branch_tier_consults_the_harness_kill_switch` on the source,
-`test_a_stood_down_branch_tier_returns_before_it_reads_stdin` on the behaviour, since an
-early return before either reads its payload is the whole of what "off" can mean on a
-hot path. The source assertion is kept deliberately, now pointing the other way: the risk
-today is a future edit *removing* the check by symmetry with a tier that used to be
-exempt.
-
-Three things to know before flipping it:
-
-- `session-start` also wires the commit-time `pre-commit` gate, so switching it off
-  leaves that gate uninstalled on a fresh clone. `pre-commit install` by hand restores
-  it; an already-wired checkout keeps it.
-- A **remote** session-start is never switched off. Below its local branch that script is
-  not a check at all but the only thing that installs a toolchain into a Claude Code on
-  the web sandbox, which starts empty every time — honouring the switch there would
-  answer "stop gating my sessions" with a cloud session that has no ruff, mypy or pytest,
-  a failure that reads as a broken sandbox rather than as a setting.
-- CI is unaffected. The PR gate runs the same checks server-side, so what the switch
-  removes is the *local* round, not the verdict.
+CI is unaffected either way: the PR gate runs the same checks server-side.
 
 The vendored suite clears the variable in an autouse fixture, on the same reasoning as
 the ledger fixture beside it: the switch lives in the environment of every agent session

@@ -121,10 +121,9 @@ SKILL.md, e.g.:
 > Depends on the local Docker stack and its diagnostics being available.
 ```
 
-Hooks are a Windows-local performance shortcut; they must never be the only path for
-any step a skill needs to complete — skills use the Glob/Grep/Read/Write/Edit tools
-directly and write state files (e.g. `state.json`) themselves rather than waiting on
-a Stop hook.
+No agent hook is wired, so a skill never relies on one for any step it needs to
+complete — skills use the Glob/Grep/Read/Write/Edit tools directly and write state files
+(e.g. `state.json`) themselves.
 
 ### Hook output byte caps (token control)
 

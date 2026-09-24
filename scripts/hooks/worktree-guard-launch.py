@@ -12,12 +12,9 @@ agent work on their home branches.
 This is the one line each project needs. It resolves devkit, forwards the hook payload
 unchanged, and hands back the guard's own verdict.
 
-**Shipping the file was not shipping the hook.** A settings file is the project's own
-and is never vendored, so for a release every consumer held this shim and ran nothing --
-the same silence the paragraph above describes, now with the fix sitting unused on disk.
-`sync-devkit.py --pull` back-fills the `PreToolUse` entry (`wire_settings`), `--check`
-reports a project that vendors this file and runs no hook, and
-`workspace-status.guard_line` names one in the daily `devkit-workspace-status` pass.
+**No agent hook is wired any more, this one included.** `sync-devkit.py --pull` strips a
+consumer's `hooks` block from `.claude/settings.json`, so this shim is vendored and
+tested but nothing runs it.
 
 **Every failure path here exits 0.** That is the whole contract and it is not laziness:
 a PreToolUse hook exiting 2 is a *block*, so a shim that cannot find devkit and said so

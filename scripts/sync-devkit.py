@@ -998,8 +998,8 @@ def retired_present(root: Path) -> list[str]:
 
 
 # The settings file is the project's own (never vendored — see CLAUDE.md), which is
-# exactly why `--pull` has to touch it: the pull deletes a retired hook script and wires
-# a newly delivered one, and both of those are edits to a file no MANIFEST covers. That
+# exactly why `--pull` has to touch it: the pull unwires every agent hook, an edit to a
+# file no MANIFEST covers. That
 # tier lives in `project_settings.py` — a different contract from copying, and this
 # module was past every structural limit it holds other files to. Spelled out here
 # rather than read from there because this module must load before that file exists
@@ -1031,9 +1031,8 @@ def retired_hook_paths(retired: tuple[str, ...] | None = None) -> tuple[str, ...
 def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[str]:
     """The pull's pass over this project's settings file; one note per change made.
 
-    Unwires the hooks this pull's deletions left dangling, and wires the cross-checkout
-    edit guard when nothing runs it. `project_settings.settings_pass` owns both, and
-    the notes it returns are already worded for the report below.
+    Unwires every agent hook the settings still carry. `project_settings.settings_pass`
+    owns that, and the notes it returns are already worded for the report below.
     """
     try:
         import project_settings
@@ -1045,10 +1044,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[st
 def local_faults(root: Path) -> tuple[list[tuple[str, str]], str]:
     """`(faults, summary)` for what `--check` finds outside the MANIFEST.
 
-    Neither the settings file nor the generated Codex mirror is ever compared against
-    upstream, so neither is drift -- but an unwired edit guard is the one harness fault
-    with no symptom at all, and a check that stayed quiet about it is how five
-    checkouts spent a release routing agent edits onto their home branches.
+    The generated Codex mirror is never compared against upstream, so it is not drift --
+    but Codex reads it rather than the settings it came from, so a stale one is reported.
 
     Returns the summary already worded, so `main` neither grows a branch per fault nor
     words it there; both are what pushed that function past its limits.
