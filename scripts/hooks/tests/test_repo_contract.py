@@ -56,6 +56,9 @@ CODEX_LAUNCHER_ADAPTER_MARKER = "r/'scripts/hooks/codex-hook-adapter.py'"
 def _wires_stop_hook() -> bool:
     """True when this repo actually registers `stop.py` as a Stop hook.
 
+    No agent hook is wired anywhere now, so this is False in every repo and the checks
+    below skip; they stay for the manifest tier the hook used to anchor.
+
     The gate for every check below that reads the repo's shape off its manifest. A repo
     that vendors these tests without wiring the hook has not adopted the tier they
     describe, so asserting its files against a manifest nothing acts on would report a
@@ -552,18 +555,17 @@ def test_generated_codex_handlers_exist():
     except json.JSONDecodeError as exc:
         pytest.fail(f"{CODEX_HOOKS.relative_to(REPO_ROOT)} is invalid JSON: {exc}")
 
+    # No agent hook is wired anywhere, so `{"hooks": {}}` is the expected file and there
+    # may be nothing to walk; what is checked is that nothing named is missing.
     missing: list[str] = []
-    referenced = 0
     for event, command in _codex_commands(payload):
         assert "${CLAUDE_PROJECT_DIR" not in command, (
             f"{event} still contains Claude's project-dir placeholder: {command}"
         )
         for relative in _codex_command_paths(command):
-            referenced += 1
             if not (REPO_ROOT / relative).is_file():
                 missing.append(f"{event}: {relative}")
 
-    assert referenced, ".codex/hooks.json contains no repo-root handler paths to validate"
     assert not missing, "generated Codex hook handler(s) are missing:\n  " + "\n  ".join(missing)
 
 

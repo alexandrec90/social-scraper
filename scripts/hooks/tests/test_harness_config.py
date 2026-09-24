@@ -722,9 +722,8 @@ def test_the_branch_tier_shim_returns_before_it_resolves_devkit(monkeypatch):
 
 def test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch():
     """`SWITCHABLE_HOOKS` is the documented vocabulary, so a name in it that no hook
-    reads is a value an operator can set and watch do nothing. The two call sites that
-    are not Python -- `session-start` and `failure-retro` -- go through the `--hook-off`
-    arm, so search for either spelling."""
+    reads is a value an operator can set and watch do nothing. `session-start` is not
+    Python and goes through the `--hook-off` arm, so search for either spelling."""
     sources = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
         for path in (
@@ -733,7 +732,6 @@ def test_every_switchable_hook_is_a_hook_that_actually_consults_the_switch():
             REPO_ROOT / "scripts/hooks/enforce-capped-bash.py",
             REPO_ROOT / "scripts/hooks/worktree-guard-launch.py",
             REPO_ROOT / ".claude/hooks/session-start.sh",
-            REPO_ROOT / ".claude/settings.json",
         )
     )
     for name in cfg.SWITCHABLE_HOOKS:

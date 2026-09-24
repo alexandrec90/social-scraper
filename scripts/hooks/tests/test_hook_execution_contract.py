@@ -338,9 +338,15 @@ def test_every_wired_hook_names_a_file_that_exists():
     assert unresolved == [], f"settings.json names hook scripts that do not exist: {unresolved}"
 
 
-def test_the_repo_wires_at_least_one_hook():
-    """Guards every parametrised test below from passing on an empty collection."""
-    assert python_hooks(), "no Python hooks wired; the contract tests below assert nothing"
+def test_the_repo_wires_no_agent_hook():
+    """No agent hook is wired anywhere, and `sync-devkit.py --pull` strips any that are.
+
+    So the parametrised contract tests below collect nothing and are skipped. They stay
+    for the hook scripts, which are still vendored and would be judged by them again the
+    moment anything named one.
+    """
+    wired = [str(w) for w in wired_hooks(settings(), REPO_ROOT)]
+    assert wired == [], f"agent hooks are wired: {wired}; run `sync-devkit.py --pull`"
 
 
 # --- The exit-code contract ------------------------------------------------------

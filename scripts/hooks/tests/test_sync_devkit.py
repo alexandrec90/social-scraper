@@ -886,50 +886,16 @@ def _settings(*commands: str) -> dict:
     }
 
 
-def test_a_retired_hook_command_is_dropped():
-    payload = _settings(
-        'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/branch-per-task.py"',
-        'python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/hooks/lint-fix.py"',
-    )
-    pruned, dropped = ps.prune_hook_commands(payload, ("scripts/hooks/branch-per-task.py",))
-    assert dropped == ["branch-per-task.py"]
-    assert "UserPromptSubmit" not in pruned["hooks"]
-    assert pruned["hooks"]["PreToolUse"][0]["hooks"][0]["command"].endswith('lint-fix.py"')
-
-
-def test_a_surviving_hook_in_the_same_group_is_kept():
-    """The group is shared, so this must drop a command, not the matcher it sits in."""
+def test_the_settings_pass_unwires_every_hook_and_keeps_the_rest():
+    """No agent hook is wired anywhere: a live one and a retired one go alike."""
     payload = _settings(
         'python3 "x/scripts/hooks/branch-per-task.py"',
-        'python3 "x/scripts/hooks/branch-on-write.py"',
         'python3 "x/scripts/hooks/lint-fix.py"',
     )
-    pruned, dropped = ps.prune_hook_commands(
-        payload, ("scripts/hooks/branch-per-task.py", "scripts/hooks/branch-on-write.py")
-    )
-    assert sorted(dropped) == ["branch-on-write.py", "branch-per-task.py"]
-    kept = pruned["hooks"]["PreToolUse"][0]["hooks"]
-    assert len(kept) == 1 and kept[0]["command"].endswith('lint-fix.py"')
-
-
-def test_an_emptied_event_is_removed_not_left_as_a_husk():
-    """`{"hooks": []}` is a shape the next reader cannot tell from an accident."""
-    payload = _settings('python3 "x/scripts/hooks/branch-per-task.py"')
-    pruned, _ = ps.prune_hook_commands(payload, ("scripts/hooks/branch-per-task.py",))
-    assert pruned["hooks"] == {}
-    assert pruned["model"] == "opus"  # everything outside `hooks` is untouched
-
-
-def test_nothing_is_dropped_when_no_hook_is_retired():
-    payload = _settings('python3 "x/scripts/hooks/lint-fix.py"')
-    pruned, dropped = ps.prune_hook_commands(payload, ("scripts/hooks/branch-per-task.py",))
-    assert dropped == []
-    assert pruned == payload
-
-
-@pytest.mark.parametrize("payload", [None, [], "text", {}, {"hooks": "nonsense"}])
-def test_a_settings_shape_this_does_not_understand_is_returned_untouched(payload):
-    assert ps.prune_hook_commands(payload, ("scripts/hooks/branch-per-task.py",)) == (payload, [])
+    stripped, events = ps.strip_hooks(payload)
+    assert "hooks" not in stripped
+    assert stripped["model"] == "opus"  # everything outside `hooks` is untouched
+    assert events == sorted(payload["hooks"])
 
 
 def test_prune_settings_rewrites_the_file(tmp_path):
@@ -938,10 +904,9 @@ def test_prune_settings_rewrites_the_file(tmp_path):
     path.write_text(
         json.dumps(_settings('python3 "x/scripts/hooks/branch-per-task.py"')), encoding="utf-8"
     )
-    assert sh.settings_pass(tmp_path, ("scripts/hooks/branch-per-task.py",)) == [
-        f"(unwired retired hook) {sh.SETTINGS_FILE}: branch-per-task.py"
-    ]
-    assert "branch-per-task" not in path.read_text(encoding="utf-8")
+    notes = sh.settings_pass(tmp_path, ("scripts/hooks/branch-per-task.py",))
+    assert notes == [f"(unwired agent hooks) {sh.SETTINGS_FILE}: PreToolUse, UserPromptSubmit"]
+    assert "hooks" not in json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_prune_settings_leaves_an_unparseable_file_exactly_as_it_was(tmp_path):
@@ -956,22 +921,6 @@ def test_prune_settings_leaves_an_unparseable_file_exactly_as_it_was(tmp_path):
 
 def test_prune_settings_is_silent_when_there_is_no_settings_file(tmp_path):
     assert sh.settings_pass(tmp_path, ("scripts/hooks/branch-per-task.py",)) == []
-
-
-def test_a_live_hook_merely_mentioning_a_retired_basename_is_kept():
-    """Regression. Matching on the BASENAME made `README.md` a retired "hook", because
-    `.claude/skills/state-tools/README.md` is in RETIRED_PATHS -- and carameli wires a
-    markdownlint hook whose command lists `"README.md"` among its arguments. A pull
-    would have silently deleted that hook from its settings.
-
-    Matching on the repo-relative path is both precise and correct: a hook command
-    embeds the path (`.../scripts/hooks/branch-on-write.py`), never the bare name.
-    """
-    lint = 'markdownlint-cli2 --config .config.yaml "docs/roadmap.md" "README.md"'
-    payload = _settings(lint)
-    pruned, dropped = ps.prune_hook_commands(payload, (".claude/skills/state-tools/README.md",))
-    assert dropped == []
-    assert pruned == payload
 
 
 def test_only_scripts_can_be_retired_hooks():
@@ -1645,62 +1594,42 @@ def test_the_bootstrap_pull_runs_without_the_settings_tier(tmp_path, monkeypatch
     assert "Traceback" not in capsys.readouterr().err
 
 
-def _unguarded_project(root: Path) -> Path:
-    _seed(root, ps.GUARD_HOOK, "# the shim\n")
-    _seed(root, sh.SETTINGS_FILE, "{}")
+def _hooked_project(root: Path) -> Path:
+    """A project that vendors the guard shim and still wires a hook."""
+    _seed(root, "scripts/hooks/worktree-guard-launch.py", "# the shim\n")
+    _seed(
+        root,
+        sh.SETTINGS_FILE,
+        json.dumps({"hooks": {"Stop": [{"hooks": [{"command": "python3 x.py"}]}]}}),
+    )
     return root
 
 
-def test_pull_wires_the_guard_and_says_so(tmp_path, monkeypatch, capsys):
-    """End to end, because the ordering is the part that can go wrong: the wiring names
-    a file the same pull delivers, so it has to run after the copy."""
+def test_pull_unwires_every_hook_and_says_so(tmp_path, monkeypatch, capsys):
+    """End to end: the pull is what reaches every consumer's settings."""
     src, dst = tmp_path / "shared", tmp_path / "proj"
     _seed(src, "scripts/x.py", "v1")
-    _unguarded_project(dst)
+    _hooked_project(dst)
     monkeypatch.setattr(sh, "REPO_ROOT", dst)
     monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
     monkeypatch.setattr(sh, "git_head", lambda p: "abc1234")
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
-    assert "cross-checkout edit guard" in capsys.readouterr().out
-    assert ps.guard_unwired(dst) is False
+    assert "unwired agent hooks" in capsys.readouterr().out
+    assert "hooks" not in json.loads((dst / sh.SETTINGS_FILE).read_text(encoding="utf-8"))
 
 
-def test_check_fails_on_an_unwired_guard_without_calling_it_drift(tmp_path, monkeypatch, capsys):
-    """`--pull` fixes it, but nothing upstream differs -- and "the harness drifted"
-    sends the reader to compare files that are identical."""
+def test_check_passes_with_the_guard_shim_unwired(tmp_path, monkeypatch, capsys):
+    """There is no guard to expect. This used to fail `--check` with UNWIRED for a
+    project holding the shim and running no hook."""
     src, dst = tmp_path / "shared", tmp_path / "proj"
     _seed(src, "scripts/x.py", "v1")
     _seed(dst, "scripts/x.py", "v1")
-    _unguarded_project(dst)
-    monkeypatch.setattr(sh, "REPO_ROOT", dst)
-    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
-    assert sh.main(["--src", str(src)]) == 1
-    err = capsys.readouterr().err
-    assert "UNWIRED" in err
-    assert "no hook runs the cross-checkout edit guard" in err
-    assert "drifted from the shared repo" not in err
-
-
-def test_check_passes_once_the_guard_is_wired(tmp_path, monkeypatch):
-    src, dst = tmp_path / "shared", tmp_path / "proj"
-    _seed(src, "scripts/x.py", "v1")
-    _seed(dst, "scripts/x.py", "v1")
-    sh.settings_pass(_unguarded_project(dst))
+    _seed(dst, "scripts/hooks/worktree-guard-launch.py", "# the shim\n")
+    _seed(dst, sh.SETTINGS_FILE, "{}")
     monkeypatch.setattr(sh, "REPO_ROOT", dst)
     monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
     assert sh.main(["--src", str(src)]) == 0
-
-
-def test_the_retired_list_reaches_the_settings_pass_from_this_module(tmp_path, monkeypatch):
-    """`RETIRED_PATHS` is read at call time so a caller can replace it on this module;
-    the pass must not have captured its own copy at import."""
-    root = _unguarded_project(tmp_path)
-    command = 'python3 "x/scripts/hooks/made-up.py"'
-    _seed(
-        root, sh.SETTINGS_FILE, json.dumps({"hooks": {"Stop": [{"hooks": [{"command": command}]}]}})
-    )
-    monkeypatch.setattr(sh, "RETIRED_PATHS", ("scripts/hooks/made-up.py",))
-    assert any("made-up.py" in note for note in sh.settings_pass(root))
+    assert "UNWIRED" not in capsys.readouterr().err
 
 
 # --- the gated tier -------------------------------------------------------------

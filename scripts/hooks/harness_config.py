@@ -609,7 +609,6 @@ SWITCHABLE_HOOKS = (
     "capped-bash",
     "lint-fix",
     "stop",
-    "failure-retro",
     "branch-tier",
 )
 

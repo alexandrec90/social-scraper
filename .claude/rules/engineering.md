@@ -50,18 +50,18 @@ If the toolchain isn't available locally, still write the tests and leave execut
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
 
-## Claude Code's Bash calls: a short blocklist, not a proof obligation
+## Claude Code's Bash calls: no hook gates them
 
-`scripts/hooks/enforce-capped-bash.py` blocks one thing: a statement whose output grows
-with the **repository** rather than with the command you wrote. The list is closed — `ls`,
-`cat`, `find`, `tree`, `du`, `env`, `git status`, an uncounted `git log`, and a raw
-`git diff`/`git show`.
+No agent hook is wired, so nothing judges a Bash call before it runs
+(`scripts/hooks/enforce-capped-bash.py` is vendored but unwired). The bound is
+`BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`, which truncates bytes that already
+exist and so cannot false-positive.
 
-**Everything else runs uncapped, and wrapping it is a mistake.** A `grep`, a `python -c`,
-a test run, a `curl`, a heredoc: issue them bare. Routing every call through the wrapper
-by reflex buys no second bound and has happened here at scale.
-
-Three spellings take a named command off the list:
+**Issue commands bare; wrapping by reflex is a mistake.** A `grep`, a `python -c`, a test
+run, a `curl`, a heredoc: routing them through a wrapper buys no second bound and has
+happened here at scale. Bound only a statement whose output grows with the
+**repository** rather than with the command you wrote — `ls`, `cat`, `find`, `tree`,
+`du`, `env`, `git status`, an uncounted `git log`, a raw `git diff`/`git show`:
 
 | Spelling | Trade-off |
 | --- | --- |
@@ -72,21 +72,13 @@ Three spellings take a named command off the list:
 The wrapper runs through the platform shell — **`cmd.exe` on Windows** — so heredocs,
 single-quoted paths and escaped alternation do not survive it. For `ls`, `cat` and `find`
 the better answer is usually the Glob, Read and Grep tools, which cost no subprocess and
-page rather than dump. The unconditional bound is `BASH_MAX_OUTPUT_LENGTH` in
-`.claude/settings.json`, which truncates bytes that already exist and so cannot
-false-positive. **Codex never sees this gate** — `scripts/sync-codex-hooks.py` omits it
-from `.codex/hooks.json` and Codex caps output itself, so issue commands there directly,
-the nine included.
-
-**If it blocks something that is not one of the nine, that is a defect in it** — report it
-per the guardrail below with the exact command, and never rewrite a correct command to
-satisfy it. Why it is a blocklist rather than a proof obligation, and what preemptive
-wrapping has cost, are in
+page rather than dump. Codex caps shell output itself, so issue commands there directly.
+What preemptive wrapping has cost is in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **A refusal that says the command "is too complex to verify that it stays inside the
 worktree", "names git in a form too complex to verify", or "cannot be shown not to be
-git", is not this hook and not any devkit hook.** It is Claude Code's own isolation guard
+git", is not a devkit hook** — none is wired. It is Claude Code's own isolation guard
 for a `claude --worktree` session. No setting turns it off and nothing in devkit can
 change what it accepts — report it to Claude Code, not to this harness, where one week's
 backlog once carried three of these filed as guard defects.
@@ -171,8 +163,8 @@ to Python is the shape this clause exists to refuse.
   testable without spawning a subprocess, and keep side effects inside `main()`: the suite
   imports these modules.
 - **Every new script ships with its tests in the same change.**
-- **Hook scripts (`scripts/hooks/`) are stdlib only.** They run before the virtualenv is
-  active, so an import of anything installed is a crash in the one context that cannot
+- **Hook scripts (`scripts/hooks/`) are stdlib only.** They may run before the virtualenv
+  is active, so an import of anything installed is a crash in the one context that cannot
   report it well.
 - **Failure artifacts:** any script whose failures an agent is expected to act on writes
   them to a **parseable file under `logs/`** — on failure too, overwritten per run.
@@ -182,8 +174,7 @@ to Python is the shape this clause exists to refuse.
 
 Lint catches **correctness and security** problems — the ones a human reviewer reads past.
 Style is not a judgement call worth an agent's turn: `ruff format` runs at commit time from
-`.pre-commit-config.yaml`, on every agent edit where the `lint-fix.py` PostToolUse hook is
-enabled, and again in CI, so line length, quote style and import order never reach a
+`.pre-commit-config.yaml` and again in CI, so line length, quote style and import order never reach a
 review. **On** for correctness, security and resource-handling; **off**
 for anything a formatter can decide. A rule that fires on something a formatter would fix
 is misconfigured — turn it off rather than teaching everyone to ignore it.
@@ -222,7 +213,8 @@ check — deliberately, in its own change, with the reason in the commit message
 
 The hook scripts, this rule and the shared skills are vendored from devkit, the source of
 truth. Each project commits its own copy, so a fresh clone needs no submodule and no
-install step.
+install step. No coding-agent hook is wired — `.claude/settings.json` carries no `hooks`
+block, and `--pull` strips one — so the hook scripts are carried, not run.
 
 - Project specifics live in `.devkit.toml`, read by `scripts/hooks/harness_config.py`.
   **Never hard-code them in a vendored file**: a new behaviour gets a manifest field and a
@@ -232,7 +224,8 @@ install step.
   commit the copy corresponds to.
 - **`$DEVKIT_DIR` unset means there is nothing to compare against**, and the stamp decides
   what that is worth — clean before adoption, a failure once `DEVKIT_VERSION` exists.
-- **An operator may switch the harness off** — `DEVKIT_HOOKS_OFF`.
+- **An operator may switch the hook scripts off** — `DEVKIT_HOOKS_OFF`, inert while none
+  is wired.
 - A vendored script may depend on a file the project owns (`scripts/lint-all.py`,
   `scripts/run-tests.py`); a missing one is a silent skip by design.
 
