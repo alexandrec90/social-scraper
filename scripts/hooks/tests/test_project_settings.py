@@ -1,7 +1,8 @@
 """Tests for scripts/project_settings.py -- the one file devkit edits and never vendors.
 
-No agent hook is wired anywhere, so the pull's whole job on this file is to take the
-`hooks` block out and leave everything else exactly as the project wrote it.
+No agent hook is wired anywhere, so the pull takes the `hooks` block out, fills in the
+agent-shell environment where a key is missing, and leaves everything else exactly as
+the project wrote it.
 """
 
 import json
@@ -32,6 +33,11 @@ def _hook(command: str, event: str = "PreToolUse") -> dict:
 
 def _settings(root: Path) -> dict:
     return json.loads((root / ps.SETTINGS_FILE).read_text(encoding="utf-8"))
+
+
+def _env(**extra: str) -> dict:
+    """An `env` block already carrying the agent-shell keys, plus `extra`."""
+    return {**ps.AGENT_ENV, **extra}
 
 
 # --- reading a file that may not be there ------------------------------------
@@ -71,7 +77,7 @@ def test_the_pull_unwires_every_agent_hook_and_names_the_events(tmp_path):
     """devkit's own, the guard, and one the project added itself all go: no agent hook
     is wired anywhere, so there is nothing to tell apart."""
     settings = {
-        "env": {"KEEP": "1"},
+        "env": _env(KEEP="1"),
         "hooks": {
             **_hook('python3 "x/scripts/hooks/worktree-guard-launch.py"')["hooks"],
             **_hook("npx markdownlint README.md", event="Stop")["hooks"],
@@ -82,7 +88,7 @@ def test_the_pull_unwires_every_agent_hook_and_names_the_events(tmp_path):
     assert ps.settings_pass(root, RETIRED) == [
         f"(unwired agent hooks) {ps.SETTINGS_FILE}: PreToolUse, Stop"
     ]
-    assert _settings(root) == {"env": {"KEEP": "1"}}
+    assert _settings(root) == {"env": _env(KEEP="1")}
 
 
 def test_the_strip_does_not_mutate_the_callers_tree():
@@ -95,15 +101,15 @@ def test_the_strip_does_not_mutate_the_callers_tree():
 def test_an_empty_or_malformed_hooks_block_is_removed_too(tmp_path):
     """`{"hooks": {}}` is a husk the next reader cannot tell from a hook lost by
     accident, and a non-object one is not a shape anything should keep."""
-    root = _project(tmp_path, '{"hooks": {}, "env": {}}')
+    root = _project(tmp_path, {"hooks": {}, "env": _env()})
     assert ps.settings_pass(root) == [f"(unwired agent hooks) {ps.SETTINGS_FILE}: hooks"]
-    assert _settings(root) == {"env": {}}
+    assert _settings(root) == {"env": _env()}
     assert ps.strip_hooks({"hooks": "nonsense"}) == ({}, [])
 
 
 def test_nothing_to_unwire_leaves_the_file_byte_for_byte(tmp_path):
     """A pull over an already clean project must show no settings diff."""
-    original = '{\n   "env": {"KEEP": "1"}\n}\n'
+    original = '{\n   "env": ' + json.dumps(_env(KEEP="1")) + "\n}\n"
     root = _project(tmp_path, original)
     assert ps.settings_pass(root, RETIRED) == []
     assert (root / ps.SETTINGS_FILE).read_text(encoding="utf-8") == original
@@ -122,6 +128,57 @@ def test_the_previous_sync_devkit_can_still_call_the_pass(tmp_path):
     positionally. A signature it could not call would fail the pull that delivers this."""
     root = _project(tmp_path, _hook("python3 cap.py"))
     assert ps.settings_pass(root, RETIRED)
+
+
+# --- the agent-shell environment ----------------------------------------------
+# Claude Code starts its tools under FORCE_COLOR=3, so pytest coloured every line and a
+# rich spinner (pip-audit's) redrew itself into 25 KB of one tool result.
+
+
+def test_the_pull_adds_the_agent_shell_env_and_says_which_keys(tmp_path):
+    root = _project(tmp_path, {"env": {"KEEP": "1"}, "permissions": {"allow": []}})
+    assert ps.settings_pass(root) == [
+        f"(agent shell env) {ps.SETTINGS_FILE}: PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
+    ]
+    assert _settings(root) == {"env": _env(KEEP="1"), "permissions": {"allow": []}}
+    assert ps.settings_pass(root) == []
+
+
+def test_a_value_the_project_set_itself_is_kept(tmp_path):
+    root = _project(tmp_path, {"env": {"PY_COLORS": "1"}})
+    assert ps.settings_pass(root) == [
+        f"(agent shell env) {ps.SETTINGS_FILE}: TTY_COMPATIBLE, TTY_INTERACTIVE"
+    ]
+    assert _settings(root)["env"]["PY_COLORS"] == "1"
+
+
+def test_a_settings_file_with_no_env_gets_one_and_a_malformed_env_is_left_alone(tmp_path):
+    root = _project(tmp_path, {})
+    ps.settings_pass(root)
+    assert _settings(root) == {"env": ps.AGENT_ENV}
+    assert ps.with_agent_env({"env": "nonsense"}) == ({"env": "nonsense"}, [])
+    assert ps.with_agent_env(None) == (None, [])
+
+
+def test_unwiring_and_the_env_are_one_write_with_both_notes(tmp_path):
+    root = _project(tmp_path, _hook("python3 cap.py"))
+    assert ps.settings_pass(root) == [
+        f"(unwired agent hooks) {ps.SETTINGS_FILE}: PreToolUse",
+        f"(agent shell env) {ps.SETTINGS_FILE}: PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE",
+    ]
+    assert _settings(root) == {"env": ps.AGENT_ENV}
+
+
+def test_devkit_and_the_template_carry_the_agent_shell_env():
+    """A new project and devkit itself start with it; `--pull` brings everyone else."""
+    repo = Path(__file__).resolve().parents[3]
+    template = repo / "templates/core/dot-claude/settings.json.tmpl"
+    if not template.is_file():
+        return  # a consumer: its settings are its own, and `--pull` fills them in
+    for path in (repo / ".claude/settings.json", template):
+        text = path.read_text(encoding="utf-8")
+        for key, value in ps.AGENT_ENV.items():
+            assert f'"{key}": "{value}"' in text, (path.name, key)
 
 
 # --- what `--check` says -------------------------------------------------------

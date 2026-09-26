@@ -8,6 +8,9 @@
     "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
     "OTEL_METRIC_EXPORT_INTERVAL": "10000",
     "OTEL_LOGS_EXPORT_INTERVAL": "5000",
-    "OTEL_RESOURCE_ATTRIBUTES": "service.name=social-scraper,service.instance.id=social-scraper,deployment.environment=local"
+    "OTEL_RESOURCE_ATTRIBUTES": "service.name=social-scraper,service.instance.id=social-scraper,deployment.environment=local",
+    "PY_COLORS": "0",
+    "TTY_COMPATIBLE": "0",
+    "TTY_INTERACTIVE": "0"
   }
 }

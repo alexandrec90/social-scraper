@@ -18,6 +18,8 @@ import json
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from conftest import REPO_ROOT, load_module
 
 merger = load_module("scripts/merge-dependabot-prs.py")
@@ -159,20 +161,42 @@ def test_a_pr_whose_gate_never_passed_is_not_merged():
     assert not run.merges()
 
 
-def test_a_gate_run_that_was_dispatched_by_hand_is_not_evidence():
-    """Someone re-running the gate is not the gate passing on a Dependabot event, and the
-    event-driven job has never accepted it either."""
-    run = FakeRun(
-        world(
-            **{
-                "actions/runs": {
-                    "workflow_runs": [
-                        {"name": "PR Gate", "event": "workflow_dispatch", "conclusion": "success"}
-                    ]
+BRANCH = "dependabot/pip/minor-and-patch-7def012b62"
+
+
+def dispatched(head_branch: str) -> dict:
+    return {
+        "actions/runs": {
+            "workflow_runs": [
+                {
+                    "name": "PR Gate",
+                    "event": "workflow_dispatch",
+                    "conclusion": "success",
+                    "head_branch": head_branch,
                 }
-            }
-        )
-    )
+            ]
+        }
+    }
+
+
+def test_a_gate_dispatched_on_the_prs_own_branch_at_its_head_is_evidence():
+    """carameli #393: a lock repair pushed with `GITHUB_TOKEN`, which raises no usable
+    `pull_request` event, so it dispatched the gate itself. Every check at the head was
+    green, and the PR sat open because only a `pull_request` run counted."""
+    run = FakeRun(world(prs=[pr(head={"sha": SHA, "ref": BRANCH})], **dispatched(BRANCH)))
+    assert merger.main(env(), run) == 0
+    assert len(run.merges()) == 1, run.calls
+
+
+@pytest.mark.parametrize(
+    ("head", "ran_on"),
+    [({"sha": SHA, "ref": BRANCH}, "main"), ({"sha": SHA}, BRANCH)],
+    ids=["gated-on-another-branch", "pr-ref-unknown"],
+)
+def test_a_dispatched_gate_that_is_not_on_the_prs_branch_is_not_evidence(head, ran_on):
+    """The same commit gated on another ref is a different question, and a PR whose
+    head ref cannot be read has nothing to match the run against."""
+    run = FakeRun(world(prs=[pr(head=head)], **dispatched(ran_on)))
     assert merger.main(env(), run) == 0
     assert not run.merges()
 
