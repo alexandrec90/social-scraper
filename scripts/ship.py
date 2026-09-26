@@ -206,6 +206,32 @@ def _run_lint(base: str = "") -> bool:
     return result.returncode == 0
 
 
+TRANSIENT_PUSH_MARKERS = ("could not resolve", "timed out", "connection", "network")
+
+
+def push_failure(stderr: str) -> str:
+    """Why a push failed, in words that send the reader to the right place.
+
+    Every failure used to read "push failed after retries", and a session that got it
+    went to diagnose the network when the pre-push gate had failed a test. Retrying is
+    only for the transient markers; anything else was refused once, and git tells the
+    two refusals apart: a remote rejection names the ref (`! [rejected]`), and a local
+    pre-push hook that exits non-zero leaves only `failed to push some refs`, with the
+    hook's own output above it.
+    """
+    text = stderr.lower()
+    if any(marker in text for marker in TRANSIENT_PUSH_MARKERS):
+        return f"push failed on a network error after {len(backoff_delays())} retries."
+    if "[rejected]" in text or "[remote rejected]" in text:
+        return "push rejected by the remote (not a network error): see git's output above."
+    if "failed to push some refs" in text:
+        return (
+            "push refused before anything was sent -- the pre-push gate failed (not a network "
+            "error). Its findings are above and in logs/test-failures.log / logs/lint-errors.log."
+        )
+    return "push failed (not a network error): see git's output above."
+
+
 def _push(branch: str, sleep=time.sleep) -> bool:
     """Push the task branch, retrying only recognizably transient failures."""
     delays = backoff_delays()
@@ -213,14 +239,13 @@ def _push(branch: str, sleep=time.sleep) -> bool:
         result = _git("push", "-u", "origin", branch)
         if result.returncode == 0:
             return True
-        stderr = (result.stderr or "").lower()
-        transient = any(
-            marker in stderr
-            for marker in ("could not resolve", "timed out", "connection", "network")
-        )
+        stderr = result.stderr or ""
+        transient = any(marker in stderr.lower() for marker in TRANSIENT_PUSH_MARKERS)
         if not transient or attempt == len(delays):
-            if result.stderr:
-                print(result.stderr.rstrip(), file=sys.stderr)
+            for stream in (result.stdout, stderr):
+                if stream and stream.strip():
+                    print(stream.rstrip(), file=sys.stderr)
+            print(f"ship: {push_failure(stderr)}", file=sys.stderr)
             return False
         sleep(delays[attempt])
     return False
@@ -358,7 +383,6 @@ def main(argv: list[str] | None = None) -> int:
         print("ship: branch-scope lint failed; see logs/lint-errors.log.", file=sys.stderr)
         return EXIT_LINT_FAILED
     if not _push(branch):
-        print("ship: push failed after retries.", file=sys.stderr)
         return EXIT_PUSH_FAILED
 
     print(f"ship: pushed branch={branch} base={base}; open or reuse its PR before marking shipped.")

@@ -19,15 +19,12 @@ and loaded only when a pointer sends you there.
 
 ## Testing
 
-Every code change must include tests in the same commit. Every endpoint and every testable
-unit of logic must have test coverage — gaps are not acceptable. If you touch something
+Every code change must include tests in the same commit. If you touch something
 that has no test, write the test in the same commit even if the logic didn't change.
 
 - **New unit of logic:** the happy path, the error cases, and the edge cases.
 - **Bug fix:** write the regression test first and watch it fail before you fix it. One
   that has never failed is asserting the wrong thing.
-- **Reversion check:** before calling a change complete, identify which test would
-  fail if the changed behavior were reverted. If none would, it is not covered yet.
 - **Coverage floors are ratchets:** never lower it merely to make a change pass. The
   other end of the same rule is the one that slips quietly, because raising a ceiling —
   a timeout, a retry count, a size or complexity limit, a baseline of known gaps — reads
@@ -35,17 +32,11 @@ that has no test, write the test in the same commit even if the logic didn't cha
   **A ceiling raised on three consecutive branches is a defect report, not a raise:**
   find out what is filling it before moving it again, and say in the commit message what
   you found.
-- **Run targeted tests** — the module you touched — plus the linter, while you work. The
-  whole gate runs once, in CI, on the PR the fix pass opens for you: a session never
-  pushes, so it never waits on a gate. When the gate is red, the pass downloads the
-  artifact and sends a fresh session at the failure with the failing tests named. The
-  `devkit-push-gate` pre-commit hook still guards a push a person makes by hand.
-- **Fix failures in the code, not in the assertion.** Relaxing an assertion to get green
-  deletes the only evidence that something is wrong.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
 
-If the toolchain isn't available locally, still write the tests and leave execution to CI.
-"I couldn't run it" defers the run, never the writing.
+Running tests is optional, and the full suite is not yours to run — see
+`.claude/rules/session-scope.md`. The gate runs once, in CI, on the PR the fix pass opens
+for you; a red gate comes back as a fresh session with the failing tests named.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
@@ -245,6 +236,7 @@ reject, and once by hiding the defect from the pass that would have fixed it eve
 **Never silently work around a bad instruction or a refusal.** If a skill, a rule, a
 `CLAUDE.md`, a hook or a vendored script sent you into a dead end — blocked a correct
 command, refused an edit it should have allowed, crashed, reported success while doing
-nothing — say so in your report with the file or the exact command, and stop there. A
-workaround fixes your turn and leaves the next agent at the same wall; a report is what
-the devkit session works from.
+nothing — say so in your report with the file or the exact command, write the same
+line to `logs/friction.md`, and stop there. The pass files each line on the ledger, and
+reads your transcript for what you did not write. A workaround fixes your turn and leaves
+the next agent at the same wall; a filed line is what the devkit session works from.

@@ -8,10 +8,12 @@ needing a paragraph to explain why it was allowed to write at all. `sync-devkit.
 also past every structural limit it holds other files to, and this is the half that had
 somewhere else to be.
 
-The pull makes one pass over that file: it **unwires every agent hook**. No hook is
+The pull makes one pass over that file. It **unwires every agent hook**: no hook is
 wired anywhere -- not devkit's, not the template's, not one a project added -- so a
 consumer's settings lose their whole `hooks` block on the pull that delivers this. The
-hook scripts are still vendored, and inert while nothing names them.
+hook scripts are still vendored, and inert while nothing names them. And it **adds the
+agent-shell environment** (`AGENT_ENV`) wherever a key is missing, never overwriting a
+value the project set itself.
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
@@ -24,6 +26,15 @@ import json
 from pathlib import Path
 
 SETTINGS_FILE = ".claude/settings.json"
+
+# What every agent shell runs with, so a captured result is text rather than terminal
+# control codes. Claude Code starts its tools under `FORCE_COLOR=3`, so pytest coloured
+# every line and a `rich` progress spinner (pip-audit's) redrew itself into 25 KB of one
+# tool result. Each key is read by the Python tools only -- pytest (`PY_COLORS`), rich
+# (`TTY_COMPATIBLE`, `TTY_INTERACTIVE`, both checked before `FORCE_COLOR`) -- because
+# the settings `env` reaches Claude Code's own process too, and a `NO_COLOR` there is a
+# bet on how its UI reads colour.
+AGENT_ENV = {"PY_COLORS": "0", "TTY_COMPATIBLE": "0", "TTY_INTERACTIVE": "0"}
 
 
 def retired_hook_paths(retired: tuple[str, ...]) -> tuple[str, ...]:
@@ -80,6 +91,25 @@ def strip_hooks(payload: object) -> tuple[object, list[str]]:
     return {key: value for key, value in payload.items() if key != "hooks"}, events
 
 
+def with_agent_env(payload: object) -> tuple[object, list[str]]:
+    """`(settings, keys added)`: `payload` with every missing `AGENT_ENV` key filled in.
+
+    A key the project already sets is its decision and is kept, whatever its value. A
+    tree that already carries them all comes back as the same object, so the pass can
+    tell "nothing to write" by identity, as it does for the hooks. An `env` that is not
+    an object is a shape this will not guess at.
+    """
+    if not isinstance(payload, dict):
+        return payload, []
+    env = payload.get("env", {})
+    if not isinstance(env, dict):
+        return payload, []
+    missing = [key for key in AGENT_ENV if key not in env]
+    if not missing:
+        return payload, []
+    return {**payload, "env": {**env, **{key: AGENT_ENV[key] for key in missing}}}, missing
+
+
 def read(root: Path) -> object | None:
     """This project's settings tree, or None when it is absent or will not parse.
 
@@ -97,25 +127,32 @@ def read(root: Path) -> object | None:
 def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
     """The pull's pass over the settings file. Returns one note per change it made.
 
-    It unwires every agent hook. `retired` is accepted and unused: a pull runs the
-    *previous* `sync-devkit.py`, which still passes it, and a signature it cannot call
-    would fail the one pull that delivers this version. Best-effort throughout: a
-    settings file that cannot be read is left exactly as it is.
+    It unwires every agent hook and adds the missing `AGENT_ENV` keys. `retired` is
+    accepted and unused: a pull runs the *previous* `sync-devkit.py`, which still passes
+    it, and a signature it cannot call would fail the one pull that delivers this
+    version. Best-effort throughout: a settings file that cannot be read is left exactly
+    as it is.
     """
     del retired
     payload = read(root)
     if payload is None:
         return []
     stripped, events = strip_hooks(payload)
-    if stripped is payload:
+    updated, added = with_agent_env(stripped)
+    if updated is payload:
         return []
     try:
         (root / SETTINGS_FILE).write_text(
-            json.dumps(stripped, indent=2) + "\n", encoding="utf-8", newline="\n"
+            json.dumps(updated, indent=2) + "\n", encoding="utf-8", newline="\n"
         )
     except OSError:
         return []
-    return [f"(unwired agent hooks) {SETTINGS_FILE}: {', '.join(events) or 'hooks'}"]
+    notes = []
+    if stripped is not payload:
+        notes.append(f"(unwired agent hooks) {SETTINGS_FILE}: {', '.join(events) or 'hooks'}")
+    if added:
+        notes.append(f"(agent shell env) {SETTINGS_FILE}: {', '.join(added)}")
+    return notes
 
 
 def check_notes(root: Path, codex_file: str, codex_stale: bool) -> list[tuple[str, str]]:

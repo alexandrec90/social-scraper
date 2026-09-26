@@ -130,15 +130,39 @@ def test_vendored_paths_survive_a_bare_manifest_declaration(tmp_path):
 def test_vendored_paths_read_this_repos_real_sync_script(tmp_path):
     """The regression: every fixture above is synthetic, and the real file parsed to none.
 
-    A consumer is `DEVKIT_VERSION` plus devkit's own `sync-devkit.py`, so build exactly
-    that and assert the manifest comes back non-empty and naming a file devkit vendors.
+    A consumer is `DEVKIT_VERSION` plus devkit's own scripts, so build exactly that and
+    assert the manifest comes back non-empty and naming a file devkit vendors.
     """
     write(tmp_path, "DEVKIT_VERSION", "abc\n")
-    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
-    write(tmp_path, "scripts/sync-devkit.py", real)
+    copy_real_lists(tmp_path)
     paths = sc.vendored_paths(tmp_path)
     assert paths, "the real MANIFEST must be readable, or the vendored skip is inert"
     assert ".claude/rules/engineering.md" in paths
+
+
+def copy_real_lists(root):
+    """The two files a consumer's MANIFEST can be read from, as devkit ships them."""
+    for name in ("devkit_manifest.py", "sync-devkit.py"):
+        real = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        write(root, f"scripts/{name}", real)
+
+
+def test_vendored_paths_prefer_devkit_manifest_over_the_sync_script(tmp_path):
+    """Where the MANIFEST lives since it was cut out of `sync-devkit.py`."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/devkit_manifest.py", 'MANIFEST: tuple[str, ...] = ("new.py",)\n')
+    write(tmp_path, "scripts/sync-devkit.py", 'MANIFEST = ("old.py",)\n')
+    assert sc.vendored_paths(tmp_path) == {"new.py"}
+
+
+def test_vendored_paths_fall_back_to_the_sync_script_of_an_older_consumer(tmp_path):
+    """A consumer that has not pulled `devkit_manifest.py` yet -- or holds one with no
+    readable MANIFEST -- still has the literal inline in its `sync-devkit.py`."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", 'MANIFEST = ("old.py",)\n')
+    assert sc.vendored_paths(tmp_path) == {"old.py"}
+    write(tmp_path, "scripts/devkit_manifest.py", "def (:\n")
+    assert sc.vendored_paths(tmp_path) == {"old.py"}
 
 
 GATED_SCRIPT = (
@@ -187,11 +211,10 @@ def test_a_gated_literal_that_will_not_evaluate_costs_only_the_gated_half(tmp_pa
 
 def test_the_real_gated_manifest_is_a_literal_the_scanner_can_read(tmp_path):
     """The synthetic fixtures prove the parser; this proves the real declaration keeps
-    the shape it needs -- a `Name` key in `sync-devkit.py` would pass every test above
+    the shape it needs -- a `Name` key in `devkit_manifest.py` would pass every test above
     and silently empty the exemption in every consumer."""
     write(tmp_path, "DEVKIT_VERSION", "abc\n")
-    real = (REPO_ROOT / "scripts" / "sync-devkit.py").read_text(encoding="utf-8")
-    write(tmp_path, "scripts/sync-devkit.py", real)
+    copy_real_lists(tmp_path)
     write(tmp_path, ".devkit.toml", ON)
     assert "frontend/src/worktreePort.ts" in sc.vendored_paths(tmp_path)
 

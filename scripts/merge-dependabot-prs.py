@@ -24,7 +24,8 @@ a REST endpoint, so the retry survives the exact failure that created the work f
 
 **The guards are re-derived, never inherited.** A schedule carries no PR, so each
 candidate is re-checked from scratch: carrying the `automerge` label, and with a
-*successful `PR Gate` run on its current head SHA*. That last one is what keeps this
+*successful `PR Gate` run on its current head SHA* (`gate_passed` says which runs
+count). That last one is what keeps this
 honest -- it is the same condition the event job waits for, so the sweep can only ever
 complete a merge that was already earned, and a push to the branch moves the head past
 the gated SHA and disqualifies it. There is deliberately no author guard: only write
@@ -84,24 +85,28 @@ def labels_of(pr: dict) -> list[str]:
     return [label.get("name", "") for label in pr.get("labels") or []]
 
 
-def gate_passed(repo: str, sha: str, run) -> bool:
-    """True when `PR Gate` has a successful `pull_request` run on exactly this SHA.
+def gate_passed(repo: str, sha: str, run, branch: str = "") -> bool:
+    """True when `PR Gate` has a successful run on exactly this SHA, for this PR.
 
-    Scoped to the SHA rather than the branch, and to `pull_request` rather than any event,
-    because both are load-bearing. A branch-scoped answer would let an older commit's green
-    gate merge code it never ran against, and a hand-dispatched `workflow_dispatch` run of
-    the gate is not the same evidence -- it is somebody re-running a workflow, possibly on
-    a different ref, and the event job has never accepted it either.
+    Scoped to the SHA rather than the branch: a branch-scoped answer would let an older
+    commit's green gate merge code it never ran against. A `pull_request` run is the
+    PR's by construction. A `workflow_dispatch` run counts too, when it ran on the PR's
+    own head `branch`: a push made with `GITHUB_TOKEN` -- a lock repair, a generated-file
+    sync -- raises no usable `pull_request` event, so the workflow that pushed dispatches
+    the gate itself, and that run is the only verdict the commit will ever get.
+    carameli #393 sat open with every check green at its head because this accepted
+    `pull_request` alone.
     """
     if not sha:
         return False
     payload = gh_json(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100", run) or {}
     for entry in payload.get("workflow_runs") or []:
-        if (
-            entry.get("name") == GATE_WORKFLOW
-            and entry.get("event") == "pull_request"
-            and entry.get("conclusion") == "success"
-        ):
+        if entry.get("name") != GATE_WORKFLOW or entry.get("conclusion") != "success":
+            continue
+        event = entry.get("event")
+        if event == "pull_request":
+            return True
+        if event == "workflow_dispatch" and branch and entry.get("head_branch") == branch:
             return True
     return False
 
@@ -174,7 +179,7 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "") -> tuple[bool, str]:
     gated = (env_sha or "").strip()
     if gated and sha != gated:
         return False, f"head moved to {sha[:7]}, past the gated {gated[:7]}"
-    if not gate_passed(repo, sha, run):
+    if not gate_passed(repo, sha, run, (pr.get("head") or {}).get("ref") or ""):
         return False, f"no successful {GATE_WORKFLOW} run on {sha[:7]}"
     blocking = blocking_checks(repo, sha, run)
     if blocking:

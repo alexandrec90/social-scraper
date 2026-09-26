@@ -235,25 +235,24 @@ def scan_roots(cfg: harness_config.Config) -> tuple[str, ...]:
 def vendored_paths(root: Path) -> frozenset[str]:
     """Paths `sync-devkit.py` owns, in a project that has adopted devkit.
 
-    Read off the script's `MANIFEST` literal rather than imported: the script is not a
-    module of this tree, and a consumer's copy may be older than this one.
+    Read off the `MANIFEST` literal rather than imported: neither file is a module of
+    this tree, and a consumer's copy may be older than this one -- which is also why
+    `sync-devkit.py` is the fallback for one that predates `devkit_manifest.py`.
 
     **`AnnAssign` too.** The real declaration is `MANIFEST: tuple[str, ...] = (...)`, so
-    matching `Assign` alone returned `frozenset()` in every consumer that ever ran this:
-    the skip was inert, and adopting a release reddened both baseline tests on vendored
-    files the consumer cannot fix. Devkit has no `DEVKIT_VERSION`, so its own CI cannot
-    see it -- the guard below short-circuits here for a different reason.
+    matching `Assign` alone returned `frozenset()` in every consumer that ever ran this.
+    Devkit has no `DEVKIT_VERSION`, so its own CI cannot see it.
     """
     if not (root / "DEVKIT_VERSION").is_file():
         return frozenset()
-    script = root / "scripts" / "sync-devkit.py"
-    if not script.is_file():
-        return frozenset()
-    try:
-        tree = ast.parse(script.read_text(encoding="utf-8"))
-    except (SyntaxError, ValueError, OSError):
-        return frozenset()
-    literals = _manifest_literals(tree)
+    literals: dict[str, object] = {}
+    for name in ("devkit_manifest.py", "sync-devkit.py"):
+        try:
+            tree = ast.parse((root / "scripts" / name).read_text(encoding="utf-8"))
+        except (SyntaxError, ValueError, OSError):
+            continue
+        if isinstance((literals := _manifest_literals(tree)).get("MANIFEST"), (list, tuple)):
+            break
     if not isinstance(manifest := literals.get("MANIFEST"), (list, tuple)):
         return frozenset()
     paths = {str(v) for v in manifest if isinstance(v, str)}

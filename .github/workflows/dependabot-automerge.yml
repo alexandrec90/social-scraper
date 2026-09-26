@@ -137,10 +137,13 @@ jobs:
     # whole authorization, and only write access can apply it. A fork PR cannot be
     # labelled by its author, and `gh pr list --head` below matches same-repo
     # branches only, so an unlabelled or external PR falls out before the merge.
+    # A `workflow_dispatch` completion counts: a lock repair pushes with GITHUB_TOKEN,
+    # which raises no usable `pull_request` event, and dispatches the gate on the PR's
+    # branch instead. The script accepts that run only on the PR's own head branch.
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request'
+      contains(fromJSON('["pull_request", "workflow_dispatch"]'), github.event.workflow_run.event)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

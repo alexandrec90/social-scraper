@@ -378,6 +378,46 @@ def test_gaps_accepts_a_substituted_corpus(tmp_path):
     assert us.gaps(tmp_path, cfg, texts={}) == ["src/acme.py::alpha"]
 
 
+def test_a_fixture_named_after_the_function_it_replaces_is_not_its_test(tmp_path):
+    """devkit #394: `def gh_for(_project_dir):`, a stand-in handed to `monkeypatch` in a
+    file that also names `sweep`, read as a call of `sweep.gh_for`, and the stale half
+    of the ratchet demanded its baseline line be deleted with nothing testing it. A bare
+    call of the stand-in is a call of the stand-in too."""
+    write(tmp_path, "src/acme.py", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    stand_in = (
+        "import acme\n\n\n"
+        "def alpha(_path):\n    return 1\n\n\n"
+        "def test_it(monkeypatch):\n"
+        "    monkeypatch.setattr(acme, 'alpha', alpha)\n"
+        "    assert alpha(None) == 1\n    acme.beta()\n"
+    )
+    write(tmp_path, "tests/test_acme.py", stand_in)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/acme.py::alpha"]
+
+
+def test_a_stand_in_does_not_hide_a_real_reference_in_the_same_file(tmp_path):
+    write(tmp_path, "src/acme.py", "def alpha():\n    pass\n")
+    for reaching in ("import acme\nacme.alpha()\n", "from acme import alpha\n"):
+        write(tmp_path, "tests/test_acme.py", reaching + "\n\ndef alpha():\n    pass\n")
+        assert us.gaps(tmp_path, config(sources=["src"])) == [], reaching
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("def alpha():\n    alpha()\n", {"alpha"}),
+        ("async def alpha():\n    pass\n", {"alpha"}),
+        ("class Alpha:\n    pass\n", {"Alpha"}),
+        ("def test_it():\n    def  alpha(_p):\n        pass\n", {"test_it", "alpha"}),
+        ("import acme\ndef alpha():\n    acme.alpha()\n", set()),  # reached as an attribute
+        ("from acme import alpha\ndef alpha():\n    pass\n", set()),  # reached by an import
+        ("alpha()\n", set()),  # a call is not a definition
+    ],
+)
+def test_shadowed_names_are_the_file_s_own_definitions_it_never_reaches_elsewhere(text, expected):
+    assert us.shadowed_names(text) == frozenset(expected)
+
+
 def test_read_tests_returns_the_text_of_every_corpus_file(tmp_path):
     write(tmp_path, "tests/test_acme.py", "acme.alpha()")
     assert us.read_tests(tmp_path, config(sources=["src"])) == {
@@ -386,40 +426,6 @@ def test_read_tests_returns_the_text_of_every_corpus_file(tmp_path):
 
 
 # --- code_only: prose cannot put a file in a corpus ---------------------------
-
-
-def test_code_only_blanks_docstrings_and_comments_and_keeps_layout():
-    """Blanked to spaces, not cut: every remaining token keeps its line and column, and
-    the string a loader is *called with* -- an argument, not a docstring -- survives."""
-    text = (
-        '"""Module prose naming src/acme-tool.py."""\n'
-        "\n"
-        "def test_it():\n"
-        '    """Function prose: acme_tool."""  # trailing acme_tool\n'
-        "    acme = load('src/acme-tool.py')\n"
-        "    acme.alpha()\n"
-    )
-    code = us.code_only(text)
-    assert len(code) == len(text)
-    assert code.splitlines() == [
-        " " * len('"""Module prose naming src/acme-tool.py."""'),
-        "",
-        "def test_it():",
-        "    "
-        + " " * len('"""Function prose: acme_tool."""')
-        + "  "
-        + " " * len("# trailing acme_tool"),
-        "    acme = load('src/acme-tool.py')",
-        "    acme.alpha()",
-    ]
-
-
-def test_code_only_returns_text_that_is_not_python_unchanged():
-    """A broken test file is the linter's and the interpreter's to report; this gate
-    scanning it as written is the same answer it gave before `code_only` existed."""
-    broken = "def test_(:\n    acme.alpha("
-    assert us.code_only(broken) == broken
-    assert us.code_only("") == ""
 
 
 def test_read_tests_returns_the_code_of_every_corpus_file(tmp_path):

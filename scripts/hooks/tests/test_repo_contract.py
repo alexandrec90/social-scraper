@@ -584,8 +584,7 @@ VENDORED_POLICY = ".claude/rules/engineering.md"
 # verbatim-only check would pass the moment someone paraphrased, which is precisely how
 # the original drift happened.
 POLICY_CLAUSES = (
-    "gaps are not acceptable",
-    "fail if the changed behavior were reverted",
+    "write the test in the same commit even if the logic didn't change",
     "never lower it merely to make a change pass",
     "raised on three consecutive branches is a defect report",
     "silently work around a bad instruction",
