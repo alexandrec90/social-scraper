@@ -42,6 +42,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 # The label `dependabot-automerge.yml`'s classify job applies to routine Dependabot
 # bumps, and anything with write access may apply by hand. Only a PR carrying it is a
@@ -62,6 +63,13 @@ PASSING_CONCLUSIONS = ("success", "skipped", "neutral")
 # first page and picks the rest up on the next pass -- the sweep is idempotent, so a
 # partial pass costs a delay and never a wrong decision.
 PR_SCAN_LIMIT = 100
+
+# GitHub computes `mergeable` lazily, on request, and forgets it whenever the base moves.
+# A gate that finishes just after another PR merged reads null, and so does the hourly
+# retry when merges keep coming -- devkit #405 was stranded twice that way while fixer
+# PRs landed minutes apart. A few reads seconds apart get the answer.
+MERGEABLE_READS = 5
+MERGEABLE_WAIT = 3.0
 
 
 class GhError(RuntimeError):
@@ -187,6 +195,17 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "") -> tuple[bool, str]:
     return True, f"{GATE_WORKFLOW} passed on {sha[:7]} and it is labelled {AUTOMERGE_LABEL}"
 
 
+def settled(repo: str, number: int, run, sleep, detail: dict) -> dict:
+    """The PR re-read until GitHub has decided `mergeable`, up to `MERGEABLE_READS` reads;
+    still undecided after that, `verdict` defers it to the next pass."""
+    for _ in range(MERGEABLE_READS - 1):
+        if detail.get("mergeable") is not None:
+            break
+        sleep(MERGEABLE_WAIT)
+        detail = gh_json(f"repos/{repo}/pulls/{number}", run) or detail
+    return detail
+
+
 def open_prs(repo: str, run) -> list[dict]:
     listing = gh_json(f"repos/{repo}/pulls?state=open&per_page={PR_SCAN_LIMIT}", run) or []
     return [entry for entry in listing if isinstance(entry, dict)]
@@ -216,7 +235,7 @@ def candidates(env: dict[str, str], repo: str, run) -> tuple[list[dict], str]:
     return open_prs(repo, run), "sweep"
 
 
-def main(env: dict[str, str] | None = None, run=None) -> int:
+def main(env: dict[str, str] | None = None, run=None, sleep=time.sleep) -> int:
     env = dict(os.environ) if env is None else env
     run = subprocess.run if run is None else run
 
@@ -243,7 +262,9 @@ def main(env: dict[str, str] | None = None, run=None) -> int:
         # The listing endpoint omits `mergeable`, so re-read each PR on its own. It is
         # also the freshest possible view, which matters on a pass that may have spent a
         # while on the PRs before this one.
-        detail = gh_json(f"repos/{repo}/pulls/{number}", run) or pr
+        detail = settled(
+            repo, int(number), run, sleep, gh_json(f"repos/{repo}/pulls/{number}", run) or pr
+        )
         should_merge, why = verdict(repo, detail, run, gated_sha)
         if not should_merge:
             print(f"#{number}: leaving open -- {why}.")

@@ -208,6 +208,22 @@ def test_the_pr_gate_exists_and_carries_the_title_automerge_waits_on():
     )
 
 
+def test_the_pr_gate_can_be_re_run_on_the_default_branch():
+    """A merge by the auto-merge workflow is a push made with `GITHUB_TOKEN`, which raises
+    no `push` event, so nothing gates the new tip. The fix pass re-runs the gate there with
+    `gh workflow run` (`fix_red.regate`), and GitHub refuses that with HTTP 422 for a
+    workflow that has no `workflow_dispatch:` -- ibkr_trader's gate, 2026-09-26, whose
+    main then stayed unread on every pass.
+    """
+    gate = WORKFLOWS_DIR / PR_GATE
+    assert gate.is_file(), f".github/workflows/{PR_GATE} is missing"
+    triggers = _triggers(_read(gate))
+    assert "workflow_dispatch" in triggers, (
+        f"{PR_GATE} declares {sorted(triggers)} and no `workflow_dispatch:`, so a "
+        "default branch whose tip was never gated cannot be re-gated."
+    )
+
+
 def test_dependabot_prs_have_something_that_merges_them():
     assert (WORKFLOWS_DIR / AUTOMERGE).is_file(), (
         f".github/workflows/{AUTOMERGE} is missing -- run "

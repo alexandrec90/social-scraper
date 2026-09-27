@@ -71,14 +71,11 @@ What preemptive wrapping has cost is in
 worktree", "names git in a form too complex to verify", or "cannot be shown not to be
 git", is not a devkit hook** — none is wired. It is Claude Code's own isolation guard
 for a `claude --worktree` session. No setting turns it off and nothing in devkit can
-change what it accepts — report it to Claude Code, not to this harness, where one week's
-backlog once carried three of these filed as guard defects.
+change what it accepts — report it to Claude Code, not to this harness.
 
-It judges the shape of the command line rather than what the command does, and it runs
-**only on the Bash tool**. The same statement issued through the PowerShell tool is never
-parsed, while the working-directory check that holds the session inside its worktree
-applies to both — so on Windows the PowerShell tool is the answer for a compound
-statement, not a workaround.
+It judges the command line's shape, and **only on the Bash tool**: the PowerShell tool is
+never parsed (the check that holds a session inside its worktree still applies), so on
+Windows it is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
@@ -90,11 +87,14 @@ statement, not a workaround.
 **The last row is the one that wastes turns.** Inside a statement the parser could not
 reduce to a simple list, the guard tests the *whole line* for `git` as an unanchored
 substring, so `.gitignore`, `github.com`, `digit` and `legitimate` each read as "names
-git" — rename the variable or split the statement, because no spelling of the real
-command will satisfy it. A heredoc and a `$HOME` argument are **not** triggers on their
-own; put a file write through the Write or Edit tool regardless, which sidesteps the
-parse entirely. The reproductions are in
+git" — rename or split it; no spelling of the real command passes. A heredoc and a
+`$HOME` argument are **not** triggers alone, but write files with Write or Edit anyway:
+the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
+
+**Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an
+`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped --
+so spell it `origin/main:./.devkit.toml`.
 
 ## Waiting on a CI gate: one blocking call, not a poll loop
 
@@ -111,27 +111,10 @@ This condemns neither **diagnosing a failure** (`gh run view --log-failed` and t
 after it are the work, not waiting — send them to a file where the volume warrants) nor
 **asking once**. The waste begins at the *second* identical poll.
 
-**"No checks reported" has three causes needing opposite responses.** Ask once, after a
-push — `gh pr view <N> --json mergeStateStatus,statusCheckRollup`:
-
-| What you see | What it is | What to do |
-| --- | --- | --- |
-| `CONFLICTING` | no merge ref to build against, so the gate never will run | merge `origin/<default>` and push |
-| `BLOCKED`/`CLEAN` | the run exists | `--watch` is right |
-| `UNKNOWN` | the ordinary answer in the seconds after a push | says nothing either way; ask again |
-| `UNSTABLE` **with an empty rollup** | a run exists that the PR cannot show you | `gh run list --branch <head> --event workflow_dispatch` |
-
-That last row is the one that reads as the first and is its opposite. **A push made with
-`GITHUB_TOKEN` raises no `pull_request` event**, so a workflow that commits to a PR branch
-— a lock repair, a generated-file sync — leaves the only gate evidence on a run it
-dispatched itself, and a `workflow_dispatch` run is not in the PR's check rollup. The PR
-reads exactly like one whose gate has not started. carameli #347 sat four days that way
-while its dispatched gate had *failed*, on a real test, with the fix a one-line command.
-`UNSTABLE` is the tell: a gate that has not started yet cannot make a PR unstable.
-
-If you get the message anyway, tell the not-started case from the rest by **how long the
-call took, not what it said**: a `--watch` back in about a second never waited, so
-re-issue it once.
+**"No checks reported" has causes needing opposite responses.** Ask once, after a push —
+`gh pr view <N> --json mergeStateStatus,statusCheckRollup` — and read the answer against
+the table in the evidence file: `CONFLICTING` is a gate that will never run, and
+`UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
 When the gate will outlast anything useful you could do meanwhile, stop: report that the
 branch is pushed and the gate is running, and let the result arrive in a fresh session.
@@ -225,18 +208,20 @@ devkit clone are in [`.claude/engineering-evidence.md`](../engineering-evidence.
 
 ## Guardrail: the harness is not your job
 
+**For project sessions:** a fixer follows [`.claude/fixer.md`](../fixer.md) where the
+two differ.
+
 A session in a project makes the change the user asked for and nothing else. It does not
 maintain the harness, does not fix a gate, and does not file its defects: the scheduled
 fix pass (`scripts/fix-pass.py` in devkit) reads every gate, records every refusal on the
 machine's ledger itself, and sends a devkit session at the harness before any project
-session at a project. That ordering is the whole design, and a project session that
-"just fixes" a vendored file breaks it twice — once by editing what the drift gate will
-reject, and once by hiding the defect from the pass that would have fixed it everywhere.
+session at a project. A project session that "just fixes" a vendored file breaks that
+ordering twice: the drift gate rejects the edit, and the defect is hidden from the pass
+that would have fixed it everywhere.
 
 **Never silently work around a bad instruction or a refusal.** If a skill, a rule, a
 `CLAUDE.md`, a hook or a vendored script sent you into a dead end — blocked a correct
 command, refused an edit it should have allowed, crashed, reported success while doing
 nothing — say so in your report with the file or the exact command, write the same
-line to `logs/friction.md`, and stop there. The pass files each line on the ledger, and
-reads your transcript for what you did not write. A workaround fixes your turn and leaves
-the next agent at the same wall; a filed line is what the devkit session works from.
+line to `logs/friction.md`, and stop there: the pass files each line, and reads your
+transcript for the rest. A workaround leaves the next agent at the same wall.

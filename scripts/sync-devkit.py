@@ -1596,6 +1596,13 @@ def run_check(src: Path, manifest: tuple[str, ...]) -> int:
     return 1
 
 
+def devkit_itself(root: Path) -> bool:
+    """`root` is a devkit checkout: it holds the generator, which no consumer is sent."""
+    return (root / "scripts" / "new-project.py").is_file() and (
+        root / "templates" / "core"
+    ).is_dir()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     src = resolve_src(args.src, os.environ)
@@ -1603,6 +1610,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list:
         return run_list(src, manifest)
+    if devkit_itself(REPO_ROOT):
+        # Its vendored files are the source; `$DEVKIT_DIR` here is only another, older
+        # checkout of it: `--check` called a devkit branch's own change DRIFT and advised
+        # the `--pull` that would have reverted it.
+        print(
+            "sync-devkit: this is devkit itself -- its vendored files are the source; nothing to compare"
+        )
+        return 1 if args.pull or args.push else 0
     if src is None:
         return unconfigured_verdict()
     if args.pull:

@@ -180,6 +180,43 @@ def test_a_project_with_no_dependency_file_is_told_nothing(tmp_path):
     assert tc.missing_toolchain(_checkout(tmp_path, {"README.md": "# probe\n"})) == ()
 
 
+PATH_SOURCE = (
+    PYPROJECT + '\n[tool.uv.sources]\ndata-lake = { path = "../data-lake", editable = true }\n'
+    'other = { git = "https://example.invalid/other" }\n'
+)
+
+
+def test_a_path_dependency_missing_from_a_worktree_is_named_with_where_the_checkout_has_it(
+    tmp_path,
+):
+    """ibkr_trader's `../data-lake` resolves beside the checkout and nowhere else: from a
+    `.claude/worktrees/` tree every `uv run` died on `Distribution not found`, which says
+    nothing about why. The gap names the path, the checkout's copy, and comes first,
+    because `uv sync` cannot succeed until it is there."""
+    main = _checkout(tmp_path / "ibkr", {"uv.lock": "", "pyproject.toml": PATH_SOURCE})
+    (main.parent / "data-lake").mkdir()
+    tree = _checkout(main / ".claude/worktrees/x", {"uv.lock": "", "pyproject.toml": PATH_SOURCE})
+    (tree / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'x'}\n", "utf-8")
+    first, venv = tc.missing_toolchain(tree)
+    assert "../data-lake" in first.what and "Distribution not found" in first.what
+    assert str((main.parent / "data-lake").resolve()) in first.fix
+    assert venv.what.startswith("No .venv")
+    assert tc.missing_path_sources(main) == ()
+
+
+def test_a_path_dependency_nothing_has_is_still_named(tmp_path):
+    root = _checkout(tmp_path / "solo", {"pyproject.toml": PATH_SOURCE, ".venv/pyvenv.cfg": ""})
+    (gap,) = tc.missing_toolchain(root)
+    assert "../data-lake" in gap.what and str((root.parent / "data-lake").resolve()) in gap.fix
+
+
+def test_an_unreadable_pyproject_names_no_path_dependency(tmp_path):
+    root = _checkout(tmp_path, {"pyproject.toml": "[tool.uv.sources\n", ".venv/pyvenv.cfg": ""})
+    assert tc.path_sources(root) == () and tc.missing_path_sources(root) == ()
+    sources = _checkout(tmp_path / "ok", {"pyproject.toml": PATH_SOURCE})
+    assert tc.path_sources(sources) == ("../data-lake",)
+
+
 # --- the CLI `session-start.sh` reads ------------------------------------------
 
 

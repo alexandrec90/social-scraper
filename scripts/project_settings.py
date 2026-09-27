@@ -30,11 +30,17 @@ SETTINGS_FILE = ".claude/settings.json"
 # What every agent shell runs with, so a captured result is text rather than terminal
 # control codes. Claude Code starts its tools under `FORCE_COLOR=3`, so pytest coloured
 # every line and a `rich` progress spinner (pip-audit's) redrew itself into 25 KB of one
-# tool result. Each key is read by the Python tools only -- pytest (`PY_COLORS`), rich
-# (`TTY_COMPATIBLE`, `TTY_INTERACTIVE`, both checked before `FORCE_COLOR`) -- because
+# tool result. Each key is read by the Python tools only -- CPython's own `argparse` help
+# and tracebacks (`PYTHON_COLORS`, from 3.13), pytest (`PY_COLORS`), rich
+# (`TTY_COMPATIBLE`, `TTY_INTERACTIVE`), each checked before `FORCE_COLOR` -- because
 # the settings `env` reaches Claude Code's own process too, and a `NO_COLOR` there is a
 # bet on how its UI reads colour.
-AGENT_ENV = {"PY_COLORS": "0", "TTY_COMPATIBLE": "0", "TTY_INTERACTIVE": "0"}
+AGENT_ENV = {
+    "PYTHON_COLORS": "0",
+    "PY_COLORS": "0",
+    "TTY_COMPATIBLE": "0",
+    "TTY_INTERACTIVE": "0",
+}
 
 
 def retired_hook_paths(retired: tuple[str, ...]) -> tuple[str, ...]:

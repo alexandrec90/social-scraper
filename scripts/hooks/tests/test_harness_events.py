@@ -52,6 +52,11 @@ class TestFieldLimits:
     def test_a_spawn_failures_detail_keeps_gits_reason(self):
         assert events.limit_for("detail") > events.VALUE_LIMIT
 
+    def test_evidence_keeps_every_absolute_path(self):
+        """An agent-report's evidence is absolute paths joined by `; `, and two of
+        them under a worktree run past the flat cap."""
+        assert events.limit_for("evidence") > events.VALUE_LIMIT
+
     def test_every_other_field_takes_the_flat_cap(self):
         assert events.limit_for("command") == events.VALUE_LIMIT
         assert events.limit_for("project") == events.VALUE_LIMIT

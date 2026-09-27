@@ -37,11 +37,13 @@ Stdlib only: this runs where nothing is installed yet, by construction.
 from __future__ import annotations
 
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_config
+import worktree_tiers
 
 # The Python toolchain, in the order the ladder reads them.
 PYTHON_MARKERS = ("uv.lock", "requirements-dev.txt", "pyproject.toml")
@@ -100,6 +102,39 @@ def frontend_fix(root: Path, frontend_dir: str) -> str:
     return f"npm {verb} --prefix {frontend_dir}"
 
 
+def path_sources(root: Path) -> tuple[str, ...]:
+    """The relative `path` entries of `[tool.uv.sources]`, as written; () when unreadable."""
+    try:
+        data: object = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    for key in ("tool", "uv", "sources"):
+        data = data.get(key) if isinstance(data, dict) else None
+    specs = data.values() if isinstance(data, dict) else ()
+    paths = [spec.get("path") for spec in specs if isinstance(spec, dict)]
+    return tuple(p for p in paths if isinstance(p, str) and not Path(p).is_absolute())
+
+
+def missing_path_sources(root: Path) -> tuple[Gap, ...]:
+    """A relative path dependency this checkout cannot see, with where its checkout does.
+
+    `../data-lake` resolves beside the checkout and nowhere else, so from a worktree every
+    `uv run` in ibkr_trader died on `Distribution not found` -- which names the path and
+    not the reason. The target is read off the tree's `.git` pointer, so it is the copy
+    the main checkout builds against, not a guess.
+    """
+    checkout = worktree_tiers.git_checkout(root) or root
+    return tuple(
+        Gap(
+            f"{rel} is not here -- a [tool.uv.sources] path dependency, so `uv sync` "
+            "fails with 'Distribution not found'",
+            f"link {rel} to a checkout of it; the main checkout's is {(checkout / rel).resolve()}",
+        )
+        for rel in path_sources(root)
+        if not (root / rel).exists()
+    )
+
+
 def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> tuple[Gap, ...]:
     """Every gap in this checkout's toolchain. Empty when it is provisioned.
 
@@ -109,7 +144,8 @@ def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> t
     `devkit-manifest` hook's finding rather than this one.
     """
     config = harness_config.load(root) if cfg is None else cfg
-    gaps: list[Gap] = []
+    # First: the install below cannot succeed until these are in place.
+    gaps: list[Gap] = list(missing_path_sources(root))
     if not (root / ".venv").is_dir():
         fix = python_fix(root, config.python.install_command, config.python.version)
         if fix:

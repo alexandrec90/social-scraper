@@ -45,12 +45,13 @@ BASELINE_HEADER = """\
 # Never add or raise a line to make new code pass; fix the code. `dependency::` is one
 # exception -- adding a package is a line here, so the PR diff shows it.
 #
-# `--record --reason "..."` is the other, and it is the deliberate hole. A module far
-# past `file_lines` cannot gain a line, so a bug whose fix belongs in one has nowhere
-# to go, and the split the finding asks for is a separate body of work. Recording says
+# `--record --reason "..."` is the other, and it is the deliberate hole. A function far
+# past its limit cannot gain a line, so a bug whose fix belongs in one has nowhere to
+# go, and the refactor the finding asks for is a separate body of work. Recording says
 # so out loud: the reason is mandatory, counter rules (`suppressions`, `todos`,
 # `skipped_tests`, ...) are refused because those are always somebody giving up rather
-# than a module's size, and every move is logged below with what it moved and why.
+# than a unit's size, and every move is logged below with what it moved and why.
+# Module size -- `file_lines`, `imports`, `definitions` -- is advisory and never here.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
 """
@@ -58,6 +59,18 @@ BASELINE_HEADER = """\
 # What `existing_notes` reads back, and what separates the machine-readable lines above
 # it from the `--record` log below. Both halves are comments to `read_baseline`.
 RECORD_MARKER = "# --- recorded growth ------------------------------------------------\n"
+
+# Printed under a size-limit finding. A fixer spent 7 calls and deleted docstring prose to
+# land a fix at net zero, because the report said only "split it" (that was a module-size
+# finding, advisory since); and a split it did make then failed `untested_symbols`. Both
+# routes, and the one ceiling on the second: `.claude/rules/engineering.md` calls a limit
+# raised on three branches in a row a defect report, and the fourth is the refactor.
+SIZE_HINT = (
+    "  A size limit (not a counter) may instead be recorded when the refactor is its own "
+    'body of work: --record --reason "<why this growth is honest>" -- unless this limit '
+    "was already raised on the last three branches, when the refactor is due now. Any "
+    "helper a refactor creates needs a test that names it (untested_symbols)."
+)
 
 
 def baseline_path(root: Path) -> Path:

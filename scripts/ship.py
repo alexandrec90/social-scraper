@@ -359,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: ship.py [--preflight | --fix [PATH ...]]", file=sys.stderr)
         return EXIT_USAGE
 
+    # Before the branch rule, which is about where a new PR opens: `--fix` opens nothing,
+    # and the pass runs it on an open PR's head whatever that branch is called (#390).
+    if mode == "--fix":
+        return _fix(rest)
+
     branch = current_branch()
     base = default_branch()
     ok, reason = is_shippable(branch, base)
@@ -366,8 +371,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ship: {reason}", file=sys.stderr)
         return EXIT_NOT_SHIPPABLE
 
-    if mode == "--fix":
-        return _fix(rest)
     if mode == "--preflight":
         print(f"ship: branch={branch} base={base}")
         # Reported, not enforced: a checkout whose tools live outside `.venv` can still

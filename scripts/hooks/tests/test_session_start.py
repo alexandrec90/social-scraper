@@ -84,9 +84,10 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
         target.write_text(text, encoding="utf-8")
 
     # The real config loader and the toolchain report beside it, so the manifest seam
-    # and the missing-toolchain ladder are exercised rather than faked.
+    # and the missing-toolchain ladder are exercised rather than faked -- plus every
+    # vendored module those two import, or the report dies on an ImportError instead.
     (project / "scripts" / "hooks").mkdir(parents=True, exist_ok=True)
-    for helper in ("harness_config.py", "toolchain.py"):
+    for helper in ("harness_config.py", "toolchain.py", "worktree_tiers.py"):
         shutil.copy(
             REPO_ROOT / "scripts" / "hooks" / helper, project / "scripts" / "hooks" / helper
         )
@@ -94,7 +95,7 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
     log = tmp_path / "calls.log"
     stub_bin = tmp_path / "bin"
 
-    # `python3` must stay real for the two helpers under `scripts/hooks/` (those calls
+    # `python3` must stay real for the helpers under `scripts/hooks/` (those calls
     # are the seams under test); anything else is logged and skipped.
     _write_exec(
         stub_bin / "python3",

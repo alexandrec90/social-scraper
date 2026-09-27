@@ -341,6 +341,25 @@ def test_an_untagged_pull_leaves_the_pin_alone(tmp_path, monkeypatch):
     assert sh.read_pin((repo / sh.PRECOMMIT_FILE).read_text()) == "v0.5.2"
 
 
+def test_devkit_itself_has_nothing_to_compare_and_nothing_to_pull(tmp_path, capsys, monkeypatch):
+    """A devkit worktree checked against the static checkout reported its own newer files
+    as DRIFT and advised `--pull`, which would have reverted them: in devkit the vendored
+    files are the source, and every other devkit checkout is only an older copy of it."""
+    src = tmp_path / "static"
+    (src / "scripts").mkdir(parents=True)
+    repo = tmp_path / "tree"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "new-project.py").write_text("")
+    (repo / "templates" / "core").mkdir(parents=True)
+    monkeypatch.setenv(sh.SRC_ENV, str(src))
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    assert sh.main(["--check"]) == 0
+    assert "devkit itself" in capsys.readouterr().out
+    assert sh.main(["--pull"]) == 1
+    assert sh.main(["--push"]) == 1
+    assert not sh.devkit_itself(src), "a consumer ships neither the generator nor templates/"
+
+
 def test_check_noop_when_src_unset_and_project_never_pulled(tmp_path, capsys, monkeypatch):
     """Pre-adoption: nothing is vendored, so there is nothing a skip could hide.
 

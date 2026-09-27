@@ -11,6 +11,7 @@
     "OTEL_RESOURCE_ATTRIBUTES": "service.name=social-scraper,service.instance.id=social-scraper,deployment.environment=local",
     "PY_COLORS": "0",
     "TTY_COMPATIBLE": "0",
-    "TTY_INTERACTIVE": "0"
+    "TTY_INTERACTIVE": "0",
+    "PYTHON_COLORS": "0"
   }
 }

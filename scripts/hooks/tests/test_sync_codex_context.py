@@ -1,5 +1,6 @@
 """Tests for scripts/sync-codex-context.py tree helpers."""
 
+import pytest
 from conftest import load_module
 
 mod = load_module("scripts/sync-codex-context.py")
@@ -43,6 +44,18 @@ def test_mirror_tree_removes_empty_destination(tmp_path):
     assert not dest.exists()
 
 
+def test_help_prints_usage_and_syncs_nothing(tmp_path, monkeypatch, capsys):
+    """A ledger session asked `--help` and got the mirror and hooks.json rewritten."""
+    (tmp_path / ".claude" / "skills" / "s").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills" / "s" / "SKILL.md").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    with pytest.raises(SystemExit) as exited:
+        mod.main(["--help"])
+    assert exited.value.code == 0
+    assert "usage" in capsys.readouterr().out
+    assert not (tmp_path / ".agents").exists()
+
+
 def test_main_adopts_project_hooks_without_an_existing_codex_directory(tmp_path, monkeypatch):
     """Running the named Codex sync task is the opt-in; an empty/missing destination
     must not silently reduce it to a skills-only operation.
@@ -56,7 +69,7 @@ def test_main_adopts_project_hooks_without_an_existing_codex_directory(tmp_path,
     (scripts / generator.name).write_text(generator.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
 
-    assert mod.main() == 0
+    assert mod.main([]) == 0
 
     artifact = tmp_path / ".codex" / "hooks.json"
     assert artifact.exists()

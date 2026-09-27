@@ -14,10 +14,12 @@ debt is recorded once, and from then on the file may only shrink.
 `structure_scan.py` reads each file; this module judges. Three kinds of rule:
 
 - **Limits** -- a measurement above `DEFAULT_LIMITS[rule]` (or the project's override
-  in `[structure.limits]`) is a finding, recorded with its value. `file_lines`,
-  `imports`, `definitions`, `react_state`, `react_effects` per file;
-  `function_lines`, `function_params`, `complexity`, `nesting_depth` per function;
-  `component_lines` per React component; `class_lines`, `class_methods` per class.
+  in `[structure.limits]`) is a finding, recorded with its value. `react_state`,
+  `react_effects` per file; `function_lines`, `function_params`, `complexity`,
+  `nesting_depth` per function; `component_lines` per React component; `class_lines`,
+  `class_methods` per class. The module-size rules -- `file_lines`, `imports`,
+  `definitions` -- are **advisory** (`ADVISORY_RULES`): measured, reported as one
+  warning line, never a failure and never in the baseline.
 - **Counters** -- `suppressions`, `any_types`, `todos`, `skipped_tests`,
   `focused_tests`, `swallowed_errors`: any non-zero count is a finding. These are
   the only rules that read test files too, because that is where skips live.
@@ -59,6 +61,7 @@ import harness_config
 import structure_scan as scan_mod
 from structure_baseline import (
     BASELINE_NAME,
+    SIZE_HINT,
     baseline_path,
     existing_notes,
     read_baseline,
@@ -779,19 +782,34 @@ def seed(root: Path, cfg: harness_config.Config | None = None) -> int | None:
     path = baseline_path(root)
     if path.exists():
         return None
-    entries = {f.key: f.value for f in findings(root, cfg or harness_config.load(root))}
+    found = findings(root, cfg or harness_config.load(root))
+    entries = {f.key: f.value for f in found if not _advisory(f.key)}
     path.write_text(render_baseline(entries), encoding="utf-8", newline="\n")
     return len(entries)
 
 
-def verdict(
+# The module-size rules: measured and reported as a warning, never a failure. Held to the
+# ratchet they cost more than they bought -- a fix landing in a module already 12x the
+# limit had to come in at net zero, so sessions deleted docstrings and merged helpers to
+# fit, and `--record` was invented as the escape from exactly these three. The rules that
+# point at one function or one class stay gates: they name something small to fix.
+ADVISORY_RULES = frozenset({"file_lines", "imports", "definitions"})
+
+
+def _advisory(key: str) -> bool:
+    return key.split("::", 1)[0] in ADVISORY_RULES
+
+
+def judge(
     root: Path, cfg: harness_config.Config
-) -> tuple[list[Finding], list[tuple[str, int, int | None]]]:
-    """`(worse, stale)`. `worse` is every finding that is new or grew; `stale` is
-    `(key, recorded, current)` for every line the code no longer earns, `current`
-    being `None` when the finding is gone. Both empty is the passing state."""
-    current = {f.key: f for f in findings(root, cfg)}
-    recorded = read_baseline(baseline_path(root))
+) -> tuple[list[Finding], list[tuple[str, int, int | None]], list[Finding]]:
+    """`(worse, stale, advisory)`. `worse` is every gated finding that is new or grew;
+    `stale` is `(key, recorded, current)` for every gated line the code no longer earns,
+    `current` being `None` when the finding is gone; `advisory` is every module-size
+    finding, which never fails. Empty `worse` and `stale` is the passing state."""
+    everything = findings(root, cfg)
+    current = {f.key: f for f in everything if not _advisory(f.key)}
+    recorded = {k: v for k, v in read_baseline(baseline_path(root)).items() if not _advisory(k)}
     worse = [f for k, f in current.items() if k not in recorded or f.value > recorded[k]]
     stale: list[tuple[str, int, int | None]] = []
     for key, value in sorted(recorded.items()):
@@ -800,18 +818,23 @@ def verdict(
             stale.append((key, value, None))
         elif now.value < value:
             stale.append((key, value, now.value))
+    return worse, stale, [f for f in everything if _advisory(f.key)]
+
+
+def verdict(
+    root: Path, cfg: harness_config.Config
+) -> tuple[list[Finding], list[tuple[str, int, int | None]]]:
+    """`judge` without the advisory findings: what decides pass or fail."""
+    worse, stale, _advisory_findings = judge(root, cfg)
     return worse, stale
 
 
-# Rules `--record` will not move, whatever the reason given. Every one of them counts a
-# thing somebody chose to write -- a lint suppression, a deferred-work comment, a skipped
-# test, a swallowed exception -- so "the module is already large" is never the
-# explanation, and the fix is always available. The limit rules are different in kind:
-# `file_lines` on a module twelve times its limit is a fact about a split nobody has
-# done yet, and a bug fix landing in that module cannot be asked to do the split first.
-#
-# Written without the literal tokens those rules match, because this module is scanned
-# by the scanner it configures: naming them here would make this comment a finding.
+# Rules `--record` will not move, whatever the reason: each counts a thing somebody chose
+# to write (a lint suppression, a deferred-work comment, a skipped test, a swallowed
+# exception), so the fix is always available. A limit rule differs in kind: a function far
+# past its limit is a refactor nobody has done yet, which a bug fix cannot be made to do.
+# Written without the literal tokens those rules match: this module is scanned by the
+# scanner it configures, and naming them here would make this comment a finding.
 UNRECORDABLE = frozenset(scan_mod.COUNTERS)
 
 
@@ -828,14 +851,12 @@ def record(
     """Move the baseline up to what the code now earns, with `reason` written down.
 
     The deliberate hole in the ratchet, and it exists because the ratchet had none. The
-    baseline pins the *current* `file_lines`, `definitions` and `imports` of modules that
-    are 2x-12x their limits, so those modules cannot gain a line, a function or an import
-    -- and a bug whose fix belongs in one of them has nowhere to go. A `/triage-harness`
-    sweep verified eight live defects and could land two: six were in modules the gate had
-    sealed, one of them blocked by a single `import` statement. The advice the finding
-    prints ("split the module along the seam its imports already show") is right and is
-    also a separate body of work; asking a bug fix to carry a 6000-line module's split is
-    how a gate gets switched off instead.
+    baseline pins the *current* size of every function and class already past its limit,
+    so a bug whose fix belongs in one has nowhere to go, and the refactor the finding asks
+    for is a separate body of work. It was built for the module-size rules -- a
+    `/triage-harness` sweep once landed two of eight verified defects because six sat in
+    modules the gate had sealed -- and those are advisory now (`ADVISORY_RULES`), which is
+    the same lesson taken the rest of the way.
 
     Three things keep this from being the laundering `--seed`'s refusal exists to stop.
     The reason is **mandatory** and non-blank, exactly as `harness_triage --resolve`
@@ -876,7 +897,7 @@ def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:
     kept: dict[str, int] = {}
     dropped = lowered = 0
     for key, value in recorded.items():
-        if key not in current:
+        if key not in current or _advisory(key):
             dropped += 1
         elif current[key] < value:
             kept[key] = current[key]
@@ -898,13 +919,19 @@ def describe(f: Finding, lim: dict[str, int]) -> str:
 
 
 def report(
-    worse: list[Finding], stale: list[tuple[str, int, int | None]], lim: dict[str, int]
+    worse: list[Finding],
+    stale: list[tuple[str, int, int | None]],
+    lim: dict[str, int],
+    advisory: list[Finding] | None = None,
 ) -> str:
-    """The artifact body: everything an agent needs to fix the gate, one line each."""
+    """The artifact body: everything an agent needs to fix the gate, one line each, and
+    one warning line for the module-size rules that no longer fail it."""
     lines = []
     if worse:
         lines.append(f"{len(worse)} finding(s) new or worse than {BASELINE_NAME}:")
         lines.extend(f"  {describe(f, lim)}" for f in worse)
+        if any(f.rule in DEFAULT_LIMITS for f in worse):
+            lines.append(SIZE_HINT)
     if stale:
         lines.append(f"{len(stale)} line(s) in {BASELINE_NAME} no longer earned (run --tighten):")
         for key, recorded, now in stale:
@@ -912,6 +939,13 @@ def report(
             lines.append(f"  {key} = {recorded} ({state})")
     if not lines:
         lines.append("structure-check: clean.")
+    if advisory:
+        modules = sorted({f.path for f in advisory})
+        top = max(advisory, key=lambda f: (f.rule == "file_lines", f.value))
+        lines.append(
+            f"warning: {len(modules)} module(s) past a size limit -- advisory, never a "
+            f"failure; largest {top.path} ({top.rule} {top.value}). `--list` shows them all."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -995,16 +1029,19 @@ def main(argv: list[str] | None = None) -> int:
         dropped, lowered = tighten(REPO_ROOT, CFG)
         print(f"structure-check: dropped {dropped} line(s), lowered {lowered} in {BASELINE_NAME}.")
 
-    worse, stale = verdict(REPO_ROOT, CFG)
-    body = report(worse, stale, limits(CFG))
+    worse, stale, advisory = judge(REPO_ROOT, CFG)
+    body = report(worse, stale, limits(CFG), advisory)
     path = write_artifact(REPO_ROOT, body)
     if worse or stale:
         print(
             f"structure-check: {len(worse)} worse, {len(stale)} stale -- see {path.relative_to(REPO_ROOT).as_posix()}"
         )
         return 1
+    sizes = len({f.path for f in advisory})
+    warned = f"; warning: {sizes} module(s) past a size limit (advisory)" if sizes else ""
     print(
-        f"structure-check: clean ({len(read_baseline(baseline_path(REPO_ROOT)))} known finding(s))."
+        f"structure-check: clean ({len(read_baseline(baseline_path(REPO_ROOT)))} known "
+        f"finding(s)){warned}."
     )
     return 0
 

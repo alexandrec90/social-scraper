@@ -591,8 +591,10 @@ def test_tighten_drops_and_lowers_but_never_adds_or_raises(tmp_path):
 
 
 def _oversized(tmp_path, lines: int = 40) -> None:
-    """A module past `file_lines`, which is the rule `--record` exists for."""
-    write(tmp_path, "src/big.py", "import os\n" + "x = 1\n" * lines + "print(os)\n")
+    """A function past `function_lines`: a size limit, which is what `--record` exists
+    for. (`file_lines` was the example until the module-size rules became advisory.)"""
+    body = "".join(f"    x{n} = {n}\n" for n in range(lines))
+    write(tmp_path, "src/big.py", f"def f():\n{body}    return 1\n\n\nf()\n")
 
 
 def test_record_raises_the_baseline_and_writes_the_reason_into_the_file(tmp_path):
@@ -603,15 +605,15 @@ def test_record_raises_the_baseline_and_writes_the_reason_into_the_file(tmp_path
     write(tmp_path, sc.BASELINE_NAME, "")
 
     recorded, refused = sc.record(
-        tmp_path, config(limits={"file_lines": 10}), "the split is its own PR"
+        tmp_path, config(limits={"function_lines": 10}), "the split is its own PR"
     )
 
     assert refused == []
-    assert "file_lines::src/big.py" in {f.key for f in recorded}
-    assert sc.verdict(tmp_path, config(limits={"file_lines": 10})) == ([], [])
+    assert "function_lines::src/big.py::f" in {f.key for f in recorded}
+    assert sc.verdict(tmp_path, config(limits={"function_lines": 10})) == ([], [])
     body = sc.baseline_path(tmp_path).read_text(encoding="utf-8")
     assert "the split is its own PR" in body
-    assert "file_lines::src/big.py ->" in body
+    assert "function_lines::src/big.py::f ->" in body
 
 
 def test_recordable_splits_the_findings_by_whether_size_can_explain_them():
@@ -639,7 +641,7 @@ def test_run_record_reports_the_refusal_and_the_missing_reason(tmp_path, monkeyp
     """`main`'s branch, which is where the exit codes are decided: 2 for a blank reason
     and 2 for a counter rule, so neither can be mistaken for a recorded success."""
     monkeypatch.setattr(sc, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(sc, "CFG", config(limits={"file_lines": 10}))
+    monkeypatch.setattr(sc, "CFG", config(limits={"function_lines": 10}))
     write(tmp_path, "src/main.py", "x = 1  # noqa\n")
     write(tmp_path, sc.BASELINE_NAME, "")
 
@@ -657,7 +659,7 @@ def test_record_refuses_without_a_reason(tmp_path):
     write(tmp_path, sc.BASELINE_NAME, "")
     for blank in ("", "   ", "\n"):
         with pytest.raises(ValueError, match="needs a reason"):
-            sc.record(tmp_path, config(limits={"file_lines": 10}), blank)
+            sc.record(tmp_path, config(limits={"function_lines": 10}), blank)
 
 
 def test_record_refuses_a_counter_rule_whatever_the_reason(tmp_path):
@@ -669,7 +671,7 @@ def test_record_refuses_a_counter_rule_whatever_the_reason(tmp_path):
     path = write(tmp_path, sc.BASELINE_NAME, "")
     before = path.read_text(encoding="utf-8")
 
-    recorded, refused = sc.record(tmp_path, config(limits={"file_lines": 10}), "a good reason")
+    recorded, refused = sc.record(tmp_path, config(limits={"function_lines": 10}), "a good reason")
 
     assert recorded == []
     assert [f.key for f in refused] == ["suppressions::src/main.py"]
@@ -681,9 +683,9 @@ def test_recording_twice_keeps_both_reasons(tmp_path):
     that the next decision overwrites is not a record."""
     _oversized(tmp_path)
     write(tmp_path, sc.BASELINE_NAME, "")
-    sc.record(tmp_path, config(limits={"file_lines": 10}), "first reason")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "first reason")
     _oversized(tmp_path, lines=80)
-    sc.record(tmp_path, config(limits={"file_lines": 10}), "second reason")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "second reason")
 
     body = sc.baseline_path(tmp_path).read_text(encoding="utf-8")
     assert "first reason" in body and "second reason" in body
@@ -699,7 +701,7 @@ def test_a_multi_line_reason_is_commented_on_every_line(tmp_path):
     write(tmp_path, sc.BASELINE_NAME, "")
     reason = "the split is its own PR\nthree imports fill it\n\nmeasured 2026-09-19"
 
-    sc.record(tmp_path, config(limits={"file_lines": 10}), reason)
+    sc.record(tmp_path, config(limits={"function_lines": 10}), reason)
 
     path = sc.baseline_path(tmp_path)
     body = path.read_text(encoding="utf-8")
@@ -709,7 +711,7 @@ def test_a_multi_line_reason_is_commented_on_every_line(tmp_path):
     # `test_the_baseline_is_sorted_and_unique` asserts in the repo this ships into.
     entries = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith("#")]
     assert entries == sorted(set(entries)), f"prose reached the baseline as data: {entries}"
-    assert "file_lines::src/big.py" in sc.read_baseline(path)
+    assert "function_lines::src/big.py::f" in sc.read_baseline(path)
     # The whole reason reads back as ONE note -- a blank line inside it must not split
     # the log, because `existing_notes` partitions on blank lines.
     assert len(sc.existing_notes(path)) == 1
@@ -720,9 +722,9 @@ def test_tighten_carries_the_record_log_through(tmp_path):
     no account of who raised them."""
     _oversized(tmp_path)
     write(tmp_path, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
-    sc.record(tmp_path, config(limits={"file_lines": 10}), "kept through a tighten")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "kept through a tighten")
 
-    assert sc.tighten(tmp_path, config(limits={"file_lines": 10}))[0] == 1
+    assert sc.tighten(tmp_path, config(limits={"function_lines": 10}))[0] == 1
     assert "kept through a tighten" in sc.baseline_path(tmp_path).read_text(encoding="utf-8")
 
 
@@ -730,7 +732,7 @@ def test_a_recorded_baseline_still_reads_back_as_numbers(tmp_path):
     """The log is comments, so `read_baseline` must be blind to it."""
     _oversized(tmp_path)
     write(tmp_path, sc.BASELINE_NAME, "")
-    sc.record(tmp_path, config(limits={"file_lines": 10}), "why")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "why")
     entries = sc.read_baseline(sc.baseline_path(tmp_path))
     assert entries and all(isinstance(v, int) for v in entries.values())
 
@@ -761,6 +763,58 @@ def test_report_covers_both_failure_kinds_and_the_clean_case():
     assert "todos::src/c.py = 1 (gone)" in body
     assert "--tighten" in body
     assert sc.report([], [], sc.DEFAULT_LIMITS).strip() == "structure-check: clean."
+
+
+def test_a_module_past_its_size_limits_warns_and_never_fails(tmp_path):
+    """`file_lines`, `imports` and `definitions` measure a module's size, and holding them
+    to a ratchet cost more than it bought: sessions deleted docstrings and merged helpers to
+    land fixes at net zero in modules already 12x the limit. They are a warning now."""
+    lines = "".join(f"import m{n}\n" for n in range(4)) + "".join(
+        f"def f{n}():\n    return {n}\n\n\n" for n in range(4)
+    )
+    write(tmp_path, "src/big.py", lines + "f0()\n" * 30)
+    write(tmp_path, sc.BASELINE_NAME, "orphan::src/big.py = 1\n")  # nothing imports it
+    cfg = config(limits={"file_lines": 10, "imports": 2, "definitions": 2})
+    worse, stale, advisory = sc.judge(tmp_path, cfg)
+    assert worse == [] and stale == []
+    assert {f.rule for f in advisory} == set(sc.ADVISORY_RULES)
+    assert sc.verdict(tmp_path, cfg) == ([], [])
+    body = sc.report(worse, stale, sc.limits(cfg), advisory)
+    assert body.startswith("structure-check: clean.")
+    assert "warning: 1 module(s) past a size limit -- advisory" in body and "src/big.py" in body
+
+
+def test_a_module_size_line_left_in_a_baseline_is_dropped_by_tighten(tmp_path):
+    """Consumers' baselines carry `file_lines` lines from before; they no longer judge
+    anything, so a tighten clears them rather than leaving dead numbers."""
+    write(tmp_path, "src/a.py", "x = 1\n")
+    write(
+        tmp_path,
+        sc.BASELINE_NAME,
+        "file_lines::src/a.py = 900\nimports::src/a.py = 30\norphan::src/a.py = 1\n",
+    )
+    assert sc.verdict(tmp_path, config()) == ([], [])
+    assert sc.tighten(tmp_path, config()) == (2, 0)
+    assert sc.read_baseline(sc.baseline_path(tmp_path)) == {"orphan::src/a.py": 1}
+
+
+def test_a_size_limit_finding_names_the_record_route_and_a_counter_does_not():
+    """A fixer spent 7 calls and deleted docstring prose shaving `worktree.py` to net zero,
+    because the report only said "split the module" -- though `--record --reason` exists
+    for exactly a fix landing in a module whose split is its own body of work."""
+    big = sc.Finding("function_lines", "scripts/big.py", 200, symbol="f")
+    size = sc.report([big], [], sc.DEFAULT_LIMITS)
+    assert "--record --reason" in size
+    counter = sc.report([sc.Finding("todos", "src/a.py", 2)], [], sc.DEFAULT_LIMITS)
+    assert "--record" not in counter, "a counter is somebody's choice: never recordable"
+
+
+def test_a_size_finding_says_a_new_helper_needs_a_test_naming_it_and_when_to_split():
+    """The split `structure_check` asked for then failed `untested_symbols`, one more
+    round trip. And the record route has a ceiling: a limit raised three branches running
+    is a defect report (`structure_check.py`'s own file_lines went 1042, 1050, 1078)."""
+    body = sc.report([sc.Finding("function_lines", "a.py", 90, symbol="f")], [], sc.DEFAULT_LIMITS)
+    assert "test that names it" in body and "last three branches" in body
 
 
 def test_write_artifact_creates_the_logs_directory(tmp_path):
