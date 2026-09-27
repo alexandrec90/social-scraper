@@ -18,7 +18,7 @@ dependencies = [
 dev = [
   "ruff>=0.15",
   "mypy>=1.11",
-  "pytest>=8.3",
+  "pytest>=9.1",
   "pytest-cov>=5.0",
   # Runs `.pre-commit-config.yaml` — the commit-time gate. Installed here (not globally)
   # so the version is pinned with everything else, and so `session-start.sh` can wire the
@@ -37,7 +37,8 @@ where = ["."]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["tests/"]
-addopts = "-q"
+addopts = "-q -p devkit_temproot"
+pythonpath = ["scripts/pytest-plugins"]
 
 [tool.mypy]
 python_version = "3.12"
