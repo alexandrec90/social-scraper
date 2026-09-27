@@ -14,6 +14,7 @@ The pure tree helper is unit-tested in
 ``scripts/hooks/tests/test_sync_codex_context.py``.
 """
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -69,7 +70,9 @@ def mirror_tree(src: Path, dest: Path) -> None:
         dest.rmdir()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # Parsed only so `--help` answers instead of syncing: it takes no options.
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args(argv)
     claude_dir = REPO_ROOT / ".claude"
     mirror_tree(claude_dir / "skills", REPO_ROOT / ".agents" / "skills")
     print("  mirrored .claude/skills/ -> .agents/skills/")

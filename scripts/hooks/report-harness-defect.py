@@ -32,6 +32,23 @@ import harness_events
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 
 
+def absolute_evidence(value: str, base: Path) -> str:
+    """`value` -- a path with an optional `#anchor` -- with its path made absolute
+    against `base`, the directory the report was filed from.
+
+    A report is read by a later session in another tree, where a relative path names
+    nothing: the 2026-09-26 supervised run cited `logs/fix-pass-supervise/...` from a
+    worktree the row never named, and each cited line cost the triage sweep a search.
+    """
+    value = value.strip()
+    if not value:
+        return ""
+    path, sep, anchor = value.partition("#")
+    if Path(path).is_absolute():
+        return value
+    return f"{base / path}{sep}{anchor}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Record a harness-defect report on this machine's central ledger."
@@ -46,13 +63,24 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="the exact command or tool call that triggered it, when one did",
     )
+    parser.add_argument(
+        "--evidence",
+        action="append",
+        default=[],
+        help="a file that shows it, as PATH or PATH#L<lines>; repeatable. A relative "
+        "path is recorded absolute, since the sweep reading it runs in another tree",
+    )
     args = parser.parse_args(argv)
+    cwd = Path.cwd().resolve()
+    evidence = (absolute_evidence(value, cwd) for value in args.evidence)
     path = harness_events.record(
         "agent-report",
         (
             ("project", harness_events.project_name(REPO_ROOT)),
             ("version", harness_config.harness_version(REPO_ROOT)),
+            ("cwd", cwd),
             ("command", args.command),
+            ("evidence", "; ".join(filter(None, evidence))),
             ("message", args.message),
         ),
     )

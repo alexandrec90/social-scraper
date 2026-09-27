@@ -43,6 +43,11 @@ MANIFEST: tuple[str, ...] = (
     # subprocess over JSON stdin, and asserts the exit codes Claude Code acts on.
     # Also has no script of its own -- it reads that repo's `.claude/settings.json`.
     "scripts/hooks/tests/test_hook_execution_contract.py",
+    # A temp root per pytest run, loaded by `-p` from the project's `pyproject.toml`
+    # (the repo contract holds it there): the shared `pytest-of-<user>` failed green
+    # runs in teardown whenever another run held its link.
+    "scripts/pytest-plugins/devkit_temproot.py",
+    "scripts/hooks/tests/test_devkit_temproot.py",
     # Config loader (the per-project seam) + the Stop dispatcher it drives.
     "scripts/hooks/harness_config.py",
     "scripts/hooks/tests/test_harness_config.py",
@@ -150,15 +155,13 @@ MANIFEST: tuple[str, ...] = (
     # first CI run.
     ".claude/rules/engineering.md",
     ".claude/rules/authoring.md",
-    # What a coding session leaves to the fix pass (commit, push, PR, the full suite),
-    # and the fixer sessions exempt from that.
+    # What a coding session leaves to the fix pass: commit, push, PR, the full suite.
     ".claude/rules/session-scope.md",
-    # The reference half of the policy above. Vendored because the pointers into it are:
-    # an unvendored target would leave every consumer's engineering.md citing a path that
-    # does not exist there. It sits *outside* `.claude/rules/` on purpose -- every `.md`
-    # under that directory is loaded as a rule, and an unscoped one is re-sent on every
-    # API call of every session, which is exactly what this file must not be.
+    # The policy's reference half, and a fixer session's own instructions. Vendored as
+    # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
+    # where every `.md` is loaded into every session -- which neither may be.
     ".claude/engineering-evidence.md",
+    ".claude/fixer.md",
     # The one portable task workflow. Its script detects the remote default branch
     # and owns the mechanical checks; the skill supplies the semantic commit/PR text.
     ".claude/skills/ship/SKILL.md",

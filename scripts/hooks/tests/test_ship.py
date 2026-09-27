@@ -1,5 +1,7 @@
 """Unit tests for the deterministic mechanics behind /ship."""
 
+import pytest
+
 from conftest import load_module
 
 ship = load_module("scripts/ship.py")
@@ -373,6 +375,19 @@ def test_fix_is_a_mode_of_main_taking_optional_paths(monkeypatch):
     assert ship.main(["--fix"]) == ship.EXIT_OK
     assert ship.main(["--fix", "a.py", "b.py"]) == ship.EXIT_OK
     assert seen == [[], ["a.py", "b.py"]]
+
+
+@pytest.mark.parametrize("branch", ["flag-wired-agent-hooks", "main"])
+def test_fix_runs_on_any_branch_because_it_opens_no_pr(monkeypatch, branch):
+    """The branch rule is about where a new PR opens, and `--fix` opens nothing. devkit
+    #390's head is `flag-wired-agent-hooks`: the pass accepts it because the PR is
+    already open, then its resolver's merge was refused at `--fix` on the name alone."""
+    _wire_main(monkeypatch, branch=branch)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(ship, "_fix", lambda paths: seen.append(paths) or ship.EXIT_OK)
+    assert ship.main(["--fix"]) == ship.EXIT_OK
+    assert seen == [[]]
+    assert ship.main([]) == ship.EXIT_NOT_SHIPPABLE
 
 
 def test_fix_refuses_with_a_remedy_when_no_pre_commit_exists(monkeypatch, capsys):

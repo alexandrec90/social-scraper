@@ -138,7 +138,7 @@ def test_the_previous_sync_devkit_can_still_call_the_pass(tmp_path):
 def test_the_pull_adds_the_agent_shell_env_and_says_which_keys(tmp_path):
     root = _project(tmp_path, {"env": {"KEEP": "1"}, "permissions": {"allow": []}})
     assert ps.settings_pass(root) == [
-        f"(agent shell env) {ps.SETTINGS_FILE}: PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
     ]
     assert _settings(root) == {"env": _env(KEEP="1"), "permissions": {"allow": []}}
     assert ps.settings_pass(root) == []
@@ -147,7 +147,7 @@ def test_the_pull_adds_the_agent_shell_env_and_says_which_keys(tmp_path):
 def test_a_value_the_project_set_itself_is_kept(tmp_path):
     root = _project(tmp_path, {"env": {"PY_COLORS": "1"}})
     assert ps.settings_pass(root) == [
-        f"(agent shell env) {ps.SETTINGS_FILE}: TTY_COMPATIBLE, TTY_INTERACTIVE"
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
     ]
     assert _settings(root)["env"]["PY_COLORS"] == "1"
 
@@ -164,7 +164,7 @@ def test_unwiring_and_the_env_are_one_write_with_both_notes(tmp_path):
     root = _project(tmp_path, _hook("python3 cap.py"))
     assert ps.settings_pass(root) == [
         f"(unwired agent hooks) {ps.SETTINGS_FILE}: PreToolUse",
-        f"(agent shell env) {ps.SETTINGS_FILE}: PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE",
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE",
     ]
     assert _settings(root) == {"env": ps.AGENT_ENV}
 

@@ -36,6 +36,41 @@ class TestMain:
         assert report.main(["--message", "m"]) == 0
         assert "\tcommand=-\t" in read_ledger(tmp_path)
 
+    def test_records_the_directory_it_ran_from(self, tmp_path, monkeypatch):
+        """The 2026-09-26 supervised run filed five reports citing
+        `logs/fix-pass-supervise/iteration-1/...` from a worktree the row never named;
+        each cited line cost the next sweep a search. `cwd=` anchors any relative path
+        in the message or the command."""
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.chdir(tree)
+        report.main(["--message", "m", "--command", "logs/x.txt lines 1-2"])
+        assert f"\tcwd={tree.resolve()}\t" in read_ledger(tmp_path)
+
+    def test_evidence_is_resolved_to_absolute_paths(self, tmp_path, monkeypatch):
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        monkeypatch.chdir(tree)
+        report.main(
+            [
+                "--message",
+                "m",
+                "--evidence",
+                "logs/run/a.txt#L79-98",
+                "--evidence",
+                str(tmp_path / "b.txt"),
+            ]
+        )
+        expected = f"{tree.resolve() / 'logs/run/a.txt'}#L79-98; {tmp_path / 'b.txt'}"
+        assert f"\tevidence={expected}\t" in read_ledger(tmp_path)
+
+    def test_evidence_is_optional(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
+        report.main(["--message", "m"])
+        assert "\tevidence=-\t" in read_ledger(tmp_path)
+
     def test_no_devkit_dir_still_exits_zero(self, tmp_path, monkeypatch, capsys):
         """Pinned to a *consuming* copy, which is the only one an unset var leaves with
         nowhere to file: `harness_events.ledger_path` falls back to the checkout itself
@@ -48,3 +83,19 @@ class TestMain:
         monkeypatch.setattr(report.harness_events, "REPO_ROOT", tmp_path)
         assert report.main(["--message", "m"]) == 0
         assert "no central ledger" in capsys.readouterr().out
+
+
+class TestAbsoluteEvidence:
+    def test_relative_path_joins_the_base(self, tmp_path):
+        assert report.absolute_evidence("a/b.txt", tmp_path) == str(tmp_path / "a" / "b.txt")
+
+    def test_anchor_survives(self, tmp_path):
+        got = report.absolute_evidence("t.jsonl#L12", tmp_path)
+        assert got == f"{tmp_path / 't.jsonl'}#L12"
+
+    def test_absolute_path_is_kept(self, tmp_path):
+        target = str(tmp_path / "x.txt")
+        assert report.absolute_evidence(target, tmp_path / "elsewhere") == target
+
+    def test_blank_is_blank(self, tmp_path):
+        assert report.absolute_evidence("  ", tmp_path) == ""

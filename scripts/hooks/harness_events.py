@@ -95,7 +95,11 @@ VALUE_LIMIT = 300
 # The line format is one record per line with tabs between fields, so length costs
 # nothing but disk, and `clean` still collapses newlines. These are ceilings against a
 # pathological value reaching the file, not an editorial budget.
-FIELD_LIMITS = {"message": 4000, "detail": 2000}
+#
+# `evidence` is paths, made absolute so a sweep in another tree can open them
+# (`report-harness-defect.py`); two under a worktree already pass the flat cap, and a
+# path cut short names nothing at all.
+FIELD_LIMITS = {"message": 4000, "detail": 2000, "evidence": 2000}
 
 
 # The line every *block* message ends with: how to report the block itself as wrong.
