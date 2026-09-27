@@ -31,7 +31,8 @@ recover is *why* the change was made, so that is the only thing it is asked for.
 
 `logs/` is ignored in every project, so the file cannot be committed by accident. Once
 shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
-fresh one, last.
+fresh one, last. A tree with nothing changed -- a fix that was all ledger resolutions --
+ships the same way: the pass sets the intent aside and opens no PR.
 
 ## What happens next, and why none of it is your turn
 
