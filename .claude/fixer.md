@@ -48,4 +48,6 @@ did not need to:
 
 Whatever the outcome, report: what was red, what you changed and where (the branch or
 the PR), and what now passes. If you stopped, `logs/fix-blocked.md` is the report the
-pass reads: name the blocker there and what you tried.
+pass reads: name the blocker there and what you tried. If the failure was already fixed
+and you changed nothing, the ship skill's intent is still the report, saying what fixed
+it. A final message alone is none: the pass reads an outcome only from those two files.

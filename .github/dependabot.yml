@@ -12,6 +12,7 @@
 version: 2
 updates:
   - package-ecosystem: uv
+    versioning-strategy: increase-if-necessary
     directory: /
     schedule:
       interval: weekly

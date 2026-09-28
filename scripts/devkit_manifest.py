@@ -93,6 +93,12 @@ MANIFEST: tuple[str, ...] = (
     # spent that release holding an edit guard it never called.
     "scripts/project_settings.py",
     "scripts/hooks/tests/test_project_settings.py",
+    # Its sibling for `.github/dependabot.yml`, another file the template renders once:
+    # the pull gives each Python entry the floor-keeping strategy the contract test at
+    # the end of this list requires, or a project older than the template goes red on
+    # the pull that delivers that test.
+    "scripts/project_dependabot.py",
+    "scripts/hooks/tests/test_project_dependabot.py",
     # Bash output cap: the PreToolUse gate and the wrapper it demands. They ship
     # together because the gate's allow-list matches the wrapper's path -- vendoring
     # one without the other yields a hook that blocks every Bash call and names a

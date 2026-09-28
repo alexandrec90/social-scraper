@@ -6,6 +6,10 @@ the project wrote it.
 """
 
 import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from conftest import load_module
@@ -138,7 +142,7 @@ def test_the_previous_sync_devkit_can_still_call_the_pass(tmp_path):
 def test_the_pull_adds_the_agent_shell_env_and_says_which_keys(tmp_path):
     root = _project(tmp_path, {"env": {"KEEP": "1"}, "permissions": {"allow": []}})
     assert ps.settings_pass(root) == [
-        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE, MSYS2_ARG_CONV_EXCL"
     ]
     assert _settings(root) == {"env": _env(KEEP="1"), "permissions": {"allow": []}}
     assert ps.settings_pass(root) == []
@@ -147,7 +151,7 @@ def test_the_pull_adds_the_agent_shell_env_and_says_which_keys(tmp_path):
 def test_a_value_the_project_set_itself_is_kept(tmp_path):
     root = _project(tmp_path, {"env": {"PY_COLORS": "1"}})
     assert ps.settings_pass(root) == [
-        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE"
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE, MSYS2_ARG_CONV_EXCL"
     ]
     assert _settings(root)["env"]["PY_COLORS"] == "1"
 
@@ -164,7 +168,7 @@ def test_unwiring_and_the_env_are_one_write_with_both_notes(tmp_path):
     root = _project(tmp_path, _hook("python3 cap.py"))
     assert ps.settings_pass(root) == [
         f"(unwired agent hooks) {ps.SETTINGS_FILE}: PreToolUse",
-        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE",
+        f"(agent shell env) {ps.SETTINGS_FILE}: PYTHON_COLORS, PY_COLORS, TTY_COMPATIBLE, TTY_INTERACTIVE, MSYS2_ARG_CONV_EXCL",
     ]
     assert _settings(root) == {"env": ps.AGENT_ENV}
 
@@ -179,6 +183,49 @@ def test_devkit_and_the_template_carry_the_agent_shell_env():
         text = path.read_text(encoding="utf-8")
         for key, value in ps.AGENT_ENV.items():
             assert f'"{key}": "{value}"' in text, (path.name, key)
+
+
+def _git_bash() -> Path | None:
+    """Git for Windows' own `bash.exe`, never WSL's `System32\\bash.exe`."""
+    git = shutil.which("git")
+    if sys.platform != "win32" or not git:
+        return None
+    for parent in Path(git).resolve().parents:
+        if (candidate := parent / "bin" / "bash.exe").is_file():
+            return candidate
+    return None
+
+
+def _as_native_sees(bash: Path, arg: str, extra_env: dict[str, str]) -> str:
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("MSYS2_ARG_CONV_EXCL", "MSYS_NO_PATHCONV")
+    }
+    python = Path(sys.executable).as_posix()
+    script = f'"{python}" -c "import sys; print(sys.argv[1])" "{arg}"'
+    done = subprocess.run(
+        [str(bash), "-c", script], env={**env, **extra_env}, capture_output=True, text=True
+    )
+    return done.stdout.strip()
+
+
+def test_git_bash_hands_a_remote_rev_path_to_git_unconverted():
+    """The ledger's f5fb6c8d: `git show origin/main:.github/dependabot.yml` from the Bash
+    tool reached git as `origin\\main;.github\\dependabot.yml`. The control run proves the
+    conversion is live here, so the second assertion is the variable's doing."""
+    arg = "origin/main:.github/dependabot.yml"
+    prefixes = ps.AGENT_ENV["MSYS2_ARG_CONV_EXCL"].split(";")
+    assert any(arg.startswith(prefix) for prefix in prefixes)
+    assert not any(prefix.startswith("/") or prefix == "*" for prefix in prefixes)
+    bash = _git_bash()
+    if bash is None:
+        return  # no MSYS runtime converts anything here; the prefix checks above still ran
+    assert _as_native_sees(bash, arg, {}) != arg
+    env = {"MSYS2_ARG_CONV_EXCL": ps.AGENT_ENV["MSYS2_ARG_CONV_EXCL"]}
+    assert _as_native_sees(bash, arg, env) == arg
+    upstream = "refs/remotes/upstream/main:.x"
+    assert _as_native_sees(bash, upstream, env) == upstream
+    # An absolute path still converts: the exclusion is by prefix, not wholesale.
+    assert _as_native_sees(bash, "/c/Windows", env) != "/c/Windows"
 
 
 # --- what `--check` says -------------------------------------------------------

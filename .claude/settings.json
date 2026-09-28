@@ -12,6 +12,7 @@
     "PY_COLORS": "0",
     "TTY_COMPATIBLE": "0",
     "TTY_INTERACTIVE": "0",
-    "PYTHON_COLORS": "0"
+    "PYTHON_COLORS": "0",
+    "MSYS2_ARG_CONV_EXCL": "origin/;upstream/;refs/"
   }
 }

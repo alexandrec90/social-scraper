@@ -93,8 +93,9 @@ the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an
-`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped --
-so spell it `origin/main:./.devkit.toml`.
+`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped.
+`MSYS2_ARG_CONV_EXCL` in `.claude/settings.json` exempts revs opening `origin/`,
+`upstream/` or `refs/`; for any other rev with a slash, spell it `feature/x:./.devkit.toml`.
 
 ## Waiting on a CI gate: one blocking call, not a poll loop
 

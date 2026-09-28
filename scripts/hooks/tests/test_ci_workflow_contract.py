@@ -291,6 +291,130 @@ def test_dependency_update_prs_are_assigned_to_someone():
     )
 
 
+# Strategies that move the lock without raising a `>=` floor the code never needed.
+FLOOR_KEEPING = frozenset({"increase-if-necessary", "lockfile-only", "widen"})
+FLOOR_RAISING_ECOSYSTEMS = frozenset({"uv", "pip"})
+
+
+def _update_entries(text: str) -> list[tuple[str, list[str]]]:
+    """`(ecosystem, the entry's own lines)` for each `- package-ecosystem:` item."""
+    entries: list[tuple[str, list[str]]] = []
+    body: list[str] | None = None
+    depth = 0
+    for line in _code_lines(text):
+        indent = len(line) - len(line.lstrip())
+        if head := re.match(r"\s*-\s*package-ecosystem:\s*['\"]?([\w-]+)", line):
+            body, depth = [], indent
+            entries.append((head.group(1), body))
+        elif body is not None and indent > depth:
+            body.append(line)
+        else:
+            body = None  # a sibling item or a top-level key: the entry has ended
+    return entries
+
+
+def _versioning_strategy(body: list[str]) -> str | None:
+    for line in body:
+        if match := re.match(r"\s*versioning-strategy:\s*['\"]?([\w-]+)", line):
+            return match.group(1)
+    return None
+
+
+def _floor_raisers(text: str) -> list[str]:
+    return [
+        f"{ecosystem} ({_versioning_strategy(body) or 'no versioning-strategy'})"
+        for ecosystem, body in _update_entries(text)
+        if ecosystem in FLOOR_RAISING_ECOSYSTEMS and _versioning_strategy(body) not in FLOOR_KEEPING
+    ]
+
+
+def test_python_dependency_updates_leave_the_declared_floors_alone():
+    """A Python entry names a strategy that moves the lock, not the `>=` floors.
+
+    With none, Dependabot judged a library an app and used `increase`: data-lake's
+    grouped patch bump rewrote `pandas>=2.2` as `pandas>=3.0.6`, and ibkr_trader, whose
+    `alphalens-reloaded` needs `pandas<3`, went red on its own `main` with no PR of its
+    own to show why. A floor says what the code needs; the lock says what was tested.
+    """
+    if not DEPENDABOT.is_file():
+        return  # test_dependency_updates_are_configured owns that failure
+    raisers = _floor_raisers(_read(DEPENDABOT))
+    assert not raisers, (
+        f".github/dependabot.yml would raise pyproject floors for: {', '.join(raisers)}. "
+        "Add to each Python entry:\n\n"
+        "    versioning-strategy: increase-if-necessary\n\n"
+        "It bumps uv.lock and leaves a floor alone unless the new release falls outside "
+        "it, so a project that depends on this one is not forced up with it."
+    )
+
+
+def test_update_entries_are_read_per_entry():
+    text = (
+        "version: 2\nupdates:\n"
+        "  - package-ecosystem: github-actions\n    versioning-strategy: increase-if-necessary\n"
+        "  - package-ecosystem: uv\n    directory: /\n    groups:\n      g:\n        patterns: ['*']\n"
+        "  - package-ecosystem: 'pip'\n    versioning-strategy: lockfile-only\n"
+    )
+    assert _floor_raisers(text) == ["uv (no versioning-strategy)"]
+    fixed = text.replace(
+        "    directory: /\n", "    directory: /\n    versioning-strategy: increase-if-necessary\n"
+    )
+    assert _floor_raisers(fixed) == []
+    assert _floor_raisers(text.replace("lockfile-only", "increase")) == [
+        "uv (no versioning-strategy)",
+        "pip (increase)",
+    ]
+    # A strategy in a later, non-Python entry does not cover the uv entry above it.
+    assert _floor_raisers(
+        "updates:\n  - package-ecosystem: uv\n  - package-ecosystem: npm\n    versioning-strategy: widen\n"
+    ) == ["uv (no versioning-strategy)"]
+
+
+FROZEN = re.compile(r"\buv\s+(?:sync|run)\b[^\n]*\s--frozen\b|^\s*UV_FROZEN\s*:")
+
+
+def _frozen_lines(text: str) -> list[str]:
+    return [line.strip() for line in _code_lines(text) if FROZEN.search(line)]
+
+
+def test_ci_checks_the_lock_rather_than_trusting_it():
+    """`uv sync --locked`, never `--frozen`, in a workflow or a local action.
+
+    `--frozen` installs `uv.lock` without asking whether it still resolves, so a lock
+    gone stale -- here against a sibling checkout's moved floor -- surfaced in the next
+    bare `uv run`, which relocks, and the gate reported "Ruff lint" red for a failure no
+    linter caused. `--locked` fails the sync step itself and names the lock.
+    """
+    actions = sorted((REPO_ROOT / ".github" / "actions").glob("*/action.y*ml"))
+    offenders = [
+        f"{path.relative_to(REPO_ROOT).as_posix()}: {line}"
+        for path in [*_workflows(), *actions]
+        for line in _frozen_lines(_read(path))
+    ]
+    assert not offenders, (
+        "CI trusts uv.lock without checking it:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse `uv sync --locked` (and drop `--frozen` from `uv run`): it fails at the "
+        "sync when the lock no longer resolves, instead of at whichever step relocks."
+    )
+
+
+def test_the_frozen_scan_reads_commands_not_prose():
+    text = (
+        "# uv sync --frozen would hide a stale lock\n"
+        "      - run: uv sync --locked --extra ml\n"
+        "      - run: uv run --frozen pytest\n"
+        "        run: uv sync --frozen --all-extras\n"
+        "    env:\n      UV_FROZEN: 1\n"
+        "      - run: uv export --frozen > req.txt\n"
+    )
+    assert _frozen_lines(text) == [
+        "- run: uv run --frozen pytest",
+        "run: uv sync --frozen --all-extras",
+        "UV_FROZEN: 1",
+    ]
+
+
 def test_a_failed_scheduled_run_becomes_an_issue():
     """A workflow run is the least visible artifact GitHub has.
 
