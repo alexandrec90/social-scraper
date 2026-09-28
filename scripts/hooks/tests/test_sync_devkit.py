@@ -427,6 +427,28 @@ def test_pull_copies_shared_into_project(tmp_path, monkeypatch):
     assert (repo / "scripts/x.py").read_text() == "upstream"
 
 
+def test_pull_gives_a_python_dependabot_entry_the_floor_keeping_strategy(
+    tmp_path, monkeypatch, capsys
+):
+    """A project rendered before the template carried the strategy adopts the contract
+    test that requires it on this pull, so this pull is what supplies it -- or the upgrade
+    rehearsal from the previous release goes red on `test_ci_workflow_contract.py`."""
+    src = tmp_path / "shared"
+    repo = tmp_path / "proj"
+    _seed(src, "scripts/x.py", "upstream")
+    _seed(repo, ".github/dependabot.yml", "updates:\n  - package-ecosystem: uv\n    directory: /\n")
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/x.py",))
+
+    assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
+    text = (repo / ".github/dependabot.yml").read_text(encoding="utf-8")
+    assert "    versioning-strategy: increase-if-necessary\n" in text
+    assert (
+        "(floor-keeping versioning-strategy) .github/dependabot.yml: uv" in capsys.readouterr().out
+    )
+    assert sh.dependabot_pass(repo) == [], "a second pull has nothing to add"
+
+
 def test_pull_removes_only_reviewed_retired_files(tmp_path, monkeypatch):
     src = tmp_path / "shared"
     repo = tmp_path / "proj"

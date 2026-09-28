@@ -791,6 +791,21 @@ def settings_pass(root: Path, retired: tuple[str, ...] | None = None) -> list[st
     return project_settings.settings_pass(root, retired_hook_paths(retired))
 
 
+def dependabot_pass(root: Path) -> list[str]:
+    """The pull's pass over this project's `dependabot.yml`; one note per change made.
+
+    Gives each Python entry the floor-keeping strategy the vendored contract test
+    requires, so a project rendered before the template carried it survives the pull
+    that delivers the test. `project_dependabot.dependabot_pass` owns the edit; empty
+    on the bootstrap pull, before that file exists, as for the settings tier.
+    """
+    try:
+        import project_dependabot
+    except ModuleNotFoundError:
+        return []
+    return project_dependabot.dependabot_pass(root)
+
+
 def local_faults(root: Path) -> tuple[list[tuple[str, str]], str]:
     """`(faults, summary)` for what `--check` finds outside the MANIFEST.
 
@@ -1326,8 +1341,9 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=True)
     removed = remove_retired(REPO_ROOT) + managed_removed
     # After the deletions, never before: pruning a hook whose script survived the
-    # pull would disable a live hook.
-    unwired = settings_pass(REPO_ROOT)
+    # pull would disable a live hook. After the copy, too: both passes import a
+    # module this very pull may be the one delivering.
+    unwired = settings_pass(REPO_ROOT) + dependabot_pass(REPO_ROOT)
     # After the settings pass, never before: the Codex file is generated *from*
     # those settings, so regenerating first would bake back in whatever the prune
     # is about to remove.

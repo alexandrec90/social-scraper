@@ -35,11 +35,19 @@ SETTINGS_FILE = ".claude/settings.json"
 # (`TTY_COMPATIBLE`, `TTY_INTERACTIVE`), each checked before `FORCE_COLOR` -- because
 # the settings `env` reaches Claude Code's own process too, and a `NO_COLOR` there is a
 # bet on how its UI reads colour.
+#
+# `MSYS2_ARG_CONV_EXCL` is the same idea for Git Bash on Windows, which rewrites an
+# argument it takes for a POSIX path list before a native program sees it:
+# `git show origin/main:.github/x` reached git as `origin\main;.github\x`, an "ambiguous
+# argument" that cost a fixer its turn. An argument opening with one of these prefixes is
+# a remote-tracking or full ref, never a path worth converting; absolute paths (`/c/...`)
+# still convert. Every other platform ignores the variable.
 AGENT_ENV = {
     "PYTHON_COLORS": "0",
     "PY_COLORS": "0",
     "TTY_COMPATIBLE": "0",
     "TTY_INTERACTIVE": "0",
+    "MSYS2_ARG_CONV_EXCL": "origin/;upstream/;refs/",
 }
 
 

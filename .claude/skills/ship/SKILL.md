@@ -31,8 +31,10 @@ recover is *why* the change was made, so that is the only thing it is asked for.
 
 `logs/` is ignored in every project, so the file cannot be committed by accident. Once
 shipped, the pass moves it to `logs/ship-intent.shipped.md`; to ship again, write a
-fresh one, last. A tree with nothing changed -- a fix that was all ledger resolutions --
-ships the same way: the pass sets the intent aside and opens no PR.
+fresh one, last. A tree with nothing changed -- a fix that was all ledger resolutions, or
+a failure already fixed where the tree was cut -- ships the same way, the body saying
+what fixed it: the pass sets the intent aside and opens no PR. A session that ends with
+no intent and no `logs/fix-blocked.md` reads to the pass as one that died.
 
 ## What happens next, and why none of it is your turn
 
