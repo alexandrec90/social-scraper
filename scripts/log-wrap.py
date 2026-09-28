@@ -94,6 +94,21 @@ TAIL_LINES = 240
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
+# The line an unattended failure's `cause=` is read from, most telling first: the
+# exception a traceback ends on, pytest's first failed test, a tool's `error:` line.
+# Without it every failure of one job was one ledger group, so a new cause read as
+# `RECURRED` and quoted an unrelated earlier fix as what not to repeat (950c4a96).
+CAUSE_LINES = (
+    (re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit)\b(?::.*)?$"), "last"),
+    (re.compile(r"^(?:FAILED|ERROR)\s"), "first"),
+    (re.compile(r"^(?:error|fatal)\b", re.I), "last"),
+)
+CAUSE_WIDTH = 120
+# What differs between two runs failing for one reason: where, which commit, how long.
+ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]([^\s'\"\\/:]+)")
+HEX_ID = re.compile(r"\b[0-9a-f]{7,40}\b")
+NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
 # Set on the child only when the caller has not, so `FORCE_COLOR=0` still wins.
 COLOR_ENV = {"FORCE_COLOR": "1", "PY_COLORS": "1"}
 
@@ -167,6 +182,23 @@ def strip_ansi(text: str) -> str:
     """Drop the colour the child was asked to emit. The terminal wanted it; a log
     file being read by `grep`, or by an agent, does not."""
     return ANSI.sub("", text)
+
+
+def failure_cause(output: str) -> str:
+    """The line of a failed run's output that names why, with what varies run to run
+    (paths, shas, numbers) folded out -- so the same cause on two nights is one ledger
+    group and a different cause is another. The last line said when none looks like an
+    error; `""` for no output."""
+    lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
+    found = lines[-1] if lines else ""
+    for pattern, which in CAUSE_LINES:
+        hits = [line for line in lines if pattern.search(line)]
+        if hits:
+            found = hits[0] if which == "first" else hits[-1]
+            break
+    found = ABSOLUTE_PATH.sub(r"\1", found)
+    found = NUMBER.sub("N", HEX_ID.sub("<sha>", found))
+    return " ".join(found.split())[:CAUSE_WIDTH]
 
 
 def cap(text: str, head: int = HEAD_LINES, tail: int = TAIL_LINES) -> str:
@@ -370,26 +402,31 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             name + FAILED_SUFFIX,
             artifact_body(title, command, code, output, always, kept=True),
         )
-        record_failure(title, command, code, name, root, kept=kept is not None)
+        artifact = artifact_ref(name, kept=kept is not None)
+        record_failure(title, command, code, artifact, root, cause=failure_cause(output))
     return code
+
+
+def artifact_ref(name: str, kept: bool = True) -> str:
+    """The artifact a failure's ledger row names: the **kept** copy, not the per-run one,
+    because the two have different lifetimes and only one of them outlives the event: a
+    sweep reaching this row tomorrow finds the reason there and finds the next run's
+    output in the other. `kept=False` falls back to the per-run path -- a `logs/` that
+    could not be written is not a reason to file no event, and a pointer to the ordinary
+    artifact is still better than none."""
+    return f"{LOGS_DIR}/{name}{FAILED_SUFFIX if kept else ''}.log"
 
 
 def record_failure(
     title: str,
     command: list[str],
     code: int,
-    name: str,
+    artifact: str,
     root: Path | None = None,
-    kept: bool = True,
+    cause: str = "",
 ) -> None:
-    """Leave an unattended failure on the harness-events ledger.
-
-    `artifact=` names the **kept** copy, not the per-run one, because the two have
-    different lifetimes and only one of them outlives the event: a sweep reaching this
-    row tomorrow finds the reason there and finds the next run's output in the other.
-    `kept=False` falls back to the per-run path -- a `logs/` that could not be written
-    is not a reason to file no event, and a pointer to the ordinary artifact is still
-    better than none.
+    """Leave an unattended failure on the harness-events ledger, naming `artifact`
+    (`artifact_ref`) as the file that holds its output.
 
     Best-effort twice over. `harness_events` swallows its own errors by contract, and
     the import is guarded because this module is vendored into projects that may hold a
@@ -400,7 +437,9 @@ def record_failure(
     The message is deliberately stable across runs: `Item.signature` groups by its first
     `SIGNATURE_WIDTH` characters, so a job failing nightly reads as one defect recurring
     rather than as a new one every morning. The exit code and artifact path ride in
-    their own fields, where they do not disturb that grouping.
+    their own fields, where they do not disturb that grouping. `cause` (`failure_cause`)
+    does, deliberately: `harness_triage.Item.signature` keys on it, so one cause failing
+    nightly is one group and a new cause is a new one rather than a false recurrence.
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -415,9 +454,10 @@ def record_failure(
         (
             ("project", harness_events.project_name(root or Path.cwd())),
             ("command", " ".join(command)),
-            ("artifact", f"{LOGS_DIR}/{name}{FAILED_SUFFIX if kept else ''}.log"),
+            ("artifact", artifact),
             ("exit", code),
             ("message", f"unattended task {title!r} failed"),
+            ("cause", cause or "-"),
         ),
         root=root,
     )

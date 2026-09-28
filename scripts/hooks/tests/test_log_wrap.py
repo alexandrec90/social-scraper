@@ -438,6 +438,60 @@ def test_the_message_is_stable_so_nightly_failures_are_one_defect(tmp_path, monk
     assert len(messages) == 1
 
 
+def _fields(ledger) -> list[dict[str, str]]:
+    return [
+        dict(pair.partition("=")[::2] for pair in line.split("\t") if "=" in pair)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def test_an_unattended_failure_records_its_cause_so_two_causes_are_two_defects(
+    tmp_path, monkeypatch
+):
+    """950c4a96: keyed on the task alone, every failure of one job was one group, so a
+    new cause read as RECURRED and quoted the last, unrelated fix as what not to repeat.
+    The cause rides in its own field; the same cause on two nights stays one."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    for output in (
+        "Traceback (most recent call last):\n  x\nRuntimeError: pull at C:\\ws\\a1b2c3d4e5 took 31s\n",
+        "Traceback (most recent call last):\n  y\nRuntimeError: pull at C:\\ws\\f0e9d8c7b6 took 47s\n",
+        "fatal: could not read Username for 'https://github.com'\n",
+    ):
+        lw.main(["--always", "N", "--", "x"], run=lambda _c, o=output: (2, o), root=tmp_path)
+
+    causes = [row["cause"] for row in _fields(ledger)]
+    assert causes[0] == causes[1] == "RuntimeError: pull at <sha> took Ns"
+    assert causes[2].startswith("fatal: could not read Username")
+    assert len({row["message"] for row in _fields(ledger)}) == 1, "the task is still named once"
+
+
+@pytest.mark.parametrize(
+    ("output", "cause"),
+    [
+        # A traceback ends on its exception, however much the job printed after it.
+        ("Traceback:\n  f()\nKeyError: 'x'\nlog-wrap: done\n", "KeyError: 'x'"),
+        ("a\nsubprocess.CalledProcessError: Command '[git]' returned 128\n", None),
+        # pytest's first failed test, not the count line after it.
+        ("FAILED tests/test_a.py::test_b - assert 1\n=== 1 failed, 9 passed in 3.2s ===\n", None),
+        ("ok\nerror: pathspec 'x' did not match\n", "error: pathspec 'x' did not match"),
+        # Nothing error-shaped: the last line said is the best there is.
+        ("step 1\nstep 2\n\n", "step N"),
+        ("", ""),
+    ],
+)
+def test_failure_cause_is_the_line_that_names_the_failure(output, cause):
+    found = lw.failure_cause(output)
+    if cause is None:
+        assert found and found.split()[0] in output
+    else:
+        assert found == cause
+
+
+def test_failure_cause_strips_colour_and_is_bounded():
+    assert lw.failure_cause("\x1b[31mValueError: bad\x1b[0m\n") == "ValueError: bad"
+    assert len(lw.failure_cause("RuntimeError: " + "word " * 200)) <= lw.CAUSE_WIDTH
+
+
 def test_a_ledger_that_cannot_be_written_does_not_fail_the_job(tmp_path, monkeypatch):
     """Reporting never takes the job's exit code with it -- that would turn a gap in
     reporting into a broken scheduled task."""
@@ -457,13 +511,10 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     the output."""
     ledger = _ledger(tmp_path, monkeypatch)
 
-    lw.record_failure("Devkit: Cut Release", ["python", "x.py"], 2, "devkit-cut-release", tmp_path)
+    artifact = lw.artifact_ref("devkit-cut-release")
+    lw.record_failure("Devkit: Cut Release", ["python", "x.py"], 2, artifact, tmp_path, "E: x")
 
-    fields = dict(
-        pair.partition("=")[::2]
-        for pair in ledger.read_text(encoding="utf-8").strip().split("\t")
-        if "=" in pair
-    )
+    [fields] = _fields(ledger)
     assert fields["event"] == lw.FAILED_EVENT
     assert fields["exit"] == "2"
     # The KEPT copy, not the per-run one: the event outlives the artifact, and the sweep
@@ -471,6 +522,7 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     assert fields["artifact"] == "logs/devkit-cut-release.failed.log"
     assert fields["command"] == "python x.py"
     assert "Devkit: Cut Release" in fields["message"]
+    assert fields["cause"] == "E: x"
 
 
 def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
@@ -478,8 +530,10 @@ def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
 ):
     """A `logs/` that cannot be written is never a reason to file no event, and a
     pointer to the ordinary artifact still beats none."""
+    assert lw.artifact_ref("n", kept=False) == "logs/n.log"
     ledger = _ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(lw, "write_artifact", lambda root, name, *_a, **_k: None)
 
-    lw.record_failure("N", ["x"], 2, "n", tmp_path, kept=False)
+    lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
 
-    assert "artifact=logs/n.log\t" in ledger.read_text(encoding="utf-8")
+    assert _fields(ledger)[0]["artifact"] == "logs/n.log"
