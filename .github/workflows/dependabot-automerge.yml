@@ -6,10 +6,11 @@ name: Auto-merge
 # click that waits on a human after the gate has already said everything a human
 # would check. Dependabot PRs are labelled automatically by the classify job:
 #   - patch/minor bumps of anything
-#   - major bumps where EVERY updated dependency is a development dependency (dev
-#     tooling can only break CI, and the gate is what just passed)
-# Anything else — a major touching a runtime or transitive dependency, or an update
-# type Dependabot did not classify — is labelled `needs-manual-merge` and left open.
+#   - any update of a development dependency, major or unclassified (dev tooling can
+#     only break CI, and the gate is what just passed; an unclassified dev update held
+#     carameli #393's eleven classified ones for two days)
+# Anything else — a major, or an update Dependabot did not classify, touching a
+# runtime or transitive dependency — is labelled `needs-manual-merge` and left open.
 # Non-Dependabot PRs get the label from whoever decides they are routine: the
 # devkit upgrade PRs `upgrade-project.py` opens carry it from creation, and a human
 # can apply it to any PR instead of babysitting the gate.
@@ -122,10 +123,9 @@ jobs:
           # length guard is what stops an empty payload from merging itself.
           label=$(jq -r '
             if length > 0 and all(.[];
+                .dependencyType == "direct:development" or
                 .updateType == "version-update:semver-patch" or
-                .updateType == "version-update:semver-minor" or
-                (.updateType == "version-update:semver-major" and
-                 .dependencyType == "direct:development"))
+                .updateType == "version-update:semver-minor")
             then "automerge"
             else "needs-manual-merge"
             end' <<<"$UPDATED_DEPS_JSON")

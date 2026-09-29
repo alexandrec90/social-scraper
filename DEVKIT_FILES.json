@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.32",
+  "devkit_tag": "v0.11.33",
   "files": {
     ".claude/engineering-evidence.md": "75124aa308d50a5b6bc74ce750946b9181789457143e542cce8daac9bd389c78",
     ".claude/fixer.md": "aea4596d9e27ad0004e4853252b8bdd054a264b4c60409a74fe3ecf6fd3015c0",
@@ -8,7 +8,7 @@
     ".claude/rules/engineering.md": "188d55cf01add8b49343e7798a4c20d8e336550d3da3bac292cc71a5935c4293",
     ".claude/rules/session-scope.md": "c73194c74d9a89dde320d5c6e0125921b64091bc1892d3ec2432a38f86fbd659",
     ".claude/skills/ship/SKILL.md": "8522894b72484652c153e3e4b900db9fb5daf8f9da9c8fa855bb98d49bf9517f",
-    ".github/workflows/dependabot-automerge.yml": "6bbc1daf786d5221f04e07b5b7e2863aed9a5fd2710c145b6ef8a3dc9ccf91a8",
+    ".github/workflows/dependabot-automerge.yml": "025aa7b49df365ed38d285f0c46f41892ec0cf2d41eb3f539fea5e952738afb8",
     ".github/workflows/scheduled-failure-issue.yml": "6edc92ce928331be15258d8eba23db31f86a34be1a67cc2c3f9c4e0ea483fa94",
     "scripts/devkit_manifest.py": "de03ff3964458bca842ca7afd6db3702b2b425ec2d813b5471b7bea80722fe52",
     "scripts/hooks/code_text.py": "96236802e31578a87963bce3d77121543366626e17ba9e3d41a73baa12313548",
