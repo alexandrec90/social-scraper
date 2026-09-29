@@ -2,6 +2,8 @@
 description: Data-lake storage, catalog, privacy, and restoration constraints
 paths:
   - "social_scraper/archive/**/*.py"
+  - "social_scraper/export.py"
+  - "social_scraper/privacy.py"
 ---
 
 # Rule: Data lake

@@ -6,18 +6,20 @@
 # Never add or raise a line to make new code pass; fix the code. `dependency::` is one
 # exception -- adding a package is a line here, so the PR diff shows it.
 #
-# `--record --reason "..."` is the other, and it is the deliberate hole. A module far
-# past `file_lines` cannot gain a line, so a bug whose fix belongs in one has nowhere
-# to go, and the split the finding asks for is a separate body of work. Recording says
+# `--record --reason "..."` is the other, and it is the deliberate hole. A function far
+# past its limit cannot gain a line, so a bug whose fix belongs in one has nowhere to
+# go, and the refactor the finding asks for is a separate body of work. Recording says
 # so out loud: the reason is mandatory, counter rules (`suppressions`, `todos`,
 # `skipped_tests`, ...) are refused because those are always somebody giving up rather
-# than a module's size, and every move is logged below with what it moved and why.
+# than a unit's size, and every move is logged below with what it moved and why.
+# Module size -- `file_lines`, `imports`, `definitions` -- is advisory and never here.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
 complexity::scripts/lint-all.py::main = 19
 dependency::pyproject.toml::boto3 = 1
 dependency::pyproject.toml::duckdb = 1
 dependency::pyproject.toml::mypy = 1
+dependency::pyproject.toml::playwright = 1
 dependency::pyproject.toml::pre-commit = 1
 dependency::pyproject.toml::psycopg = 1
 dependency::pyproject.toml::pyarrow = 1
@@ -37,3 +39,6 @@ swallowed_errors::scripts/notify.py = 1
 #   definitions::scripts/hooks/structure_check.py -> 42
 #   file_lines::scripts/hooks/harness_config.py -> 655
 #   file_lines::scripts/hooks/structure_check.py -> 1042
+
+# 2026-09-29  recorded: playwright: the scraper's only transport. Reddit answers a plain HTTP client with 403 (measured 2026-09-28) and X has no usable read API, so a real, logged-in Chrome driven by Playwright is how both are reached.
+#   dependency::pyproject.toml::playwright -> 1
