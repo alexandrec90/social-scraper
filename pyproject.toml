@@ -10,7 +10,13 @@ dependencies = [
   "duckdb>=1.1",
   "boto3>=1.35",
   "pydantic-settings>=2.4",
+  # Drives a real, logged-in Chrome profile. Reddit answers a plain HTTP client with 403
+  # and X has no read API we can use, so a browser is the only transport that works.
+  "playwright>=1.50",
 ]
+
+[project.scripts]
+social-scraper = "social_scraper.cli:main"
 
 [project.optional-dependencies]
 # Host-only toolchain. Deliberately NOT installed into the container image — it is
@@ -48,3 +54,9 @@ warn_redundant_casts = true
 # and `sync-devkit.py --check` fails if this repo edits it). Type-checking it here
 # only produces errors this repo is not allowed to fix.
 exclude = '^scripts/(hooks/|sync-harness\.py)'
+
+# pyarrow ships no type information (no stubs, no py.typed), so every import of it is
+# `import-untyped`. Declared once here rather than suppressed at each import.
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
