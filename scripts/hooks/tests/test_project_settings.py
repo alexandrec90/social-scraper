@@ -185,6 +185,66 @@ def test_devkit_and_the_template_carry_the_agent_shell_env():
             assert f'"{key}": "{value}"' in text, (path.name, key)
 
 
+# --- the dependency directories a `claude --worktree` tree borrows ---------------
+# Claude Code's git runs with hooks off, so a roguelike session's tree had no
+# `node_modules` until it ran `npm ci` by hand (98fd1f9c).
+
+
+def test_the_pull_links_the_venv_and_each_node_modules_a_manifest_names(tmp_path):
+    root = _project(tmp_path, {"env": _env()})
+    for rel in ("pyproject.toml", "package.json", "frontend/package.json"):
+        _seed(root, rel, "{}")
+    assert ps.settings_pass(root) == [
+        f"(worktree links) {ps.SETTINGS_FILE}: .venv, node_modules, frontend/node_modules"
+    ]
+    assert _settings(root)["worktree"] == {
+        "symlinkDirectories": [".venv", "node_modules", "frontend/node_modules"]
+    }
+    assert ps.settings_pass(root) == []
+
+
+def test_a_project_with_no_manifest_gets_no_links_and_no_write(tmp_path):
+    original = json.dumps({"env": _env()})
+    root = _project(tmp_path, original)
+    assert ps.dependency_dirs(root) == []
+    assert ps.settings_pass(root) == []
+    assert (root / ps.SETTINGS_FILE).read_text(encoding="utf-8") == original
+
+
+def test_a_manifest_inside_a_dependency_or_hidden_dir_is_not_a_project_of_its_own(tmp_path):
+    for rel in ("node_modules/package.json", ".cache/package.json", "a/b/package.json"):
+        _seed(tmp_path, rel, "{}")
+    assert ps.dependency_dirs(tmp_path) == []
+
+
+def test_links_the_project_listed_are_kept_first_and_not_repeated(tmp_path):
+    _seed(tmp_path, "pyproject.toml", "")
+    _seed(tmp_path, "package.json", "{}")
+    tree = {"worktree": {"symlinkDirectories": [".cache", ".venv"], "other": 1}}
+    updated, added = ps.with_worktree_links(tree, tmp_path)
+    assert added == ["node_modules"]
+    assert updated == {
+        "worktree": {"symlinkDirectories": [".cache", ".venv", "node_modules"], "other": 1}
+    }
+    assert tree["worktree"]["symlinkDirectories"] == [".cache", ".venv"]
+
+
+def test_a_worktree_block_of_the_wrong_shape_is_left_alone(tmp_path):
+    _seed(tmp_path, "pyproject.toml", "")
+    for tree in ({"worktree": "no"}, {"worktree": {"symlinkDirectories": "no"}}, None):
+        assert ps.with_worktree_links(tree, tmp_path) == (tree, [])
+
+
+def test_devkit_and_the_template_link_the_venv():
+    """A new project and devkit itself start with the link; `--pull` brings everyone else."""
+    repo = Path(__file__).resolve().parents[3]
+    template = repo / "templates/core/dot-claude/settings.json.tmpl"
+    if not template.is_file():
+        return  # a consumer: its settings are its own, and `--pull` fills them in
+    for path in (repo / ".claude/settings.json", template):
+        assert '"symlinkDirectories": [".venv"]' in path.read_text(encoding="utf-8"), path.name
+
+
 def _git_bash() -> Path | None:
     """Git for Windows' own `bash.exe`, never WSL's `System32\\bash.exe`."""
     git = shutil.which("git")
@@ -245,3 +305,9 @@ def test_a_stale_codex_mirror_is_still_a_check_fault(tmp_path):
     ((label, message),) = notes
     assert "STALE" in message
     assert ps.check_summary(notes) == label
+
+
+def test_only_a_retired_python_script_can_be_a_retired_hook_command():
+    retired = ("scripts/hooks/old.py", "README.md", ".claude/skills/x/SKILL.md", "scripts/x.sh")
+    assert ps.retired_hook_paths(retired) == ("scripts/hooks/old.py",)
+    assert ps.retired_hook_paths(()) == ()

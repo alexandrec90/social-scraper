@@ -1056,7 +1056,7 @@ def test_vendored_skills_are_not_locally_edited():
     skills = REPO_ROOT / ".claude" / "skills"
     if not skills.is_dir():
         pytest.skip("no vendored skills")
-    vendored = {"ship"}
+    vendored = {"ship", "go-nuts"}
     for name in sorted(vendored):
         skill = skills / name / "SKILL.md"
         if not skill.is_file():

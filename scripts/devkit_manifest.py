@@ -171,6 +171,10 @@ MANIFEST: tuple[str, ...] = (
     # The one portable task workflow. Its script detects the remote default branch
     # and owns the mechanical checks; the skill supplies the semantic commit/PR text.
     ".claude/skills/ship/SKILL.md",
+    # The unattended run: decide instead of asking, log each call, finish through `/ship`.
+    # Vendored rather than per-user because the operator works across machines, and a
+    # skill under `~/.claude/` is one more copy per machine that nothing drift-checks.
+    ".claude/skills/go-nuts/SKILL.md",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
     # compatibility layer mirrors repository skills and, when a project opts into
     # `.codex/`, translates Claude hook wiring.

@@ -13,7 +13,8 @@ wired anywhere -- not devkit's, not the template's, not one a project added -- s
 consumer's settings lose their whole `hooks` block on the pull that delivers this. The
 hook scripts are still vendored, and inert while nothing names them. And it **adds the
 agent-shell environment** (`AGENT_ENV`) wherever a key is missing, never overwriting a
-value the project set itself.
+value the project set itself. And it **links the checkout's dependency directories**
+into the trees `claude --worktree` cuts (`dependency_dirs`), which no git hook reaches.
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
@@ -124,6 +125,46 @@ def with_agent_env(payload: object) -> tuple[object, list[str]]:
     return {**payload, "env": {**env, **{key: AGENT_ENV[key] for key in missing}}}, missing
 
 
+# The dependency directories a tree cut by `claude --worktree` borrows from its checkout.
+# Claude Code runs its own git with hooks off, so the global `post-checkout` that
+# provisions every other tree (`worktree_env.py`) never fires for one of its trees, and
+# `worktree.symlinkDirectories` is the only seam it offers that is not an agent hook. A
+# roguelike session's tree came up with no `node_modules`, so neither `npm run dev` nor
+# vitest started until it ran `npm ci` by hand (98fd1f9c). Each one is linked only
+# where the file that says the project installs it is at the root or one level down.
+VENV_DIR = ".venv"
+NODE_DIR = "node_modules"
+
+
+def dependency_dirs(root: Path) -> list[str]:
+    """The directories, relative to `root`, that its worktrees should link from it."""
+    dirs = [VENV_DIR] if (root / "pyproject.toml").is_file() else []
+    for manifest in [root / "package.json", *sorted(root.glob("*/package.json"))]:
+        where = manifest.parent.relative_to(root)
+        if manifest.is_file() and not where.name.startswith((".", NODE_DIR)):
+            dirs.append((where / NODE_DIR).as_posix())
+    return dirs
+
+
+def with_worktree_links(payload: object, root: Path) -> tuple[object, list[str]]:
+    """`(settings, dirs added)`: `payload` with every `dependency_dirs` entry linked.
+
+    Appended after what the project lists, never replacing it, and the same object back
+    when nothing is missing, as `with_agent_env` does. A `worktree` or
+    `symlinkDirectories` that is not the shape Claude Code reads is left alone.
+    """
+    if not isinstance(payload, dict):
+        return payload, []
+    worktree = payload.get("worktree", {})
+    links = worktree.get("symlinkDirectories", []) if isinstance(worktree, dict) else None
+    if not isinstance(links, list):
+        return payload, []
+    missing = [d for d in dependency_dirs(root) if d not in links]
+    if not missing:
+        return payload, []
+    return {**payload, "worktree": {**worktree, "symlinkDirectories": [*links, *missing]}}, missing
+
+
 def read(root: Path) -> object | None:
     """This project's settings tree, or None when it is absent or will not parse.
 
@@ -141,7 +182,8 @@ def read(root: Path) -> object | None:
 def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
     """The pull's pass over the settings file. Returns one note per change it made.
 
-    It unwires every agent hook and adds the missing `AGENT_ENV` keys. `retired` is
+    It unwires every agent hook, adds the missing `AGENT_ENV` keys and links the missing
+    `dependency_dirs` into Claude Code's worktrees. `retired` is
     accepted and unused: a pull runs the *previous* `sync-devkit.py`, which still passes
     it, and a signature it cannot call would fail the one pull that delivers this
     version. Best-effort throughout: a settings file that cannot be read is left exactly
@@ -152,7 +194,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
     if payload is None:
         return []
     stripped, events = strip_hooks(payload)
-    updated, added = with_agent_env(stripped)
+    with_env, added = with_agent_env(stripped)
+    updated, linked = with_worktree_links(with_env, root)
     if updated is payload:
         return []
     try:
@@ -166,6 +209,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
         notes.append(f"(unwired agent hooks) {SETTINGS_FILE}: {', '.join(events) or 'hooks'}")
     if added:
         notes.append(f"(agent shell env) {SETTINGS_FILE}: {', '.join(added)}")
+    if linked:
+        notes.append(f"(worktree links) {SETTINGS_FILE}: {', '.join(linked)}")
     return notes
 
 
