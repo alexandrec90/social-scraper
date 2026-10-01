@@ -1398,6 +1398,85 @@ def test_the_baseline_reader_drops_comments_and_blank_lines(tmp_path):
     assert sh.read_untested_baseline(tmp_path) == ["src/acme.py::alpha"]
 
 
+# #464 reddened the upgrade rehearsal twice over on files the project never touched: a
+# new vendored test covered a baselined symbol, and the narrowed scanner stopped
+# counting a sibling's same-named method as coverage. The pull reconciles instead.
+
+VENDORED_TEST = "tests/test_acme.py"
+
+
+def _adopted_ratchet_project(tmp_path: Path) -> Path:
+    """Committed with `beta` covered by a vendored test and `alpha` baselined."""
+    root = _ratchet_project(tmp_path, "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    _seed(root, VENDORED_TEST, "acme.beta()\n")
+    _seed(root, sh.UNTESTED_BASELINE_FILE, "src/acme.py::alpha\n")
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "adopted")
+    return root
+
+
+def test_reconciling_records_only_what_the_pull_changed(tmp_path):
+    root = _adopted_ratchet_project(tmp_path)
+    # The pull: the vendored test now reaches `alpha` and no longer `beta`.
+    _seed(root, VENDORED_TEST, "acme.alpha()\n")
+    # The project's own uncommitted work, which the pull did not make.
+    _seed(root, "src/wip.py", "def gamma():\n    pass\n")
+    assert sh.reconcile_untested_baseline(root, (VENDORED_TEST,)) == (1, 1)
+    assert sh.read_untested_baseline(root) == ["src/acme.py::beta"]
+
+
+def test_reconciling_only_drops_when_head_cannot_say_what_the_tree_was(tmp_path, monkeypatch):
+    """No git here, so every gap might be the project's own: record none of them."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    root = _ratchet_project(tmp_path, "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    _seed(root, VENDORED_TEST, "acme.alpha()\n")
+    _seed(root, sh.UNTESTED_BASELINE_FILE, "src/acme.py::alpha\n")
+    assert sh.pre_pull_gaps(root) is None
+    assert sh.reconcile_untested_baseline(root, (VENDORED_TEST,)) == (1, 0)
+    assert sh.read_untested_baseline(root) == []
+
+
+def test_reconciling_is_skipped_before_adoption_and_without_a_scanner(tmp_path):
+    root = _ratchet_project(tmp_path / "unadopted")
+    assert sh.reconcile_untested_baseline(root, ()) is None
+    assert not (root / sh.UNTESTED_BASELINE_FILE).exists(), "adoption is the seed's"
+    _seed(tmp_path / "bare", sh.UNTESTED_BASELINE_FILE, "src/acme.py::alpha\n")
+    assert sh.reconcile_untested_baseline(tmp_path / "bare", ()) is None
+
+
+def test_a_scanner_that_fails_reconciles_nothing(tmp_path):
+    root = _adopted_ratchet_project(tmp_path)
+    _seed(root, SCANNER, "raise SystemExit(3)\n")
+    assert sh.reconcile_untested_baseline(root, ()) is None
+    assert sh.read_untested_baseline(root) == ["src/acme.py::alpha"]
+
+
+def test_pre_pull_gaps_are_what_heads_own_scanner_listed(tmp_path):
+    root = _adopted_ratchet_project(tmp_path)
+    _seed(root, VENDORED_TEST, "acme.alpha()\n")  # the working tree is not HEAD
+    assert sh.pre_pull_gaps(root) == {"src/acme.py::alpha"}
+
+
+def test_pre_pull_gaps_are_unknown_for_a_project_nested_in_another_repo(tmp_path):
+    """HEAD's tree would be the outer repo's, keyed by paths no entry here uses."""
+    outer = _adopted_ratchet_project(tmp_path)
+    inner = _ratchet_project(outer / "vendor" / "proj")
+    _git(outer, "add", "-A")
+    _git(outer, "commit", "-qm", "nest")
+    assert sh.pre_pull_gaps(inner) is None
+
+
+def test_uncommitted_paths_name_edits_and_untracked_files(tmp_path):
+    root = _adopted_ratchet_project(tmp_path)
+    assert sh.uncommitted_paths(root) == set()
+    _seed(root, VENDORED_TEST, "acme.alpha()\n")
+    _seed(root, "src/new dir/wip.py", "")
+    assert sh.uncommitted_paths(root) == {VENDORED_TEST, "src/new dir/wip.py"}
+
+
 def test_the_baseline_of_a_project_that_never_adopted_reads_empty(tmp_path):
     assert sh.read_untested_baseline(tmp_path) == []
 
@@ -2245,6 +2324,7 @@ def test_report_sync_names_every_file_a_reader_could_act_on(capsys):
         seeded_structure=4,
         tightened=(2, 1),
         pull=True,
+        reconciled=(5, 6),
     )
     sh.report_sync(outcome)
     out = capsys.readouterr().out
@@ -2257,6 +2337,7 @@ def test_report_sync_names_every_file_a_reader_could_act_on(capsys):
     assert "3 symbol(s)" in out
     assert "4 finding(s) grandfathered" in out
     assert "dropped 2 line(s)" in out
+    assert "dropped 5 line(s) now covered, recorded 6 gap(s) this pull revealed" in out
 
 
 def test_report_failed_blocks_is_silent_and_green_when_every_block_landed(capsys):

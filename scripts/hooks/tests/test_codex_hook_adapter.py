@@ -1,5 +1,6 @@
 """Tests for the Codex command-hook compatibility adapter."""
 
+import io
 import json
 import subprocess
 from pathlib import Path
@@ -340,3 +341,18 @@ def test_session_start_still_emits_nothing(monkeypatch, tmp_path):
     )
     code, stdout, _ = hook.run_hook("SessionStart", ["python3", "s.py"], "{}", repo_root=tmp_path)
     assert (code, stdout) == (0, "")
+
+
+def test_main_hands_stdin_to_the_hook_and_relays_its_verdict(monkeypatch, capsys):
+    seen = []
+
+    def run_hook(event, command, raw_stdin):
+        seen.append((event, command, raw_stdin))
+        return 3, "denied", "why"
+
+    monkeypatch.setattr(hook, "run_hook", run_hook)
+    monkeypatch.setattr(hook.sys, "stdin", io.StringIO('{"tool": "Bash"}'))
+    assert hook.main(["--event", "PreToolUse", "--", "python3", "guard.py"]) == 3
+    assert seen == [("PreToolUse", ["python3", "guard.py"], '{"tool": "Bash"}')]
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("denied\n", "why\n"), "each stream ends its line"

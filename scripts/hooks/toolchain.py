@@ -21,9 +21,19 @@ top of `/ship` rather than discovered at its commit. `worktree.py provision` kee
 own ladder, which does more (a venv on the pinned interpreter that `uv` fetches, an
 `npm ci` into a leased box); the *commands* named here are the ones it would run.
 
-**Reports, never installs.** SessionStart is synchronous and a cold install is minutes;
-`ship.py` is a mechanical check. The command is printed for whoever is in a position
-to spend the time.
+**The reports never install.** SessionStart is synchronous and a cold install is
+minutes; `ship.py` is a mechanical check. The command is printed for whoever is in a
+position to spend the time.
+
+**`rerun_in_venv` is the one caller that does**, because its caller is the one about
+to fail without it: a test or lint runner started by an interpreter that lacks pytest
+or ruff. A `claude --worktree` tree arrives with no `.venv`, and nothing can provision
+it at creation -- Claude Code runs its git with hooks off, and no agent hook is wired --
+so every session in one used to hit `No module named pytest`, provision by hand, and
+file the same friction. Building the tree's own `.venv` at that first run, instead of
+borrowing the checkout's, is deliberate: a project installed editable points its venv
+at the checkout's `src/`, so a borrowed one would test the checkout's code, not the
+branch's.
 
 Detection, not configuration: the manifest's `[python] install_command` wins, then the
 lockfile on disk decides, in the order `session-start.sh` and `worktree.provision_steps`
@@ -36,8 +46,13 @@ Stdlib only: this runs where nothing is installed yet, by construction.
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import shlex
+import subprocess
 import sys
 import tomllib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +62,22 @@ import worktree_tiers
 
 # The Python toolchain, in the order the ladder reads them.
 PYTHON_MARKERS = ("uv.lock", "requirements-dev.txt", "pyproject.toml")
+
+# Set in the environment of a runner re-run under the tree's `.venv`: a venv that still
+# lacks the module must fail there, not send the run round again.
+RERUN_ENV = "DEVKIT_TOOLCHAIN_RERUN"
+
+# Lines of a failed install's output shown with the command, enough for uv's resolver
+# error and not the whole download log above it.
+INSTALL_TAIL_LINES = 20
+
+# A manifest `install_command` holding any of these needs a shell, which provisioning
+# does not start; `worktree_env.SHELL_SYNTAX` draws the same line for the git hook.
+SHELL_SYNTAX = frozenset("&|;<>$`'\"*?()\\%^\n")
+# Spellings of "the interpreter" in an install step, run as this one instead.
+PYTHON_NAMES = frozenset({"python", "python3"})
+
+Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 @dataclass(frozen=True)
@@ -62,7 +93,7 @@ class Gap:
         return f"{self.what} (fix: {self.fix})"
 
 
-def venv_command(python_version: str = "") -> str:
+def venv_argv(python_version: str = "") -> tuple[str, ...]:
     """How to create `.venv` -- on the pinned interpreter when the manifest names one.
 
     `python -m venv` can only copy the interpreter running it, which is the workstation
@@ -70,25 +101,61 @@ def venv_command(python_version: str = "") -> str:
     and fetches it when the machine has none.
     """
     if python_version:
-        return f"uv venv --python {python_version} .venv"
-    return "python -m venv .venv"
+        return ("uv", "venv", "--python", python_version, ".venv")
+    return ("python", "-m", "venv", ".venv")
+
+
+def venv_command(python_version: str = "") -> str:
+    """`venv_argv` as the line a person types."""
+    return shlex.join(venv_argv(python_version))
+
+
+def python_steps(root: Path, python_version: str = "") -> tuple[tuple[str, ...], ...]:
+    """The ladder's install, one argv per step; () when no dependency file says how.
+
+    Argv rather than a shell line because `provision_python` runs them, and a shell in
+    between differs by platform: `cmd.exe` hands a single-quoted `'.[dev]'` to uv as
+    part of the requirement.
+    """
+    if (root / "uv.lock").is_file():
+        pin = ("--python", python_version) if python_version else ()
+        return (("uv", "sync", "--all-extras", "--all-groups", *pin),)
+    if (root / "requirements-dev.txt").is_file():
+        locks = ["-r", "requirements-dev.txt"]
+        if (root / "requirements.txt").is_file():
+            locks = ["-r", "requirements.txt", *locks]
+        return (venv_argv(python_version), ("uv", "pip", "install", *locks))
+    if (root / "pyproject.toml").is_file():
+        return (venv_argv(python_version), ("uv", "pip", "install", "-e", ".[dev]"))
+    return ()
 
 
 def python_fix(root: Path, install_command: str = "", python_version: str = "") -> str:
     """The command that provisions the Python toolchain here, or "" when nothing says how."""
     if install_command:
         return install_command
-    if (root / "uv.lock").is_file():
-        pin = f" --python {python_version}" if python_version else ""
-        return f"uv sync --all-extras --all-groups{pin}"
-    if (root / "requirements-dev.txt").is_file():
-        locks = "-r requirements-dev.txt"
-        if (root / "requirements.txt").is_file():
-            locks = f"-r requirements.txt {locks}"
-        return f"{venv_command(python_version)} && uv pip install {locks}"
-    if (root / "pyproject.toml").is_file():
-        return f"{venv_command(python_version)} && uv pip install -e '.[dev]'"
-    return ""
+    return " && ".join(shlex.join(step) for step in python_steps(root, python_version))
+
+
+def install_argvs(
+    root: Path, install_command: str = "", python_version: str = ""
+) -> tuple[tuple[str, ...], ...]:
+    """`python_fix` as steps this interpreter can run with no shell; () when it cannot.
+
+    A manifest `install_command` is a shell string by contract, and one that needs a
+    shell -- `&&`, a redirect, a quote -- is left to the person the reports name it to.
+    `python` is this interpreter, as `worktree_env.plain_argv` has it: whatever the name
+    resolves to on `PATH` is the interpreter that was just found to be lacking.
+    """
+    if install_command:
+        if SHELL_SYNTAX & set(install_command) or not install_command.split():
+            return ()
+        steps: tuple[tuple[str, ...], ...] = (tuple(install_command.split()),)
+    else:
+        steps = python_steps(root, python_version)
+    return tuple(
+        (sys.executable, *step[1:]) if step[0].lower() in PYTHON_NAMES else step for step in steps
+    )
 
 
 def frontend_fix(root: Path, frontend_dir: str) -> str:
@@ -160,6 +227,116 @@ def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> t
                 )
             )
     return tuple(gaps)
+
+
+def venv_python(root: Path) -> Path:
+    """The interpreter inside `root`'s `.venv`, spelled for this platform."""
+    if os.name == "nt":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+def has_module(module: str) -> bool:
+    """Whether this interpreter can import `module`, without importing it."""
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def provision_python(
+    root: Path, cfg: harness_config.Config | None = None, run: Runner = subprocess.run
+) -> bool:
+    """Install `root`'s Python toolchain with the command `missing_toolchain` names.
+
+    True when every step ran clean and left an interpreter in `.venv`. Says what it is
+    doing on stderr, because a run that goes quiet for a minute reads as a hang. Not
+    attempted, with the reason printed, when a path dependency the tree cannot see would
+    fail `uv sync` with a message naming the path and not the reason, or when the
+    manifest's `install_command` needs a shell (`install_argvs`).
+    """
+    config = harness_config.load(root) if cfg is None else cfg
+    blockers = missing_path_sources(root)
+    for gap in blockers:
+        print(f"toolchain: cannot provision .venv: {gap.line}", file=sys.stderr)
+    fix = python_fix(root, config.python.install_command, config.python.version)
+    steps = install_argvs(root, config.python.install_command, config.python.version)
+    if fix and not steps:
+        print(f"toolchain: {fix} needs a shell; run it yourself", file=sys.stderr)
+    if blockers or not steps:
+        return False
+    print(f"toolchain: no .venv here; provisioning it: {fix}", file=sys.stderr)
+    for step in steps:
+        try:
+            done = run(
+                list(step),
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError as exc:
+            print(f"toolchain: could not run {step[0]} ({type(exc).__name__})", file=sys.stderr)
+            return False
+        if done.returncode != 0:
+            tail = "\n".join(
+                ((done.stdout or "") + (done.stderr or "")).splitlines()[-INSTALL_TAIL_LINES:]
+            )
+            print(
+                f"toolchain: {shlex.join(step)} exited {done.returncode}:\n{tail}", file=sys.stderr
+            )
+            return False
+    return venv_python(root).is_file()
+
+
+def rerun_target(
+    root: Path,
+    module: str,
+    env: Mapping[str, str] | None = None,
+    run: Runner = subprocess.run,
+) -> Path | None:
+    """The tree's `.venv` interpreter to re-run a runner under, or None to carry on here.
+
+    None while this interpreter has `module` -- the runner already works, and this
+    changes nothing about it -- and inside a re-run. Otherwise the tree's `.venv`,
+    provisioned first when it is missing. CI never provisions: its environment is the
+    workflow's to build, and an install there would hide a broken setup step.
+    """
+    environ = os.environ if env is None else env
+    if environ.get(RERUN_ENV) or has_module(module):
+        return None
+    target = venv_python(root)
+    if not target.is_file() and (environ.get("CI") or not provision_python(root, run=run)):
+        return None
+    return target
+
+
+def rerun_in_venv(
+    root: Path,
+    module: str,
+    script: Path,
+    argv: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    run: Runner = subprocess.run,
+) -> int | None:
+    """Run `script` again under the tree's `.venv` when this interpreter lacks `module`.
+
+    The exit code of that run, or None when the caller should carry on itself -- see
+    `rerun_target`. The re-run's streams are the caller's own, so its status line and
+    artifact path reach the terminal exactly as a direct run's would.
+    """
+    environ = dict(os.environ if env is None else env)
+    target = rerun_target(root, module, environ, run)
+    if target is None:
+        return None
+    print(
+        f"toolchain: this interpreter has no {module}; re-running under {target}", file=sys.stderr
+    )
+    environ[RERUN_ENV] = "1"
+    done = run([str(target), str(script), *argv], cwd=root, env=environ, check=False)
+    return done.returncode
 
 
 def main(argv: list[str] | None = None) -> int:

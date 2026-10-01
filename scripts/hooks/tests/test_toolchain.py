@@ -10,6 +10,7 @@ own test modules, and what is pinned here is the detection those two now share.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -264,3 +265,238 @@ def test_a_root_that_cannot_be_read_is_reported_to_stderr_not_raised(tmp_path, m
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "OSError" in captured.err
+
+
+# --- provisioning a runner's tree: `rerun_in_venv` -------------------------------------
+
+
+class FakeRun:
+    """Records each command. An install step (its output captured) creates the venv
+    interpreter unless told otherwise; the re-run itself, whose streams are the caller's,
+    exits 7 so its code is traceable."""
+
+    def __init__(self, root: Path, returncode: int = 0, output: str = "", make_venv: bool = True):
+        self.root = root
+        self.returncode = returncode
+        self.output = output
+        self.make_venv = make_venv
+        self.calls: list[tuple[object, dict]] = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append((cmd, kwargs))
+        if not kwargs.get("capture_output"):
+            return subprocess.CompletedProcess(cmd, 7, "", "")
+        if self.returncode == 0 and self.make_venv:
+            python = tc.venv_python(self.root)
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, self.returncode, self.output, "")
+
+
+ABSENT = "definitely_not_an_installed_module"
+LOCKED = {"uv.lock": "", "pyproject.toml": PYPROJECT}
+
+
+def test_the_venv_interpreter_is_spelled_for_the_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(tc.os, "name", "nt")
+    assert tc.venv_python(tmp_path) == tmp_path / ".venv" / "Scripts" / "python.exe"
+    monkeypatch.setattr(tc.os, "name", "posix")
+    assert tc.venv_python(tmp_path) == tmp_path / ".venv" / "bin" / "python"
+
+
+def test_has_module_answers_without_importing():
+    assert tc.has_module("json")
+    assert not tc.has_module(ABSENT)
+    # A dotted name whose parent is absent raises inside find_spec; that is a "no".
+    assert not tc.has_module(f"{ABSENT}.child")
+
+
+def test_provisioning_runs_the_named_command_in_the_tree(tmp_path, capsys):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert tc.provision_python(root, run=run)
+    [(cmd, kwargs)] = run.calls
+    assert cmd == ["uv", "sync", "--all-extras", "--all-groups"]
+    assert kwargs["cwd"] == root
+    assert not kwargs.get("shell"), "argv, so no platform shell re-reads the quoting"
+    assert "provisioning it: uv sync" in capsys.readouterr().err
+
+
+def test_a_two_step_ladder_runs_in_order_and_stops_at_a_failure(tmp_path):
+    root = _checkout(tmp_path, {"pyproject.toml": PYPROJECT})
+    run = FakeRun(root)
+    assert tc.provision_python(root, run=run)
+    assert [cmd for cmd, _ in run.calls] == [
+        [sys.executable, "-m", "venv", ".venv"],
+        ["uv", "pip", "install", "-e", ".[dev]"],
+    ]
+    failing = FakeRun(root, returncode=1)
+    assert not tc.provision_python(root, run=failing)
+    assert len(failing.calls) == 1
+
+
+def test_the_manifest_install_command_is_what_provisioning_runs(tmp_path):
+    """carameli installs pip-tools locks through its own bootstrap, not `uv sync`; its
+    `python` is this interpreter, not whatever lacks the module on `PATH`."""
+    manifest = '[python]\ninstall_command = "python boot.py"\n'
+    root = _checkout(tmp_path, {"requirements-dev.txt": "", ".devkit.toml": manifest})
+    run = FakeRun(root)
+    assert tc.provision_python(root, run=run)
+    assert run.calls[0][0] == [sys.executable, "boot.py"]
+
+
+def test_an_install_command_that_needs_a_shell_is_named_not_run(tmp_path, capsys):
+    manifest = '[python]\ninstall_command = "make venv && make deps"\n'
+    root = _checkout(tmp_path, {"pyproject.toml": PYPROJECT, ".devkit.toml": manifest})
+    run = FakeRun(root)
+    assert not tc.provision_python(root, run=run)
+    assert run.calls == []
+    assert "make venv && make deps needs a shell" in capsys.readouterr().err
+
+
+def test_venv_argv_takes_the_pin_through_uv_and_the_default_through_python():
+    assert tc.venv_argv("3.12") == ("uv", "venv", "--python", "3.12", ".venv")
+    assert tc.venv_argv() == ("python", "-m", "venv", ".venv")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param("python boot.py", ((sys.executable, "boot.py"),), id="python-is-this-one"),
+        pytest.param("uv sync --frozen", (("uv", "sync", "--frozen"),), id="plain-verbatim"),
+        pytest.param("make a && make b", (), id="needs-a-shell"),
+        pytest.param("pip install -r 'x y.txt'", (), id="quoted"),
+        pytest.param("   ", (), id="blank"),
+    ],
+)
+def test_install_argvs_runs_a_plain_install_command_and_refuses_shell_syntax(
+    tmp_path, command, expected
+):
+    root = _checkout(tmp_path, LOCKED)
+    assert tc.install_argvs(root, install_command=command) == expected
+
+
+def test_install_argvs_without_a_command_is_the_ladder_on_this_interpreter(tmp_path):
+    root = _checkout(tmp_path, {"pyproject.toml": PYPROJECT})
+    assert tc.install_argvs(root) == (
+        (sys.executable, "-m", "venv", ".venv"),
+        ("uv", "pip", "install", "-e", ".[dev]"),
+    )
+    (tmp_path / "empty").mkdir()
+    assert tc.install_argvs(_checkout(tmp_path / "empty", {})) == ()
+
+
+@pytest.mark.parametrize(
+    ("files", "count"),
+    [
+        pytest.param(LOCKED, 1, id="uv-lock"),
+        pytest.param({"requirements-dev.txt": "", "requirements.txt": ""}, 2, id="locks"),
+        pytest.param({"pyproject.toml": PYPROJECT}, 2, id="unlocked"),
+    ],
+)
+def test_install_steps_are_the_displayed_fix(tmp_path, files, count):
+    """One ladder: the line the reports print is the steps provisioning runs."""
+    root = _checkout(tmp_path, files)
+    steps = tc.python_steps(root, "3.12")
+    assert len(steps) == count
+    assert " && ".join(shlex.join(s) for s in steps) == tc.python_fix(root, python_version="3.12")
+
+
+def test_a_failed_install_prints_the_command_and_its_tail(tmp_path, capsys):
+    root = _checkout(tmp_path, LOCKED)
+    noise = "\n".join(f"line {n}" for n in range(100))
+    assert not tc.provision_python(root, run=FakeRun(root, returncode=2, output=noise))
+    err = capsys.readouterr().err
+    assert "exited 2" in err
+    assert "line 99" in err
+    assert "line 50" not in err, "only the tail, not the whole download log"
+
+
+def test_an_install_that_leaves_no_interpreter_is_not_a_success(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    assert not tc.provision_python(root, run=FakeRun(root, make_venv=False))
+
+
+def test_an_installer_that_cannot_start_is_reported_not_raised(tmp_path, capsys):
+    root = _checkout(tmp_path, LOCKED)
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError("uv")
+
+    assert not tc.provision_python(root, run=missing)
+    assert "FileNotFoundError" in capsys.readouterr().err
+
+
+def test_nothing_to_install_from_runs_nothing(tmp_path):
+    root = _checkout(tmp_path, {})
+    run = FakeRun(root)
+    assert not tc.provision_python(root, run=run)
+    assert run.calls == []
+
+
+def test_a_missing_path_dependency_is_named_instead_of_attempting_the_sync(tmp_path, capsys):
+    pyproject = PYPROJECT + '[tool.uv.sources]\nlake = { path = "../lake", editable = true }\n'
+    root = _checkout(tmp_path, {"uv.lock": "", "pyproject.toml": pyproject})
+    run = FakeRun(root)
+    assert not tc.provision_python(root, run=run)
+    assert run.calls == []
+    assert "../lake is not here" in capsys.readouterr().err
+
+
+def test_an_interpreter_that_has_the_module_carries_on_untouched(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=run) is None
+    assert run.calls == []
+
+
+def test_an_existing_tree_venv_is_used_without_installing(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    python = tc.venv_python(root)
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    run = FakeRun(root)
+    assert tc.rerun_target(root, ABSENT, env={}, run=run) == python
+    assert run.calls == []
+
+
+def test_a_tree_with_no_venv_is_provisioned_then_used(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, ABSENT, env={}, run=run) == tc.venv_python(root)
+    assert len(run.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "env", [{"CI": "true"}, {tc.RERUN_ENV: "1"}], ids=["ci-builds-its-own", "already-a-rerun"]
+)
+def test_ci_and_a_rerun_never_provision(tmp_path, env):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, ABSENT, env=env, run=run) is None
+    assert run.calls == []
+
+
+def test_a_failed_provision_leaves_the_runner_to_carry_on(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    assert tc.rerun_target(root, ABSENT, env={}, run=FakeRun(root, returncode=1)) is None
+
+
+def test_the_rerun_is_the_same_script_and_arguments_marked_as_a_rerun(tmp_path, capsys):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    script = root / "scripts" / "run-tests.py"
+    code = tc.rerun_in_venv(root, ABSENT, script, ["--all", "-k", "x"], env={"KEEP": "1"}, run=run)
+    assert code == 7, "the re-run's own exit code is the caller's"
+    cmd, kwargs = run.calls[-1]
+    assert cmd == [str(tc.venv_python(root)), str(script), "--all", "-k", "x"]
+    assert kwargs["cwd"] == root
+    assert kwargs["env"] == {"KEEP": "1", tc.RERUN_ENV: "1"}
+    assert f"no {ABSENT}; re-running under" in capsys.readouterr().err
+
+
+def test_no_rerun_returns_none_and_runs_nothing(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert tc.rerun_in_venv(root, "json", root / "x.py", [], env={}, run=run) is None
+    assert run.calls == []

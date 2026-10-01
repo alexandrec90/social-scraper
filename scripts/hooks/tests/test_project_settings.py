@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from conftest import load_module
 
 ps = load_module("scripts/project_settings.py")
@@ -185,6 +186,110 @@ def test_devkit_and_the_template_carry_the_agent_shell_env():
             assert f'"{key}": "{value}"' in text, (path.name, key)
 
 
+# --- the dependency directories a `claude --worktree` tree borrows ---------------
+# Claude Code's git runs with hooks off, so a roguelike session's tree had no
+# `node_modules` until it ran `npm ci` by hand (98fd1f9c).
+
+
+VIRTUAL_PROJECT = "[tool.uv]\npackage = false\n"
+EDITABLE_PROJECT = '[build-system]\nrequires = ["setuptools"]\n'
+
+
+def test_the_pull_links_the_venv_and_each_node_modules_a_manifest_names(tmp_path):
+    root = _project(tmp_path, {"env": _env()})
+    _seed(root, "pyproject.toml", VIRTUAL_PROJECT)
+    for rel in ("package.json", "frontend/package.json"):
+        _seed(root, rel, "{}")
+    assert ps.settings_pass(root) == [
+        f"(worktree links) {ps.SETTINGS_FILE}: .venv, node_modules, frontend/node_modules"
+    ]
+    assert _settings(root)["worktree"] == {
+        "symlinkDirectories": [".venv", "node_modules", "frontend/node_modules"]
+    }
+    assert ps.settings_pass(root) == []
+
+
+def test_a_project_that_installs_itself_builds_its_own_venv_but_links_node_modules(tmp_path):
+    """An editable install points the checkout's venv at the checkout's `src/`: borrowed,
+    it would run the checkout's code from inside the tree, so the tests test the wrong
+    branch. `rerun_in_venv` builds such a tree its own `.venv` instead."""
+    root = _project(tmp_path, {"env": _env()})
+    _seed(root, "pyproject.toml", EDITABLE_PROJECT)
+    _seed(root, "package.json", "{}")
+    assert ps.settings_pass(root) == [f"(worktree links) {ps.SETTINGS_FILE}: node_modules"]
+    assert _settings(root)["worktree"] == {"symlinkDirectories": ["node_modules"]}
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "borrows"),
+    [
+        (VIRTUAL_PROJECT, True),
+        (EDITABLE_PROJECT, False),
+        ("[project]\nname = 'x'\n", True),  # no build system: uv installs nothing
+        ("[tool.uv]\npackage = true\n", False),
+        (EDITABLE_PROJECT + "[tool.uv]\npackage = false\n", True),  # the setting wins
+        ("tool = 1\n", True),  # an odd `tool` table is not a package declaration
+        ("{}", False),  # will not parse: nothing can say what it installs
+    ],
+)
+def test_the_venv_is_borrowed_only_where_uv_installs_no_package(tmp_path, pyproject, borrows):
+    _seed(tmp_path, "pyproject.toml", pyproject)
+    assert ps.borrows_venv(tmp_path) is borrows
+
+
+def test_a_project_with_no_pyproject_borrows_no_venv(tmp_path):
+    assert ps.borrows_venv(tmp_path) is False
+
+
+def test_a_project_with_no_manifest_gets_no_links_and_no_write(tmp_path):
+    original = json.dumps({"env": _env()})
+    root = _project(tmp_path, original)
+    assert ps.dependency_dirs(root) == []
+    assert ps.settings_pass(root) == []
+    assert (root / ps.SETTINGS_FILE).read_text(encoding="utf-8") == original
+
+
+def test_a_manifest_inside_a_dependency_or_hidden_dir_is_not_a_project_of_its_own(tmp_path):
+    for rel in ("node_modules/package.json", ".cache/package.json", "a/b/package.json"):
+        _seed(tmp_path, rel, "{}")
+    assert ps.dependency_dirs(tmp_path) == []
+
+
+def test_links_the_project_listed_are_kept_first_and_not_repeated(tmp_path):
+    _seed(tmp_path, "pyproject.toml", "")
+    _seed(tmp_path, "package.json", "{}")
+    tree = {"worktree": {"symlinkDirectories": [".cache", ".venv"], "other": 1}}
+    updated, added = ps.with_worktree_links(tree, tmp_path)
+    assert added == ["node_modules"]
+    assert updated == {
+        "worktree": {"symlinkDirectories": [".cache", ".venv", "node_modules"], "other": 1}
+    }
+    assert tree["worktree"]["symlinkDirectories"] == [".cache", ".venv"]
+
+
+def test_a_worktree_block_of_the_wrong_shape_is_left_alone(tmp_path):
+    _seed(tmp_path, "pyproject.toml", "")
+    for tree in ({"worktree": "no"}, {"worktree": {"symlinkDirectories": "no"}}, None):
+        assert ps.with_worktree_links(tree, tmp_path) == (tree, [])
+
+
+def test_devkit_links_the_venv_and_the_template_does_not():
+    """devkit installs no package, so its trees borrow; a generated project installs itself
+    editable, so its trees build their own `.venv` and its template links nothing."""
+    repo = Path(__file__).resolve().parents[3]
+    template = repo / "templates/core/dot-claude/settings.json.tmpl"
+    if not template.is_file():
+        return  # a consumer: its settings are its own, and `--pull` fills them in
+    assert ps.borrows_venv(repo)
+    assert '"symlinkDirectories": [".venv"]' in (repo / ".claude/settings.json").read_text(
+        encoding="utf-8"
+    )
+    assert "[build-system]" in (repo / "templates/core/pyproject.toml.tmpl").read_text(
+        encoding="utf-8"
+    )
+    assert "symlinkDirectories" not in template.read_text(encoding="utf-8")
+
+
 def _git_bash() -> Path | None:
     """Git for Windows' own `bash.exe`, never WSL's `System32\\bash.exe`."""
     git = shutil.which("git")
@@ -245,3 +350,9 @@ def test_a_stale_codex_mirror_is_still_a_check_fault(tmp_path):
     ((label, message),) = notes
     assert "STALE" in message
     assert ps.check_summary(notes) == label
+
+
+def test_only_a_retired_python_script_can_be_a_retired_hook_command():
+    retired = ("scripts/hooks/old.py", "README.md", ".claude/skills/x/SKILL.md", "scripts/x.sh")
+    assert ps.retired_hook_paths(retired) == ("scripts/hooks/old.py",)
+    assert ps.retired_hook_paths(()) == ()
