@@ -22,6 +22,7 @@ it is the defect the devkit-only ancestor of this gate shipped with and had to f
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from pathlib import Path
 
@@ -402,6 +403,75 @@ def test_a_stand_in_does_not_hide_a_real_reference_in_the_same_file(tmp_path):
         assert us.gaps(tmp_path, config(sources=["src"])) == [], reaching
 
 
+def test_a_call_on_a_module_loaded_by_path_vouches_only_for_that_module(tmp_path):
+    """1a0918d0: `installer.runner_script()`, with `installer` loaded from
+    install-collectors.py, sat in a file whose other test loads install-global-tools.py
+    into the same local name, and read as coverage of install-global-tools.py's
+    `runner_script`. The ratchet demanded that baseline line be deleted as "now covered",
+    and the reporter renamed a new function to get past it."""
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    tests = (
+        "def test_acme():\n    tool = load('src/acme-tool.py')\n    tool.alpha()\n\n\n"
+        "def test_other():\n    tool = load('src/other-tool.py')\n    tool.beta()\n"
+    )
+    write(tmp_path, "tests/test_tools.py", tests)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/other-tool.py::alpha"]
+
+
+def test_a_module_level_load_binds_its_name_in_every_test_that_does_not_rebind_it(tmp_path):
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n")
+    tests = (
+        "acme = load('src/acme-tool.py')\nother = load('src/other-tool.py')\n\n\n"
+        "def test_it():\n    acme.alpha()\n"
+    )
+    write(tmp_path, "tests/test_tools.py", tests)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/other-tool.py::alpha"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "def test_it(tool):\n    tool.alpha()\n",  # a fixture: which module is not written here
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    tool = wrap(tool)\n"
+        "    tool.alpha()\n",  # also bound some other way
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    x.tool.alpha()\n",  # not the name
+        "def test_it():\n    tool = load('src/acme-tool.py')\n    alpha()\n",  # a bare call
+    ],
+)
+def test_a_receiver_the_file_does_not_bind_by_path_vouches_as_before(tmp_path, body):
+    """Narrowed only where the file itself says which module a name is. Anything else
+    keeps vouching for every module the file names -- the gate's no-false-negative
+    claim is about gaps, and a false gap fails new, tested code."""
+    write(tmp_path, "src/acme-tool.py", "def beta():\n    pass\n")
+    write(tmp_path, "src/other-tool.py", "def alpha():\n    pass\n")
+    loads = "def test_load():\n    load('src/acme-tool.py').beta()\n    load('src/other-tool.py')\n"
+    write(tmp_path, "tests/test_tools.py", loads + "\n\n" + body)
+    assert us.gaps(tmp_path, config(sources=["src"])) == [], body
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("t = load('s/a-b.py')\nt.alpha()\n", {"alpha": {"a-b.py"}}),
+        ('t = load(r"s\\\\a.py")\nt.alpha()\nt.alpha\n', {"alpha": {"a.py"}}),
+        (
+            "def f():\n    t = load('a.py')\n    t.x()\n\ndef g():\n    t = load('b.py')\n    t.x()\n",
+            {"x": {"a.py", "b.py"}},
+        ),
+        ("def f():\n    t = load('a.py')\n    t.x()\n\ndef g(t):\n    t.x()\n", {}),
+        ("t = load('a.py')\nt.x()\nu.x()\n", {}),
+        ("t = load('a.py')\nt.x()\nfrom m import x\n", {}),
+        ("t: object = load('a.py')\nt.x()\n", {"x": {"a.py"}}),
+        ("t = load('a.py')\nt == 1\nt.x()\n", {"x": {"a.py"}}),
+    ],
+)
+def test_attributes_by_module_reads_only_receivers_a_loader_bound(text, expected):
+    found = us.attributes_by_module(text)
+    assert found == {name: frozenset(files) for name, files in expected.items()}
+
+
 @pytest.mark.parametrize(
     "text, expected",
     [
@@ -535,6 +605,51 @@ def test_a_seeded_project_starts_clean(tmp_path):
     assert us.verdict(tmp_path, cfg) == ([], [])
 
 
+# --- reconcile ----------------------------------------------------------------
+
+
+def test_reconcile_drops_what_a_pull_covered_and_records_what_it_revealed(tmp_path):
+    """#464's upgrade: a vendored test covered a baselined `main`, and the narrowed
+    scanner stopped reading `ship.changed_paths()` as coverage of a sibling's
+    `changed_paths`. The project had touched neither, and both reddened its gate."""
+    write(tmp_path, "src/acme.py", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    write(tmp_path, "tests/test_acme.py", "acme.alpha()")
+    write(tmp_path, us.BASELINE_NAME, "src/acme.py::alpha\n")
+    cfg = config(sources=["src"])
+    assert us.reconcile(tmp_path, cfg, before=set()) == (1, 1)
+    assert us.read_baseline(us.baseline_path(tmp_path)) == ["src/acme.py::beta"]
+    assert us.verdict(tmp_path, cfg) == ([], [])
+    assert b"\r\n" not in us.baseline_path(tmp_path).read_bytes()
+
+
+def test_reconcile_never_records_debt_the_project_made(tmp_path):
+    """`seed`'s refusal, kept: a gap the pre-pull scanner already reported is the
+    project's own, as is any in a file it has uncommitted edits to, and an unknown
+    `before` vouches for nothing. The gate still names all three."""
+    write(tmp_path, "src/acme.py", "def alpha():\n    pass\n")
+    write(tmp_path, "src/wip.py", "def beta():\n    pass\n")
+    write(tmp_path, us.BASELINE_NAME, "")
+    cfg = config(sources=["src"])
+    held = frozenset({"src/wip.py"})
+    assert us.reconcile(tmp_path, cfg, before={"src/acme.py::alpha"}, held=held) == (0, 0)
+    assert us.reconcile(tmp_path, cfg, before=None) == (0, 0)
+    assert us.read_baseline(us.baseline_path(tmp_path)) == []
+    assert us.verdict(tmp_path, cfg)[0] == ["src/acme.py::alpha", "src/wip.py::beta"]
+
+
+def test_reconcile_leaves_an_unadopted_project_alone(tmp_path):
+    write(tmp_path, "src/acme.py", "def alpha():\n    pass\n")
+    assert us.reconcile(tmp_path, config(sources=["src"]), before=set()) is None
+    assert not us.baseline_path(tmp_path).exists(), "adoption is `seed`'s, not this"
+
+
+def test_read_reconcile_input_keeps_an_unknown_before_unknown(tmp_path):
+    spec = write(tmp_path, "r.json", json.dumps({"before": None, "held": ["a.py"]}))
+    assert us.read_reconcile_input(spec) == (None, frozenset({"a.py"}))
+    write(tmp_path, "r.json", json.dumps({"before": ["a.py::x"]}))
+    assert us.read_reconcile_input(spec) == ({"a.py::x"}, frozenset())
+
+
 # --- verdict ------------------------------------------------------------------
 
 
@@ -607,6 +722,17 @@ def test_main_seed_refuses_rather_than_overwriting(project, capsys):
     write(root, us.BASELINE_NAME, "# empty\n")
     assert us.main(["--seed"]) == 1
     assert "refusing to overwrite" in capsys.readouterr().out
+
+
+def test_main_reconcile_reads_its_input_and_reports_both_counts(project, capsys):
+    root = project(sources=["src"])
+    write(root, "src/acme.py", "def alpha():\n    pass\n")
+    spec = write(root, "r.json", json.dumps({"before": [], "held": []}))
+    assert us.main(["--reconcile", str(spec)]) == 1, "no baseline is nothing to reconcile"
+    assert "no .devkit-untested.txt" in capsys.readouterr().out
+    write(root, us.BASELINE_NAME, "")
+    assert us.main(["--reconcile", str(spec)]) == 0
+    assert "dropped 0 covered line(s), recorded 1 gap(s)" in capsys.readouterr().out
 
 
 def test_main_list_prints_every_gap_regardless_of_the_baseline(project, capsys):

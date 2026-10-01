@@ -38,11 +38,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -935,6 +938,109 @@ def seed_untested_baseline(root: Path) -> int | None:
     return len(read_untested_baseline(root))
 
 
+def reconcile_untested_baseline(root: Path, manifest: tuple[str, ...]) -> tuple[int, int] | None:
+    """Carry an adopted untested baseline across this pull. `(dropped, recorded)`, or `None`.
+
+    The seed's mirror for every later pull, as `tighten_structure_baseline` is for the
+    structure ratchet. A release moves the gaps under a project that did nothing: a new
+    vendored test covers a baselined symbol, which the vendored gate then demands be
+    deleted as "now covered"; or the scanner stops counting a reference that never
+    exercised the symbol it named, and a function the project has never tested reads as
+    new debt. #464 did both at once, and the upgrade rehearsal went red on files the
+    project had not touched.
+
+    The scanner drops the covered lines, and records a gap only if HEAD's own scanner,
+    run on HEAD's own tree (`pre_pull_gaps`), did not report it and the project has no
+    uncommitted edit to its file: what is left is exactly what the pull did. Anything
+    unknowable -- no git, no HEAD, a HEAD predating `--list` -- records nothing and only
+    drops, so the gate still reports every symbol the project itself left untested.
+    """
+    script = root / "scripts/hooks/untested_symbols.py"
+    if not script.is_file() or not (root / UNTESTED_BASELINE_FILE).is_file():
+        return None
+    before = pre_pull_gaps(root)
+    held = sorted(uncommitted_paths(root) - set(manifest)) if before is not None else []
+    recorded = set(read_untested_baseline(root))
+    with tempfile.TemporaryDirectory(prefix="devkit-reconcile-") as tmp:
+        spec = Path(tmp) / "reconcile.json"
+        payload = {"before": None if before is None else sorted(before), "held": held}
+        spec.write_text(json.dumps(payload), encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [console_python(), str(script), "--reconcile", str(spec)],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                creationflags=NO_WINDOW,
+            )
+        except OSError:
+            return None
+    if result.returncode != 0:
+        return None
+    after = set(read_untested_baseline(root))
+    return len(recorded - after), len(after - recorded)
+
+
+def pre_pull_gaps(root: Path) -> set[str] | None:
+    """The gaps HEAD's own scanner reports on HEAD's own tree, or `None` if unknowable.
+
+    HEAD, not the working tree, because by the pull that runs this the tree is already
+    the release's: `sync-devkit.py` is in the MANIFEST, so the first pull ran the old
+    copy and this one runs the copy it delivered. A consumer commits its adoption after
+    both, which leaves HEAD as the last state the project's own gate judged. Extracted
+    with `git archive`, so nothing is registered in the project's repo.
+
+    Only at the repo's top: nested in a larger repo, HEAD's tree is the outer one, whose
+    paths match no entry here -- every gap would then read as the pull's to record.
+    """
+    if _git_out(root, "rev-parse", "--show-prefix"):
+        return None
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(root), "archive", "--format=tar", "HEAD"],
+            capture_output=True,
+            timeout=120,
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if archive.returncode != 0:
+        return None
+    with tempfile.TemporaryDirectory(prefix="devkit-pre-pull-") as tmp:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+                tar.extractall(tmp, filter="data")
+        except (tarfile.TarError, OSError):
+            return None
+        script = Path(tmp) / "scripts/hooks/untested_symbols.py"
+        if not script.is_file():
+            return None
+        try:
+            listed = subprocess.run(
+                [console_python(), str(script), "--list"],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, "PYTHONUTF8": "1"},
+                timeout=600,
+                creationflags=NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    if listed.returncode != 0:
+        return None
+    return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
+
+
+def uncommitted_paths(root: Path) -> set[str]:
+    """Every path with an uncommitted change or untracked, posix and repo-relative."""
+    changed = _git_out(root, "diff", "--name-only", "-z", "HEAD") or ""
+    untracked = _git_out(root, "ls-files", "--others", "--exclude-standard", "-z") or ""
+    return {path for path in (changed + "\0" + untracked).split("\0") if path}
+
+
 # The structural ratchet's twin of the file above, on the same terms: never vendored,
 # shared name so a pull can tell adoption from a repeat.
 STRUCTURE_BASELINE_FILE = ".devkit-structure.txt"
@@ -1285,6 +1391,7 @@ class SyncOutcome:
     seeded_structure: int | None
     tightened: tuple[int, int] | None
     pull: bool
+    reconciled: tuple[int, int] | None = None
 
 
 def copy_manifest(
@@ -1361,6 +1468,7 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     # After the seed, on every pull that did not just seed: a fresh baseline is exact
     # by construction, and an adopted one holds whatever the last release earned.
     tightened = tighten_structure_baseline(REPO_ROOT) if seeded_structure is None else None
+    reconciled = reconcile_untested_baseline(REPO_ROOT, manifest) if seeded is None else None
     finalise_pull(src, manifest)
     return SyncOutcome(
         copied=copied,
@@ -1376,6 +1484,7 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
         seeded_structure=seeded_structure,
         tightened=tightened,
         pull=True,
+        reconciled=reconciled,
     )
 
 
@@ -1451,6 +1560,14 @@ def report_sync(outcome: SyncOutcome) -> None:
             f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
             f"{outcome.tightened[0]} line(s) the code no longer earns, lowered "
             f"{outcome.tightened[1]}"
+        )
+    if outcome.reconciled and any(outcome.reconciled):
+        # Named for the tighten's reason, and because a recorded gap is debt the pull
+        # wrote down on the project's behalf: the adoption diff is where to question it.
+        print(
+            f"  (reconciled the untested-symbol ratchet) {UNTESTED_BASELINE_FILE}: dropped "
+            f"{outcome.reconciled[0]} line(s) now covered, recorded "
+            f"{outcome.reconciled[1]} gap(s) this pull revealed"
         )
 
 

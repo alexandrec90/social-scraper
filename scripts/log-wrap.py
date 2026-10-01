@@ -104,6 +104,11 @@ CAUSE_LINES = (
     (re.compile(r"^(?:error|fatal)\b", re.I), "last"),
 )
 CAUSE_WIDTH = 120
+# The same line unfolded rides beside it as `said=`, outside the signature: folding read
+# a transient `unable to access 'https://github.com/<owner>/<repo>.git/' ... error: 403`
+# as `'https:/<repo>.git/' ... error: N`, and the status that said
+# what happened cost a sweep a turn in the kept log to find (718f71c4).
+SAID_WIDTH = 300
 # What differs between two runs failing for one reason: where, which commit, how long.
 ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]([^\s'\"\\/:]+)")
 HEX_ID = re.compile(r"\b[0-9a-f]{7,40}\b")
@@ -184,11 +189,10 @@ def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
 
-def failure_cause(output: str) -> str:
-    """The line of a failed run's output that names why, with what varies run to run
-    (paths, shas, numbers) folded out -- so the same cause on two nights is one ledger
-    group and a different cause is another. The last line said when none looks like an
-    error; `""` for no output."""
+def cause_said(output: str) -> str:
+    """The line of a failed run's output that names why, as the run said it: the
+    exception, the first failed test or the `error:` line, else the last line; `""` for
+    no output. Colour stripped, whitespace folded, bounded by `SAID_WIDTH`."""
     lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
     found = lines[-1] if lines else ""
     for pattern, which in CAUSE_LINES:
@@ -196,7 +200,13 @@ def failure_cause(output: str) -> str:
         if hits:
             found = hits[0] if which == "first" else hits[-1]
             break
-    found = ABSOLUTE_PATH.sub(r"\1", found)
+    return " ".join(found.split())[:SAID_WIDTH]
+
+
+def failure_cause(output: str) -> str:
+    """`cause_said` with what varies run to run (paths, shas, numbers) folded out -- so
+    the same cause on two nights is one ledger group and a different cause is another."""
+    found = ABSOLUTE_PATH.sub(r"\1", cause_said(output))
     found = NUMBER.sub("N", HEX_ID.sub("<sha>", found))
     return " ".join(found.split())[:CAUSE_WIDTH]
 
@@ -403,7 +413,7 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             artifact_body(title, command, code, output, always, kept=True),
         )
         artifact = artifact_ref(name, kept=kept is not None)
-        record_failure(title, command, code, artifact, root, cause=failure_cause(output))
+        record_failure(title, command, code, artifact, root, output)
     return code
 
 
@@ -423,10 +433,10 @@ def record_failure(
     code: int,
     artifact: str,
     root: Path | None = None,
-    cause: str = "",
+    output: str = "",
 ) -> None:
     """Leave an unattended failure on the harness-events ledger, naming `artifact`
-    (`artifact_ref`) as the file that holds its output.
+    (`artifact_ref`) as the file that holds its `output`.
 
     Best-effort twice over. `harness_events` swallows its own errors by contract, and
     the import is guarded because this module is vendored into projects that may hold a
@@ -440,7 +450,9 @@ def record_failure(
     their own fields, where they do not disturb that grouping. `cause` (`failure_cause`)
     does, deliberately: `harness_triage.Item.signature` keys on it, so one cause failing
     nightly is one group and a new cause is a new one rather than a false recurrence.
+    `said` (`cause_said`) is that line unfolded, filed only where folding changed it.
     """
+    cause, said = failure_cause(output), cause_said(output)
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
         import harness_events
@@ -458,6 +470,7 @@ def record_failure(
             ("exit", code),
             ("message", f"unattended task {title!r} failed"),
             ("cause", cause or "-"),
+            *((("said", said),) if said and said != cause else ()),
         ),
         root=root,
     )

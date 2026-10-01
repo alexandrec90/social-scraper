@@ -490,6 +490,32 @@ def test_failure_cause_is_the_line_that_names_the_failure(output, cause):
 def test_failure_cause_strips_colour_and_is_bounded():
     assert lw.failure_cause("\x1b[31mValueError: bad\x1b[0m\n") == "ValueError: bad"
     assert len(lw.failure_cause("RuntimeError: " + "word " * 200)) <= lw.CAUSE_WIDTH
+    assert len(lw.cause_said("RuntimeError: " + "word " * 200)) <= lw.SAID_WIDTH
+
+
+PUSH_403 = (
+    "Pushing...\nfatal: unable to access 'https://github.com/someone/proj.git/': "
+    "The requested URL returned error: 403\n"
+)
+
+
+def test_the_cause_as_said_keeps_the_host_and_the_status_folding_drops():
+    """718f71c4: folding read this as `'https:/proj.git/' ... error: N`, and the 403 that
+    said what happened was only in the kept log."""
+    assert lw.cause_said(PUSH_403) == PUSH_403.splitlines()[1]
+    assert "403" not in lw.failure_cause(PUSH_403)
+    assert lw.cause_said("") == ""
+
+
+def test_a_failure_files_the_line_as_said_beside_its_folded_cause(tmp_path, monkeypatch):
+    ledger = _ledger(tmp_path, monkeypatch)
+    lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, PUSH_403), root=tmp_path)
+    lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, "KeyError: x\n"), root=tmp_path)
+
+    pushed, keyed = _fields(ledger)
+    assert "error: 403" in pushed["said"] and "github.com/someone" in pushed["said"]
+    assert pushed["cause"] == lw.failure_cause(PUSH_403)
+    assert "said" not in keyed, "nothing folded, so nothing said twice"
 
 
 def test_a_ledger_that_cannot_be_written_does_not_fail_the_job(tmp_path, monkeypatch):
