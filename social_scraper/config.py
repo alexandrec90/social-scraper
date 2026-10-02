@@ -53,7 +53,10 @@ class Settings(BaseSettings):
     # empty uses Playwright's bundled Chromium (`playwright install chromium`).
     browser_channel: str = "chrome"
     browser_headless: bool = False
-    # IANA zone for the X active-hours window; a human account does not post at 04:00.
+    # Launch the window off-screen and minimize it, so a cycle never takes the keyboard
+    # focus from whoever is using the desktop (`browser.py`). `login` always shows it.
+    browser_minimized: bool = True
+    # IANA zone for the active-hours windows; a human account does not post at 04:00.
     scraper_timezone: str = "America/Toronto"
 
     # --- symbols -----------------------------------------------------------------------
@@ -68,19 +71,25 @@ class Settings(BaseSettings):
     # --- reddit ------------------------------------------------------------------------
     reddit_subreddits: str = DEFAULT_SUBREDDITS
     reddit_ignore_authors: str = "AutoModerator,VisualMod"
-    reddit_min_delay_s: float = 6.0
-    reddit_max_delay_s: float = 14.0
-    reddit_hourly_budget: int = 240
-    reddit_daily_budget: int = 2000
+    # Paced for a machine that is on around the clock: ~25 loads a cycle at 15-40 s
+    # apart, well under the budgets, which are the ceiling rather than the pace.
+    reddit_min_delay_s: float = 15.0
+    reddit_max_delay_s: float = 40.0
+    reddit_hourly_budget: int = 90
+    reddit_daily_budget: int = 1000
+    # Reddit rests overnight too: a browser that never sleeps is not a person.
+    reddit_active_hours: str = "6-24"
     reddit_max_pages: int = 3
     reddit_refresh_hours: float = 6.0
 
     # --- x -----------------------------------------------------------------------------
-    x_min_delay_s: float = 35.0
-    x_max_delay_s: float = 90.0
-    x_hourly_budget: int = 20
-    x_daily_budget: int = 150
-    x_pages_per_cycle: int = 8
+    # 3 pages a cycle x 2 cycles an hour x 15 active hours = 90: the loop's own pace fits
+    # the daily budget, so it never runs dry mid-afternoon and bursts again at the reset.
+    x_min_delay_s: float = 60.0
+    x_max_delay_s: float = 180.0
+    x_hourly_budget: int = 8
+    x_daily_budget: int = 90
+    x_pages_per_cycle: int = 3
     x_scrolls_per_page: int = 3
     x_active_hours: str = "8-23"
     x_discovery_queries: str = DEFAULT_X_QUERIES
@@ -90,9 +99,11 @@ class Settings(BaseSettings):
     x_search_share: float = 0.4
 
     # --- shared throttle behaviour ------------------------------------------------------
-    backoff_base_minutes: float = 15.0
-    backoff_max_minutes: float = 360.0
-    block_cooldown_hours: float = 12.0
+    backoff_base_minutes: float = 30.0
+    backoff_max_minutes: float = 720.0
+    block_cooldown_hours: float = 24.0
+    # Each consecutive challenge doubles the cooldown, up to this.
+    block_cooldown_max_hours: float = 96.0
 
     # --- loop --------------------------------------------------------------------------
     cycle_minutes: float = 30.0
@@ -124,6 +135,10 @@ class Settings(BaseSettings):
     @property
     def x_hours(self) -> tuple[int, int] | None:
         return parse_hours(self.x_active_hours)
+
+    @property
+    def reddit_hours(self) -> tuple[int, int] | None:
+        return parse_hours(self.reddit_active_hours)
 
     def profile_dir(self, platform: str) -> Path:
         """One browser profile per platform, so an X ban cannot touch the Reddit login."""

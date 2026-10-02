@@ -40,6 +40,7 @@ def test_list_properties_parse_their_strings():
         x_seed_accounts="@one,two",
         symbol_extra_files="a.txt,b.txt",
         x_active_hours="9-17",
+        reddit_active_hours="",
     )
     assert s.subreddits == ("stocks", "investing")
     assert s.ignored_reddit_authors == frozenset({"automoderator", "visualmod"})
@@ -48,15 +49,42 @@ def test_list_properties_parse_their_strings():
     assert s.x_seeds == ("one", "two")
     assert s.extra_symbol_files == (Path("a.txt"), Path("b.txt"))
     assert s.x_hours == (9, 17)
+    assert s.reddit_hours is None
 
 
 def test_defaults_are_conservative():
+    # Sized for a machine that runs `social-scraper run` around the clock.
     s = settings()
     assert "wallstreetbets" in s.subreddits
-    assert s.x_daily_budget <= 200
-    assert s.x_min_delay_s >= 30
+    assert s.reddit_min_delay_s >= 15
+    assert s.reddit_hourly_budget <= 90
+    assert s.reddit_daily_budget <= 1000
+    assert s.reddit_hours is not None  # Reddit rests overnight too
+    assert s.x_daily_budget <= 90
+    assert s.x_hourly_budget <= 8
+    assert s.x_min_delay_s >= 60
+    assert s.block_cooldown_hours >= 24
+    assert s.block_cooldown_max_hours >= s.block_cooldown_hours
     assert s.browser_headless is False  # headless Chrome is blocked by Reddit (measured)
+    assert s.browser_minimized is True  # out of the way of whoever is using the desktop
     assert len(s.x_queries) >= 3
+
+
+def _active_hours_per_day(hours: tuple[int, int] | None) -> int:
+    if hours is None:
+        return 24
+    start, end = hours
+    return end - start if start < end else 24 - start + end
+
+
+def test_default_x_pace_fits_its_budgets():
+    # Budgets are a ceiling, not the pacing: a loop that hits the daily budget at 15:00
+    # goes quiet for the rest of the window and then bursts again at the reset.
+    s = settings()
+    cycles_per_hour = 60 / s.cycle_minutes
+    hourly = s.x_pages_per_cycle * cycles_per_hour
+    assert hourly <= s.x_hourly_budget
+    assert hourly * _active_hours_per_day(s.x_hours) <= s.x_daily_budget
 
 
 def test_profile_dir_is_per_platform(tmp_path):
