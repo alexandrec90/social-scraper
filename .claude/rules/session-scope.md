@@ -13,7 +13,9 @@ A coding session makes the change and describes it. It does **not**:
   skill, which writes the commit message to a file and stops;
 - run the whole test suite, or wait on a CI gate.
 
-Running the tests for what you touched is optional.
+Running the tests for what you touched is optional. Where `scripts/run-tests.py --help`
+says it picks them, run it bare: it builds the `.venv` a `claude --worktree` tree
+arrives without, which `uv run pytest` builds lacking the dev extra.
 The scheduled fix pass commits, pushes, opens the PR and runs the full gate in CI; a red
 gate comes back to a fresh session with the failures named.
 
