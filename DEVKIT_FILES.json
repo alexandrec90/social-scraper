@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.37",
+  "devkit_tag": "v0.11.38",
   "files": {
     ".claude/engineering-evidence.md": "75124aa308d50a5b6bc74ce750946b9181789457143e542cce8daac9bd389c78",
     ".claude/fixer.md": "aea4596d9e27ad0004e4853252b8bdd054a264b4c60409a74fe3ecf6fd3015c0",
@@ -56,7 +56,7 @@
     "scripts/hooks/tests/test_structure_baseline.py": "1d7f191a11c5ad22da9e03bfd69c8adeaf00ce5d3652b67750c89a9a08361238",
     "scripts/hooks/tests/test_structure_check.py": "ead0bf2c21b278e4e86e0ff3d8a45cb07f9cae8e16b53fe4ea7b67e1bd19e776",
     "scripts/hooks/tests/test_structure_scan.py": "ee4eb5286384e308b2199b17a18657d7725e7ed294f23c4003d20f03705a4283",
-    "scripts/hooks/tests/test_sync_codex_context.py": "0dd95a77cc5560283dd93ad61bc74068a47fd4ec291355bbabb259c557b83277",
+    "scripts/hooks/tests/test_sync_codex_context.py": "49fd3c170c5a442317b1a0e6b3bae45185f0e8c757164800187e9d9472f6940d",
     "scripts/hooks/tests/test_sync_codex_hooks.py": "7ba81023d1355708fdf046f371b148dbdb11f815485efdff0e298fac84b26280",
     "scripts/hooks/tests/test_sync_devkit.py": "dc72e4439d54bbdb5d10714bf2bdc2df5cfaaed2dfab7a8a8f99df461f8c1586",
     "scripts/hooks/tests/test_task_branch.py": "3eca2aecddbda899f45f50de765cf3beb39f664c2dba61052bb5668cb29071a1",
