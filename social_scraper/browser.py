@@ -17,9 +17,9 @@ on every load and 403 on the JSON, and X answered with an HTTP error. Renaming t
 (`headful_user_agent`) got through both, twice. Client hints (`Sec-CH-UA`), the WebGL
 renderer (the real GPU, not SwiftShader), plugins and `window.chrome` already match
 headful Chrome. Measured residual: `outerWidth/outerHeight` equal the viewport. The
-headful alternatives were worse: `--window-position=-32000,-32000` took the keyboard
-focus on the first navigation, and `--start-minimized` was ignored (the window opened on
-screen).
+headful alternatives open a window: `--window-position=-32000,-32000` alone took the
+keyboard focus on the first navigation, and `--start-minimized` was ignored (the window
+opened on screen). A headed run is kept out of the way as described next.
 
 Server-rendered data. X's 2026 web app streams the first page of a timeline into the
 HTML as JavaScript (TanStack Router / seroval: `self.$R`), not as a GraphQL XHR, and
@@ -27,6 +27,16 @@ deletes `self.$R` once hydrated. `KEEP_SSR_JS` runs before any page script and k
 reference to that object; `SSR_TWEETS_JS` later walks it for `Tweet` objects and
 returns plain-JSON copies, which `capture()` hands back as one more payload. The
 parser does not care which route a tweet arrived by.
+
+Out of the way (`BROWSER_MINIMIZED`, the default for a headed scraper run; a headless one
+has no window, so it is ignored there, and `--headed` turns it off). Chrome takes the
+keyboard focus when it launches -- measured 2026-10-02: the foreground window became
+Chrome even when placed off-screen -- so a cycle would steal whatever you were typing
+into, twice. Minimizing the window over CDP straight after launch hands the focus back
+to the previous window within ~0.3 s, and launching it off-screen means nothing flashes
+up first. The page keeps rendering minimized (`visibilityState` stays "visible": the
+Playwright launch disables Chrome's backgrounding), but wheel events are dropped there,
+so a minimized window scrolls with PageDown, which landed a full viewport every time.
 
 This module is deliberately logic-free: every decision about what a page *means* lives
 in the scrapers, which are tested against a fake `Browser`.
@@ -48,6 +58,10 @@ log = logging.getLogger(__name__)
 NAV_TIMEOUT_MS = 45_000
 TEXT_EXCERPT_CHARS = 3_000
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
+# Where Windows itself parks minimized windows: off every monitor.
+OFFSCREEN_ARG = "--window-position=-32000,-32000"
+# A focused input (X's search box) would take PageDown instead of the page.
+BLUR_JS = "() => document.activeElement && document.activeElement.blur()"
 SSR_PAYLOAD_SUFFIX = "#ssr"
 SSR_MAX_NODES = 200_000
 
@@ -104,11 +118,23 @@ def headful_user_agent(user_agent: str) -> str:
     return user_agent.replace("HeadlessChrome/", "Chrome/")
 
 
+def launch_args(minimized: bool) -> list[str]:
+    return [*LAUNCH_ARGS, OFFSCREEN_ARG] if minimized else list(LAUNCH_ARGS)
+
+
 class PlaywrightBrowser:
-    def __init__(self, profile_dir: Path, channel: str = "chrome", headless: bool = False) -> None:
+    def __init__(
+        self,
+        profile_dir: Path,
+        channel: str = "chrome",
+        headless: bool = False,
+        minimized: bool = False,
+    ) -> None:
         self.profile_dir = profile_dir
         self.channel = channel
         self.headless = headless
+        # A headless browser has no window to move.
+        self.minimized = minimized and not headless
         self._pw: Any = None
         self._ctx: Any = None
         self._page: Any = None
@@ -123,6 +149,8 @@ class PlaywrightBrowser:
         self._ctx = self._pw.chromium.launch_persistent_context(**self.launch_options(user_agent))
         self._ctx.add_init_script(KEEP_SSR_JS)
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
+        if self.minimized:
+            self._minimize()
         return self
 
     def launch_options(self, user_agent: str | None) -> dict[str, Any]:
@@ -132,7 +160,7 @@ class PlaywrightBrowser:
             "headless": self.headless,
             "viewport": {"width": 1366, "height": 900},
             "locale": "en-US",
-            "args": LAUNCH_ARGS,
+            "args": launch_args(self.minimized),
             "ignore_default_args": ["--enable-automation"],
         }
         if user_agent:
@@ -150,6 +178,21 @@ class PlaywrightBrowser:
             return probe.new_page().evaluate("navigator.userAgent")
         finally:
             probe.close()
+
+    def _minimize(self) -> None:
+        from playwright.sync_api import Error as PlaywrightError
+
+        try:
+            cdp = self._ctx.new_cdp_session(self._page)
+            window = cdp.send("Browser.getWindowForTarget")["windowId"]
+            cdp.send(
+                "Browser.setWindowBounds",
+                {"windowId": window, "bounds": {"windowState": "minimized"}},
+            )
+            cdp.detach()
+        except PlaywrightError as exc:
+            # Still off-screen, so it works; it just keeps the focus it took at launch.
+            log.warning("could not minimize the browser window: %s", exc)
 
     def __exit__(
         self,
@@ -202,7 +245,7 @@ class PlaywrightBrowser:
             self._settle()
             for _ in range(scrolls):
                 between()
-                self._page.mouse.wheel(0, self._rng.randint(1200, 2600))
+                self._scroll()
                 self._settle()
             payloads = []
             for hit in hits:
@@ -221,6 +264,16 @@ class PlaywrightBrowser:
             payloads=payloads,
             text=self._visible_text(),
         )
+
+    def _scroll(self) -> None:
+        if not self.minimized:
+            self._page.mouse.wheel(0, self._rng.randint(1200, 2600))
+            return
+        # About the same distance as the wheel: two or three viewports.
+        self._page.evaluate(BLUR_JS)
+        for _ in range(self._rng.randint(2, 3)):
+            self._page.keyboard.press("PageDown")
+            self._page.wait_for_timeout(self._rng.uniform(150, 450))
 
     def _settle(self) -> None:
         # A jittered wait instead of "networkidle": X keeps a connection open forever.

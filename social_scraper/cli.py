@@ -6,6 +6,7 @@ scrape [reddit|x|all] one cycle now, then export (skip with --no-export); --jitt
                       first waits a random 0-20% of CYCLE_MINUTES, for schedulers
 run                   cycle forever every CYCLE_MINUTES (or --cycles N)
                       scrape and run take --headed: show Chrome despite BROWSER_HEADLESS
+                      and BROWSER_MINIMIZED
 export                copy new rows to the lake
 status                budgets, pauses, row counts, trending symbols, X accounts
 lake [--days N]       what the lake holds, per symbol and day (DuckDB lens)
@@ -42,8 +43,6 @@ from social_scraper.runner import (
     universe_for,
     write_report,
 )
-
-log = logging.getLogger(__name__)
 
 LOGIN_URLS = {REDDIT: "https://www.reddit.com/login/", X: "https://x.com/i/flow/login"}
 
@@ -84,13 +83,15 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         report = run_cycle(settings, engine, platforms_of(args.platform), export=not args.no_export)
     except Exception as exc:
         # The database down, or a bug outside the per-platform guard. Still overwrite the
-        # report: the previous run's "ok" must not be what is left on disk.
-        log.exception("scrape cycle crashed")
+        # report: the previous run's "ok" must not be what is left on disk. Re-raised, so
+        # the traceback is printed and the process exits 1 as an uncaught error does.
         report = RunReport(
             started_at=started,
             finished_at=datetime.now(UTC).isoformat(),
             errors=[f"cycle: {type(exc).__name__}: {exc}"],
         )
+        print(f"FAILED -- details in {write_report(report, settings.logs_dir)}")
+        raise
     path = write_report(report, settings.logs_dir)
     print(f"{'ok' if report.ok else 'FAILED'} -- details in {path}")
     return 0 if report.ok else 1
@@ -165,6 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     if getattr(args, "headed", False):
         settings.browser_headless = False
+        settings.browser_minimized = False  # --headed is for watching the window
     if args.command == "login":
         from social_scraper.browser import open_for_login
 

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from conftest import Clock, IsolatedSettings
+from sqlalchemy.exc import OperationalError
 
 from social_scraper import cli, runner
 from social_scraper.cli import (
@@ -88,22 +89,26 @@ def test_scrape_writes_the_report_and_sets_exit_code(settings, engine, monkeypat
     assert cmd_scrape(settings, engine, scrape_args()) == 0
 
 
-def test_scrape_with_the_database_down_exits_1_and_overwrites_the_report(settings, tmp_path):
+def test_scrape_with_the_database_down_raises_and_overwrites_the_report(settings, tmp_path):
+    # Raised, not returned: the process exits 1 with the traceback, as any uncaught error.
     write_report(RunReport("earlier"), settings.logs_dir)
     unreachable = sqlite_engine_at(tmp_path / "no-such-dir" / "db.sqlite")
-    assert cmd_scrape(settings, unreachable, scrape_args()) == 1
+    with pytest.raises(OperationalError):
+        cmd_scrape(settings, unreachable, scrape_args())
     body = report_body(settings)
     assert body["ok"] is False and body["started_at"] != "earlier"
     assert body["errors"][0].startswith("cycle: OperationalError")
 
 
-def test_scrape_reports_a_crash_outside_the_platform_guard(settings, engine, monkeypatch):
+def test_scrape_reports_a_crash_outside_the_platform_guard(settings, engine, monkeypatch, capsys):
     def crash(*a, **kw):
         raise KeyError("payload shape changed")
 
     monkeypatch.setattr(cli, "run_cycle", crash)
-    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    with pytest.raises(KeyError):
+        cmd_scrape(settings, engine, scrape_args())
     assert "KeyError" in report_body(settings)["errors"][0]
+    assert "FAILED -- details in" in capsys.readouterr().out
 
 
 def test_scrape_exits_0_when_every_platform_is_deliberately_paused(settings, engine):
@@ -172,20 +177,24 @@ def test_main_init_db_and_dispatch(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
-    ("argv", "headless"), [(["scrape"], True), (["scrape", "--headed"], False)]
+    ("argv", "headless", "minimized"),
+    [(["scrape"], True, True), (["scrape", "--headed"], False, False)],
 )
-def test_main_scrape_is_headless_unless_headed(tmp_path, monkeypatch, argv, headless):
+def test_main_scrape_is_headless_unless_headed(tmp_path, monkeypatch, argv, headless, minimized):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{(tmp_path / 'db.sqlite').as_posix()}")
     monkeypatch.delenv("BROWSER_HEADLESS", raising=False)
+    monkeypatch.delenv("BROWSER_MINIMIZED", raising=False)
     monkeypatch.chdir(tmp_path)
     seen = {}
-    monkeypatch.setattr(
-        cli,
-        "run_cycle",
-        lambda s, *a, **kw: seen.update(headless=s.browser_headless) or RunReport("t"),
-    )
+
+    def fake_cycle(s, *a, **kw):
+        seen.update(headless=s.browser_headless, minimized=s.browser_minimized)
+        return RunReport("t")
+
+    monkeypatch.setattr(cli, "run_cycle", fake_cycle)
     assert main(argv) == 0
-    assert seen["headless"] is headless
+    # --headed is for watching the window, so it is neither headless nor minimized.
+    assert seen == {"headless": headless, "minimized": minimized}
 
 
 def test_main_login_opens_the_profile(tmp_path, monkeypatch):

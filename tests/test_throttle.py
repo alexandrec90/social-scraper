@@ -132,6 +132,28 @@ def test_challenge_opens_the_circuit_for_the_cooldown():
         t.acquire()
 
 
+def test_repeated_challenges_double_the_cooldown_up_to_the_cap():
+    # The first request after a cooldown being challenged again means the platform still
+    # has us flagged: retrying every `block_cooldown_hours` forever is how a flag
+    # becomes a ban on a machine that never stops.
+    t, store, _ = make(block_cooldown_hours=12, block_cooldown_max_hours=40)
+    t.record(CHALLENGED, "search", 403)
+    assert store.get_block("x").blocked_until == NOW + timedelta(hours=12)
+    t.record(CHALLENGED, "search", 403)
+    assert store.get_block("x").blocked_until == NOW + timedelta(hours=24)
+    t.record(CHALLENGED, "search", 403)
+    assert store.get_block("x").blocked_until == NOW + timedelta(hours=40)
+
+
+def test_a_success_resets_the_challenge_escalation():
+    t, store, _ = make(block_cooldown_hours=12)
+    t.record(CHALLENGED, "search", 403)
+    t.record(CHALLENGED, "search", 403)
+    t.record(OK, "search", 200)
+    t.record(CHALLENGED, "search", 403)
+    assert store.get_block("x").blocked_until == NOW + timedelta(hours=12)
+
+
 def test_plain_errors_pause_only_when_repeated():
     t, store, _ = make()
     t.record(ERROR, "k", 500)
@@ -167,6 +189,13 @@ def test_dwell_sleeps_within_bounds():
     t, _, slept = make()
     t.dwell(1, 2)
     assert 1 <= slept[0] <= 2
+
+
+def test_default_dwell_reads_like_a_person():
+    t, _, slept = make()
+    for _ in range(50):
+        t.dwell()
+    assert all(4 <= s <= 12 for s in slept)
 
 
 def test_memory_store_last_request():

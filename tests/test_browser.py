@@ -14,11 +14,15 @@ from playwright.sync_api import Error as PlaywrightError
 
 from social_scraper import browser as browser_mod
 from social_scraper.browser import (
+    BLUR_JS,
     KEEP_SSR_JS,
+    LAUNCH_ARGS,
+    OFFSCREEN_ARG,
     SSR_PAYLOAD_SUFFIX,
     SSR_TWEETS_JS,
     PlaywrightBrowser,
     headful_user_agent,
+    launch_args,
     open_for_login,
 )
 
@@ -113,6 +117,17 @@ def test_launch_options_for_the_bundled_chromium():
     assert options["ignore_default_args"] == ["--enable-automation"]
 
 
+def test_a_minimized_headed_launch_starts_off_screen():
+    b = PlaywrightBrowser(Path("p"), headless=False, minimized=True)
+    assert b.minimized and b.launch_options(None)["args"] == [*LAUNCH_ARGS, OFFSCREEN_ARG]
+
+
+def test_minimized_is_ignored_headless():
+    # No window to move: a headless launch keeps the wheel scroll and the plain args.
+    b = PlaywrightBrowser(Path("p"), headless=True, minimized=True)
+    assert not b.minimized and b.launch_options("ua")["args"] == LAUNCH_ARGS
+
+
 class FakeResponse:
     def __init__(self, url, status=200, body=None, bad=False):
         self.url, self.status, self._body, self._bad = url, status, body, bad
@@ -131,10 +146,20 @@ class FakeMouse:
         self.wheels.append(dy)
 
 
+class FakeKeyboard:
+    def __init__(self):
+        self.keys = []
+
+    def press(self, key):
+        self.keys.append(key)
+
+
 class FakePage:
     def __init__(self, response=None, extra=(), ssr=None, text="page text"):
         self.url = "about:blank"
         self.mouse = FakeMouse()
+        self.keyboard = FakeKeyboard()
+        self.blurs = 0
         self.handlers = {}
         self.removed = []
         self._response, self._extra, self._ssr, self._text = response, extra, ssr, text
@@ -155,7 +180,10 @@ class FakePage:
     def wait_for_timeout(self, ms):
         self.waits.append(ms)
 
-    def evaluate(self, script, arg):
+    def evaluate(self, script, arg=None):
+        if script == BLUR_JS:
+            self.blurs += 1
+            return None
         assert script == SSR_TWEETS_JS
         if isinstance(self._ssr, Exception):
             raise self._ssr
@@ -165,8 +193,8 @@ class FakePage:
         return self._text
 
 
-def make(page):
-    b = PlaywrightBrowser(Path("unused"))
+def make(page, minimized=False):
+    b = PlaywrightBrowser(Path("unused"), minimized=minimized)
     b._page = page
     return b
 
@@ -202,8 +230,66 @@ def test_capture_filters_scrolls_and_adds_ssr():
     assert [p.data for p in r.payloads] == [{"data": 1}, [{"__typename": "Tweet"}]]
     assert r.payloads[-1].url.endswith(SSR_PAYLOAD_SUFFIX)
     assert len(page.mouse.wheels) == 2 and len(pauses) == 2
+    assert page.keyboard.keys == []
     assert page.removed == ["response"]
     assert r.text == "page text"
+
+
+def test_minimized_capture_scrolls_with_page_down():
+    # Measured 2026-10-02 on a minimized Chrome: wheel events are dropped after the
+    # first (0 px on 5 of 6), PageDown scrolled a full viewport every time.
+    page = FakePage(FakeResponse("u", 200))
+    pauses = []
+    make(page, minimized=True).capture("u", lambda u: True, 2, lambda: pauses.append(1))
+    assert page.mouse.wheels == [] and len(pauses) == 2
+    assert 4 <= len(page.keyboard.keys) <= 6 and set(page.keyboard.keys) == {"PageDown"}
+    # A focused search box would swallow PageDown, so focus is dropped first.
+    assert page.blurs == 2
+
+
+def test_launch_args_put_a_minimized_window_off_screen():
+    assert launch_args(minimized=False) == LAUNCH_ARGS
+    assert launch_args(minimized=True) == [*LAUNCH_ARGS, OFFSCREEN_ARG]
+
+
+class FakeCdp:
+    def __init__(self, fail=False):
+        self.sent, self.detached, self.fail = [], False, fail
+
+    def send(self, method, params=None):
+        if self.fail:
+            raise PlaywrightError("no Browser domain")
+        self.sent.append((method, params))
+        return {"windowId": 7} if method == "Browser.getWindowForTarget" else {}
+
+    def detach(self):
+        self.detached = True
+
+
+class FakeCdpCtx:
+    def __init__(self, cdp):
+        self.cdp = cdp
+
+    def new_cdp_session(self, page):
+        return self.cdp
+
+
+def test_minimize_sets_the_window_state_over_cdp():
+    cdp = FakeCdp()
+    b = make(FakePage(), minimized=True)
+    b._ctx = FakeCdpCtx(cdp)
+    b._minimize()
+    assert cdp.sent[-1] == (
+        "Browser.setWindowBounds",
+        {"windowId": 7, "bounds": {"windowState": "minimized"}},
+    )
+    assert cdp.detached
+
+
+def test_minimize_failure_leaves_the_window_off_screen():
+    b = make(FakePage(), minimized=True)
+    b._ctx = FakeCdpCtx(FakeCdp(fail=True))
+    b._minimize()  # logged, not raised: an off-screen window still works
 
 
 def test_capture_survives_ssr_evaluation_failure():
@@ -236,6 +322,7 @@ def test_open_for_login_waits_for_the_window(monkeypatch, tmp_path):
 
     class FakeBrowser(PlaywrightBrowser):
         def __enter__(self):
+            events.append(("minimized", self.minimized))
             self._page = FakePage(FakeResponse("u", 200))
             self._ctx = FakeCtx()
             return self
@@ -245,4 +332,5 @@ def test_open_for_login_waits_for_the_window(monkeypatch, tmp_path):
 
     monkeypatch.setattr(browser_mod, "PlaywrightBrowser", FakeBrowser)
     open_for_login(tmp_path / "profile", "chrome", "https://x.com/i/flow/login")
-    assert events == [("close", 0), "closed"]
+    # The login window is the one you have to see and type into.
+    assert events == [("minimized", False), ("close", 0), "closed"]

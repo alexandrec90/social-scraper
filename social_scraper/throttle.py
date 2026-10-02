@@ -11,7 +11,10 @@ Every page load goes through `Throttle.acquire()` first and reports back through
 - **Circuit breaker** -- a rate-limit response backs off exponentially
   (`backoff_base * 2^failures`, capped); a challenge (captcha, login wall, locked
   account) opens the circuit for `block_cooldown` and needs no further failures to do
-  so. A success closes it.
+  so -- and a challenge again on the first request after it doubles the cooldown
+  (capped at `block_cooldown_max`), because on an always-on machine a fixed retry
+  interval keeps knocking on a door the platform has already closed. A success closes
+  it and resets the escalation.
 
 The store is a protocol so the rules are unit-tested against memory and run against
 Postgres (`db.throttle_store.DbThrottleStore`).
@@ -66,6 +69,7 @@ class Policy:
     backoff_base_minutes: float = 15.0
     backoff_max_minutes: float = 360.0
     block_cooldown_hours: float = 12.0
+    block_cooldown_max_hours: float = 96.0
     active_hours: tuple[int, int] | None = None
     timezone: str = "UTC"
 
@@ -165,7 +169,7 @@ class Throttle:
             if wait > 0:
                 self.sleep(wait)
 
-    def dwell(self, lo: float = 2.0, hi: float = 6.0) -> None:
+    def dwell(self, lo: float = 4.0, hi: float = 12.0) -> None:
         """A human pause inside a page (between scrolls). Not counted as a request."""
         self.sleep(self.rng.uniform(lo, hi))
 
@@ -183,7 +187,8 @@ class Throttle:
         failures = block.consecutive_failures + 1
         until: datetime | None
         if outcome == CHALLENGED:
-            until = now + timedelta(hours=p.block_cooldown_hours)
+            hours = min(p.block_cooldown_hours * 2 ** (failures - 1), p.block_cooldown_max_hours)
+            until = now + timedelta(hours=hours)
         elif outcome == RATE_LIMITED:
             minutes = min(p.backoff_base_minutes * 2 ** (failures - 1), p.backoff_max_minutes)
             until = now + timedelta(minutes=minutes)

@@ -61,7 +61,7 @@ class RunReport:
 
 
 def policy_for(settings: Settings, platform: str) -> Policy:
-    """The throttle policy for `platform`. Only X keeps human active hours."""
+    """The throttle policy for `platform`: its own pace, budgets and active hours."""
     reddit = platform == REDDIT
     s = settings
     return Policy(
@@ -73,7 +73,8 @@ def policy_for(settings: Settings, platform: str) -> Policy:
         backoff_base_minutes=s.backoff_base_minutes,
         backoff_max_minutes=s.backoff_max_minutes,
         block_cooldown_hours=s.block_cooldown_hours,
-        active_hours=None if reddit else s.x_hours,
+        block_cooldown_max_hours=s.block_cooldown_max_hours,
+        active_hours=s.reddit_hours if reddit else s.x_hours,
         timezone=s.scraper_timezone,
     )
 
@@ -93,7 +94,10 @@ def x_plan(settings: Settings) -> XPlan:
 def default_browser_factory(settings: Settings) -> BrowserFactory:
     def factory(platform: str) -> AbstractContextManager[Browser]:
         return PlaywrightBrowser(
-            settings.profile_dir(platform), settings.browser_channel, settings.browser_headless
+            settings.profile_dir(platform),
+            settings.browser_channel,
+            settings.browser_headless,
+            minimized=settings.browser_minimized,
         )
 
     return factory
