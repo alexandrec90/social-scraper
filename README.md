@@ -69,13 +69,17 @@ Run these from the checkout root in any shell, with no venv activated: `uv run` 
 when the lock changes. A bare `python -m social_scraper` uses whatever `python` is on
 PATH, which has none of the dependencies.
 
-Run it on the desktop, not in the container: it needs a visible Chrome (Reddit blocks
-headless) and the signed-in profiles in `data/`. Use a dedicated X account rather than
+Run it on the desktop, not in the container: it needs the installed Chrome and the
+signed-in profiles in `data/`. Chrome runs headless by default (`BROWSER_HEADLESS`), so a
+scheduled run opens no window. Headless gets through Reddit and X only because the
+`HeadlessChrome` user-agent token is renamed; both block it otherwise (measured; see
+`social_scraper/browser.py`). `login` always opens a visible window, and
+`scrape --headed` / `run --headed` show one for debugging. Use a dedicated X account rather than
 your personal one.
 
 | Command | What it does |
 | --- | --- |
-| `scrape [reddit\|x\|all] [--no-export]` | one cycle now; report in `logs/scrape-run.json` |
+| `scrape [reddit\|x\|all] [--no-export] [--jitter]` | one cycle now; report in `logs/scrape-run.json` |
 | `run [reddit\|x\|all] [--cycles N]` | repeat forever (or N times) |
 | `status` | budgets used, pauses, row counts, trending symbols, X accounts |
 | `export` | copy new rows to the lake |
@@ -84,6 +88,12 @@ your personal one.
 
 Every run overwrites `logs/scrape-run.json` with what each platform did, every error,
 and every notice -- on success too. The terminal gets a status line and that path.
+
+`scrape` is what a scheduler fires (devkit runs it every `CYCLE_MINUTES`). It exits 1
+when the cycle failed -- database unreachable, browser crash, a platform erroring, a
+failed export -- and 0 when a platform was deliberately left alone (outside X active
+hours, budget spent, circuit breaker open). `--jitter` first waits a random 0-20% of
+`CYCLE_MINUTES`, so a fixed scheduler grid does not become a fixed request interval.
 
 ## Data contract (data-lake / ibkr_trader)
 

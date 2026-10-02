@@ -179,6 +179,15 @@ def write_report(report: RunReport, logs_dir: Path) -> Path:
     return path
 
 
+def start_jitter_s(cycle_minutes: float) -> float:
+    """A random 0-20% of a cycle, in seconds: the wait before a scheduled `scrape`.
+
+    On a fixed scheduler grid that spreads the gap between cycles over 0.8-1.2x
+    `CYCLE_MINUTES` -- the same spread `run_forever` sleeps.
+    """
+    return cycle_minutes * 60 * _JITTER.uniform(0.0, 0.2)
+
+
 def run_forever(
     settings: Settings,
     engine: Engine,

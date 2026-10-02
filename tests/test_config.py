@@ -65,8 +65,8 @@ def test_defaults_are_conservative():
     assert s.x_min_delay_s >= 60
     assert s.block_cooldown_hours >= 24
     assert s.block_cooldown_max_hours >= s.block_cooldown_hours
-    assert s.browser_headless is False  # headless Chrome is blocked by Reddit (measured)
-    assert s.browser_minimized is True  # out of the way of whoever is using the desktop
+    assert s.browser_headless is True  # passes Reddit and X once the UA is renamed (measured)
+    assert s.browser_minimized is True  # a headed run stays out of the desktop user's way
     assert len(s.x_queries) >= 3
 
 
