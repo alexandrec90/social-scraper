@@ -95,6 +95,7 @@ def test_public_symbols_ignores_module_level_assignments():
         "alpha(1)",  # bare call, after a from-import
         "from acme import alpha",
         "from acme import beta, alpha",
+        "from acme import (\n    beta,\n    alpha,\n)",
     ],
 )
 def test_a_reference_is_a_call_an_attribute_or_an_import(text):
@@ -108,6 +109,7 @@ def test_a_reference_is_a_call_an_attribute_or_an_import(text):
         "acme.alphabet()",  # substring after a dot
         '"alpha"',  # a bare mention in prose or a string
         "# alpha is untested",
+        "from acme import (\n    beta,\n)\nalpha = 1",  # after the list closes
     ],
 )
 def test_a_bare_substring_is_not_a_reference(text):
@@ -127,9 +129,9 @@ def test_a_bare_substring_is_not_a_reference(text):
         ("alpha(1)", {"alpha"}),
         ("from acme import alpha", {"alpha"}),
         ("from acme import beta, alpha", {"beta", "alpha"}),
-        # The name is on the next line, so neither reading sees it; `import (` is a
-        # call-shaped `import` to both, which is harmless because nothing defines one.
-        ("from acme import (\n    alpha,\n)", {"import"}),
+        # A parenthesised list is read to its `)`, across lines. `import (` is also a
+        # call-shaped `import` to both readings, harmless because nothing defines one.
+        ("from acme import (\n    alpha,\n    beta,\n)\ngamma = 1", {"import", "alpha", "beta"}),
         ("alphabet = 1", set()),
         ('"alpha"', set()),
         ("# alpha is untested", set()),
@@ -377,6 +379,94 @@ def test_gaps_accepts_a_substituted_corpus(tmp_path):
     cfg = config(sources=["src"])
     assert us.gaps(tmp_path, cfg) == []
     assert us.gaps(tmp_path, cfg, texts={}) == ["src/acme.py::alpha"]
+
+
+OVERLAY_TEST = (
+    "from shop.overlay import (\n    Offer,\n    evaluate,\n)\n\n\n"
+    "def test_it():\n    evaluate([Offer()])\n"
+)
+
+
+@pytest.mark.parametrize(
+    "init",
+    [
+        "from shop.overlay.evaluate import evaluate\nfrom shop.overlay.offers import Offer\n",
+        "from .evaluate import evaluate\nfrom .offers import Offer\n",
+    ],
+)
+def test_a_test_reaching_a_module_through_its_package_reexport_covers_it(tmp_path, init):
+    """sports_betting #50: `from sports_betting.overlay import (... evaluate, ...)` named
+    neither `overlay/evaluate.py` nor `overlay/offers.py`, so every function the test
+    called read as untested, and the PR went red on a gap that was not there."""
+    write(tmp_path, "shop/__init__.py")
+    write(tmp_path, "shop/overlay/__init__.py", init)
+    write(
+        tmp_path,
+        "shop/overlay/evaluate.py",
+        "def evaluate():\n    pass\n\n\nclass Verdict:\n    pass\n",
+    )
+    write(tmp_path, "shop/overlay/offers.py", "class Offer:\n    pass\n")
+    write(tmp_path, "tests/test_overlay.py", OVERLAY_TEST)
+    assert us.gaps(tmp_path, config(sources=["shop"])) == ["shop/overlay/evaluate.py::Verdict"]
+
+
+def test_a_name_imported_in_a_parenthesised_list_is_referenced(tmp_path):
+    """sports_betting #50: `OverlayHandler`, imported on the fourth line of a wrapped
+    `from ... import (` and only compared by `is`, read as untested."""
+    write(tmp_path, "src/server.py", "class Handler:\n    pass\n\n\nclass Server:\n    pass\n")
+    test = (
+        "from server import (\n    Handler,\n    Server,\n)\n\n\n"
+        "def test_it():\n    assert Server().handler is Handler\n"
+    )
+    write(tmp_path, "tests/test_server.py", test)
+    assert us.gaps(tmp_path, config(sources=["src"])) == []
+
+
+def test_a_package_that_does_not_reexport_a_module_vouches_for_nothing_in_it(tmp_path):
+    write(tmp_path, "shop/__init__.py")
+    write(tmp_path, "shop/overlay/__init__.py", "from shop.overlay.offers import Offer\n")
+    write(tmp_path, "shop/overlay/evaluate.py", "def evaluate():\n    pass\n")
+    write(tmp_path, "shop/overlay/offers.py", "class Offer:\n    pass\n")
+    write(tmp_path, "tests/test_overlay.py", OVERLAY_TEST)
+    assert us.gaps(tmp_path, config(sources=["shop"])) == ["shop/overlay/evaluate.py::evaluate"]
+
+
+def test_reexporting_package_names_the_package_whose_init_imports_the_module(tmp_path):
+    write(tmp_path, "src/shop/__init__.py")
+    write(tmp_path, "src/shop/core.py")
+    write(tmp_path, "src/shop/other.py")
+    write(tmp_path, "src/shop/overlay/__init__.py", "from .offers import Offer\n")
+    write(tmp_path, "src/shop/overlay/offers.py")
+    write(tmp_path, "src/loose/mod.py")
+    write(tmp_path, "src/broken/__init__.py", "from .mod import (\n")
+    write(tmp_path, "src/broken/mod.py")
+    assert us.reexporting_package(tmp_path, Path("src/shop/overlay/offers.py")) == "shop.overlay"
+    assert us.reexporting_package(tmp_path, Path("src/shop/core.py")) == ""
+    assert us.reexporting_package(tmp_path, Path("src/loose/mod.py")) == ""
+    assert us.reexporting_package(tmp_path, Path("src/broken/mod.py")) == ""
+
+
+def test_dotted_name_starts_at_the_outermost_package(tmp_path):
+    write(tmp_path, "src/shop/__init__.py")
+    write(tmp_path, "src/shop/overlay/__init__.py")
+    assert us.dotted_name(tmp_path, Path("src/shop/overlay")) == "shop.overlay"
+    assert us.dotted_name(tmp_path, Path("src")) == ""
+
+
+@pytest.mark.parametrize(
+    ("text", "joins"),
+    [
+        ("from shop.overlay import evaluate", True),
+        ("import shop.overlay", True),
+        ("import shop.overlay as ov", True),
+        ("from shop.overlay.server import X", False),
+        ("import shop.overlay.server", False),
+        ("from shop.overlays import X", False),
+        ("x = 'from shop.overlay import y'", False),
+    ],
+)
+def test_package_pattern_matches_an_import_of_the_package_itself(text, joins):
+    assert bool(us.package_pattern("shop.overlay").search(text)) is joins
 
 
 def test_a_fixture_named_after_the_function_it_replaces_is_not_its_test(tmp_path):
