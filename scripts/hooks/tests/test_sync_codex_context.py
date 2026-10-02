@@ -6,6 +6,44 @@ from conftest import load_module
 mod = load_module("scripts/sync-codex-context.py")
 
 
+def stale_mirror(root):
+    """The `.agents/skills/` files that are missing, differ or have no source; empty when
+    the project has no mirror at all, which is a project that has not opted into Codex."""
+    source, mirror = root / ".claude" / "skills", root / ".agents" / "skills"
+    if not mirror.is_dir():
+        return []
+    wanted, held = mod.relative_files(source), mod.relative_files(mirror)
+    differ = {
+        rel for rel in wanted & held if (mirror / rel).read_bytes() != (source / rel).read_bytes()
+    }
+    return sorted(rel.as_posix() for rel in (wanted ^ held) | differ)
+
+
+def test_the_committed_mirror_is_its_source_byte_for_byte():
+    """Vendored so every project holds its own mirror to this: only devkit's own suite did,
+    and roguelike's Codex read a stale `art-check`, `ship` and `go-nuts` on `main`."""
+    stale = stale_mirror(mod.REPO_ROOT)
+    assert stale == [], (
+        f"stale in .agents/skills/: {stale} -- run python scripts/sync-codex-context.py"
+    )
+
+
+def test_a_stale_or_missing_mirror_file_is_named_and_no_mirror_is_none(tmp_path):
+    assert stale_mirror(tmp_path) == []
+    skill = tmp_path / ".claude" / "skills" / "s"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("new", encoding="utf-8")
+    (skill / "extra.md").write_text("x", encoding="utf-8")
+    assert stale_mirror(tmp_path) == []
+    mirrored = tmp_path / ".agents" / "skills" / "s"
+    mirrored.mkdir(parents=True)
+    (mirrored / "SKILL.md").write_text("old", encoding="utf-8")
+    (mirrored / "retired.md").write_text("x", encoding="utf-8")
+    assert stale_mirror(tmp_path) == ["s/SKILL.md", "s/extra.md", "s/retired.md"]
+    mod.mirror_tree(tmp_path / ".claude" / "skills", tmp_path / ".agents" / "skills")
+    assert stale_mirror(tmp_path) == []
+
+
 def test_relative_files_skips_prune_dirs(tmp_path):
     (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     (tmp_path / "node_modules").mkdir()

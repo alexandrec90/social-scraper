@@ -348,6 +348,13 @@ def _fix(explicit: list[str]) -> int:
         )
         return EXIT_FIXERS_FAILED
     code, verdict = run_fixers(paths, command)
+    if code:
+        # What ran, before the verdict: a launcher that dies on its own (uv's one-line
+        # `failed to canonicalize script path`) names neither itself nor its venv, and
+        # without this the pass's `pre-commit.log` held that line alone -- a dozen calls
+        # of binary scanning to find the stale `.venv` (4099febd). Kept off the last
+        # line, which `ship_intent.refusal_line` may take into a signature.
+        print(f"ship: ran {' '.join(command)} run --files ({len(paths)} path(s))", file=sys.stderr)
     print(f"ship: {verdict}", file=sys.stderr if code else sys.stdout)
     return code
 

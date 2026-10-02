@@ -69,6 +69,7 @@ scripts/run-tests.py::run_vitest
 scripts/run-tests.py::tests_for
 scripts/run-tests.py::vitest_related
 scripts/run-tests.py::with_basetemp
+scripts/run-tests.py::with_contracts
 scripts/ship.py::backoff_delays
 scripts/ship.py::current_branch
 scripts/sync-codex-hooks.py::adapter_command

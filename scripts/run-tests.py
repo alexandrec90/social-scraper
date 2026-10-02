@@ -6,8 +6,8 @@ Same contract as `lint-all.py`: the agent fixing a failure reads
 broken test cannot flood the artifact and bury the other twenty.
 
 **The default is the tests named by what changed**, not the suite: every file
-changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`.
-Where `.devkit.toml` turns the `[frontend]` tier on, a changed source under its `src`
+changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`,
+plus `CONTRACT_TESTS`, which read every module and instruction file. Where `.devkit.toml` turns the `[frontend]` tier on, a changed source under its `src`
 runs `vitest related` instead, which follows the imports to the tests that reach it.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
@@ -38,6 +38,17 @@ FULL_SUITE_ENV = ("CI", "PRE_COMMIT")
 # Where a changed module's test is looked for: the project's suite, then the vendored
 # tier's beside the scripts it tests.
 TEST_DIRS = ("tests", "scripts/hooks/tests")
+# The vendored tests that hold every module and instruction file to a contract -- the
+# 500-line ceiling on `CLAUDE.md` and the rules, the structure ratchet, a test for each
+# public symbol -- so no changed file's name maps to them, and a run of "the tests for
+# what changed" skipped exactly what the gate then went red on: roguelike's CLAUDE.md at
+# 500 lines, social-scraper's run-tests.py past the complexity limit (2026-10-01). About
+# twenty seconds together; one the project does not hold is skipped.
+CONTRACT_TESTS = (
+    "scripts/hooks/tests/test_repo_contract.py",
+    "scripts/hooks/tests/test_structure_check.py",
+    "scripts/hooks/tests/test_untested_symbols.py",
+)
 # What the `[frontend]` tier's tests are found from. Only a `.py` names a test by its
 # stem, so a TypeScript-only change used to print "no test named for" each file and run
 # nothing, with the vitest tier switched on (roguelike, bfbdaba6).
@@ -210,6 +221,12 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     return tests, unnamed
 
 
+def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
+    """`tests` followed by every `CONTRACT_TESTS` file `root` holds that it lacks."""
+    extra = [t for t in CONTRACT_TESTS if t not in tests and (root / t).is_file()]
+    return [*tests, *extra]
+
+
 def _named_tests(posix: str) -> list[str]:
     """The test files the changed file `posix` could name, existing or not."""
     stem = posix.rsplit("/", 1)[-1]
@@ -376,9 +393,11 @@ def _plan_changed(root: Path) -> tuple[list[str], list[str], list[str]] | None:
     targets, unnamed = tests_for(changed, root)
     front, unnamed, owed = frontend_run(changed, unnamed, root)
     print(
-        f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s); "
-        "--all runs the suite"
+        f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
+        "and the contract tests; --all runs the suite"
     )
+    if changed:
+        targets = with_contracts(targets, root)
     for path in unnamed:
         print(f"run-tests:   no test named for {path}")
     return targets, front, [owed] if owed else []
