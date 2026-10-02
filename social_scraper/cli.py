@@ -1,4 +1,4 @@
-"""`social-scraper <command>` -- also `python -m social_scraper <command>`.
+"""`uv run social-scraper <command>` -- `uv run` supplies the venv, so no activation.
 
 init-db               create the operational tables
 login reddit|x        open a visible browser to sign in once; the profile keeps it

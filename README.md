@@ -57,13 +57,17 @@ one never touches the other's cookies.
 
 ```bash
 cp .env.example .env              # then fill in the placeholders
-uv sync --all-extras              # creates .venv from the committed uv.lock
 docker compose up -d --wait db    # Postgres: the scraper's operational state
-python -m social_scraper init-db
-python -m social_scraper login x  # optional: sign in once in the window, then close it
-python -m social_scraper scrape   # one cycle of both platforms, then export
-python -m social_scraper run      # forever, every CYCLE_MINUTES
+uv run social-scraper init-db
+uv run social-scraper login x     # optional: sign in once in the window, then close it
+uv run social-scraper scrape      # one cycle of both platforms, then export
+uv run social-scraper run         # forever, every CYCLE_MINUTES
 ```
+
+Run these from the checkout root in any shell, with no venv activated: `uv run` creates
+`.venv` from `uv.lock` on Python 3.12 (`.python-version`) the first time, and resyncs it
+when the lock changes. A bare `python -m social_scraper` uses whatever `python` is on
+PATH, which has none of the dependencies.
 
 Run it on the desktop, not in the container: it needs a visible Chrome (Reddit blocks
 headless) and the signed-in profiles in `data/`. Use a dedicated X account rather than

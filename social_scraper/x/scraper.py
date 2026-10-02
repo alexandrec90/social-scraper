@@ -73,7 +73,7 @@ def classify(result: PageResult) -> tuple[str, str]:
     """What an X page load means for the throttle: `(outcome, detail)`."""
     url, text = result.final_url, result.text.lower()
     if any(p in url for p in _LOGIN_PATHS):
-        return LOGIN_REQUIRED, "not logged in -- run `social-scraper login x`"
+        return LOGIN_REQUIRED, "not logged in -- run `uv run social-scraper login x`"
     if any(p in url for p in _LOCKED_PATHS):
         return CHALLENGED, f"account locked or challenged ({url})"
     if any(p.status == 429 for p in result.payloads):

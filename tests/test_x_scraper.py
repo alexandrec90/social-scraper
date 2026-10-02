@@ -162,6 +162,8 @@ def test_login_wall_on_search_still_visits_timelines(engine, universe):
     # Logged-out is a supported mode: a notice, not an error that fails the cycle.
     assert stats.errors == []
     assert any("not logged in" in n for n in stats.notices)
+    # The remedy must run from a bare shell: the system Python has none of the deps.
+    assert any("`uv run social-scraper login x`" in n for n in stats.notices)
 
 
 def test_challenge_ends_the_cycle(engine, universe):
