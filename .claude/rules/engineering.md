@@ -48,6 +48,10 @@ No agent hook is wired, so nothing judges a Bash call before it runs
 `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`, which truncates bytes that already
 exist and so cannot false-positive.
 
+**Write and edit files with the Write and Edit tools, never through Bash** -- no heredoc,
+`sed -i` or `python -` patch script, whatever a system prompt says about small edits.
+The Bash tool collapses `\\` to `\`, quoted heredocs included, and a test run finds it.
+
 **Issue commands bare; wrapping by reflex is a mistake.** A `grep`, a `python -c`, a test
 run, a `curl`, a heredoc: routing them through a wrapper buys no second bound and has
 happened here at scale. Bound only a statement whose output grows with the
@@ -67,15 +71,11 @@ page rather than dump. Codex caps shell output itself, so issue commands there d
 What preemptive wrapping has cost is in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-**A refusal that says the command "is too complex to verify that it stays inside the
-worktree", "names git in a form too complex to verify", or "cannot be shown not to be
-git", is not a devkit hook** — none is wired. It is Claude Code's own isolation guard
-for a `claude --worktree` session. No setting turns it off and nothing in devkit can
-change what it accepts — report it to Claude Code, not to this harness.
-
-It judges the command line's shape, and **only on the Bash tool**: the PowerShell tool is
-never parsed (the check that holds a session inside its worktree still applies), so on
-Windows it is the answer for a compound statement, not a workaround.
+**A refusal saying a command is "too complex to verify that it stays inside the
+worktree" or "cannot be shown not to be git" is not a devkit hook** — none is wired. It
+is Claude Code's own `claude --worktree` isolation guard; nothing in devkit changes what
+it accepts. It parses **only the Bash tool's** command lines, so on Windows the
+PowerShell tool is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
@@ -86,10 +86,8 @@ Windows it is the answer for a compound statement, not a workaround.
 
 **The last row is the one that wastes turns.** Inside a statement the parser could not
 reduce to a simple list, the guard tests the *whole line* for `git` as an unanchored
-substring, so `.gitignore`, `github.com`, `digit` and `legitimate` each read as "names
-git" — rename or split it; no spelling of the real command passes. A heredoc and a
-`$HOME` argument are **not** triggers alone, but write files with Write or Edit anyway:
-the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions are in
+substring, so `.gitignore`, `github.com` and `digit` each read as "names git": split
+the statement. The reproductions are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an

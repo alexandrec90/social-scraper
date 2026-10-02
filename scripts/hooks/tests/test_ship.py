@@ -1,10 +1,22 @@
 """Unit tests for the deterministic mechanics behind /ship."""
 
+import sys
+import types
+
 import pytest
 
 from conftest import load_module
 
 ship = load_module("scripts/ship.py")
+# Before the autouse stub below replaces it in every test.
+real_reconcile_baseline = ship.reconcile_baseline
+
+
+@pytest.fixture(autouse=True)
+def _no_baseline_scan(monkeypatch):
+    """`_fix` reconciles the real baseline, which scans and may REWRITE this checkout's
+    `.devkit-untested.txt`; every test here gets a reconcile that found nothing."""
+    monkeypatch.setattr(ship, "reconcile_baseline", lambda: ((0, 0), ".devkit-untested.txt"))
 
 
 class _Result:
@@ -448,3 +460,59 @@ def test_a_quiet_fix_does_not_name_the_command(monkeypatch, capsys):
     monkeypatch.setattr(ship, "run_fixers", lambda paths, command: (0, "quiet"))
     assert ship._fix([]) == ship.EXIT_OK
     assert "ship: ran" not in capsys.readouterr().out
+
+
+def test_fix_drops_the_baseline_lines_the_change_covered(monkeypatch, capsys):
+    """ibkr_trader #74: a test that covered `make_connector` left its baseline line in,
+    and the vendored gate went red on a PR whose session had claimed a green suite.
+    The commit stage drops it like a formatter rewrite, and runs the fixers over it."""
+    monkeypatch.setattr(ship, "reconcile_baseline", lambda: ((1, 0), ".devkit-untested.txt"))
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M tests/test_x.py\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: ["pre-commit"])
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        ship, "run_fixers", lambda paths, command: seen.append(paths) or (0, "quiet")
+    )
+    assert ship._fix([]) == ship.EXIT_OK
+    assert seen == [["tests/test_x.py", ".devkit-untested.txt"]]
+    assert "dropped 1 line(s) this change covered" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("result", [None, (0, 0)])
+def test_nothing_to_drop_leaves_the_paths_alone(result):
+    """No baseline (`None`, an unadopted project) and a clean one are both no-ops."""
+    paths, line = ship.drop_covered_baseline(["a.py"], lambda: (result, ".devkit-untested.txt"))
+    assert (paths, line) == (["a.py"], "")
+
+
+def test_a_baseline_already_among_the_paths_is_not_listed_twice():
+    paths, _line = ship.drop_covered_baseline(
+        [".devkit-untested.txt"], lambda: ((2, 0), ".devkit-untested.txt")
+    )
+    assert paths == [".devkit-untested.txt"]
+
+
+def test_a_scan_that_cannot_read_the_tree_does_not_stop_the_fixers():
+    """The fixers are the commit stage's job; the ratchet is a courtesy on top of it."""
+
+    def broken():
+        raise SyntaxError("bad.py")
+
+    paths, line = ship.drop_covered_baseline(["a.py"], broken)
+    assert paths == ["a.py"] and "could not reconcile" in line
+
+
+def test_reconcile_baseline_records_nothing_new(monkeypatch):
+    """`before=None` is `reconcile`'s drop-only mode: a gap this change made is the
+    gate's to report, never the commit stage's to launder into the debt list."""
+    calls = []
+    fake = types.SimpleNamespace(
+        REPO_ROOT="root",
+        CFG="cfg",
+        BASELINE_NAME=".devkit-untested.txt",
+        reconcile=lambda root, cfg, before: calls.append((root, cfg, before)) or (3, 0),
+    )
+    monkeypatch.setitem(sys.modules, "untested_symbols", fake)
+    assert real_reconcile_baseline() == ((3, 0), ".devkit-untested.txt")
+    assert calls == [("root", "cfg", None)]
