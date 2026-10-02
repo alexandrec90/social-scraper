@@ -313,6 +313,34 @@ def test_pre_commit_is_looked_for_where_the_dispatcher_looks(tmp_path):
     ]
 
 
+def test_a_venv_with_its_interpreter_runs_pre_commit_as_a_module(tmp_path):
+    """uv writes the interpreter's absolute path into each console script, so a launcher
+    written from a tree since deleted dies with `uv trampoline failed to canonicalize
+    script path` -- the fix pass's ship step was refused on exactly that in devkit, whose
+    `claude --worktree` trees share the checkout's `.venv`. The venv's own interpreter
+    reads `pyvenv.cfg` and survives it, and it is still the dispatcher's choice."""
+    nothing = {"which": lambda name: None, "find_spec": lambda name: None}
+    for launcher, python in (
+        ("Scripts/pre-commit.exe", "Scripts/python.exe"),
+        ("bin/pre-commit", "bin/python"),
+    ):
+        tree = tmp_path / python.replace("/", "-")
+        for name in (launcher, python):
+            (tree / ".venv" / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / ".venv" / name).write_text("", encoding="utf-8")
+        assert ship.pre_commit_command(tree, None, **nothing) == [
+            str(tree / ".venv" / python),
+            "-m",
+            "pre_commit",
+        ]
+
+
+def test_a_launcher_with_no_interpreter_beside_it_is_run_as_it_is(tmp_path):
+    """No module form to fall back to: a launcher alone is what the venv offers."""
+    launcher = tmp_path / "Scripts" / "pre-commit.exe"
+    assert ship.venv_module_command(launcher) == [str(launcher)]
+
+
 def _fixers(*codes: int):
     """A fake runner answering the given exit codes in order, and the argv it saw."""
     results = [_Result(code) for code in codes]

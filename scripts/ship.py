@@ -35,6 +35,21 @@ EXIT_FIXERS_FAILED = 7
 PRE_COMMIT_TAILS = (Path("Scripts") / "pre-commit.exe", Path("bin") / "pre-commit")
 
 
+def venv_module_command(launcher: Path) -> list[str]:
+    """`<venv python> -m pre_commit` when the venv's interpreter sits beside `launcher`,
+    else the launcher itself.
+
+    uv writes the interpreter's absolute path into every console script, so one written
+    from a tree since deleted dies with `uv trampoline failed to canonicalize script
+    path` -- devkit's `claude --worktree` trees share the checkout's `.venv` through a
+    link, and the tree that last synced into it is gone the day it merges. The
+    interpreter reads `pyvenv.cfg` and survives that. The launcher still says pre-commit
+    is installed here. Mirrored in `git_policy.framework._pre_commit_command`.
+    """
+    python = launcher.with_name("python.exe" if launcher.suffix == ".exe" else "python")
+    return [str(python), "-m", "pre_commit"] if python.is_file() else [str(launcher)]
+
+
 # What `claude --worktree <name>` names the branch it cuts: the literal string
 # `worktree-` followed by the name, with any `/` replaced by `+`. It is hard-coded in the
 # CLI -- there is no setting for it -- so a session that isolates itself with the built-in
@@ -291,7 +306,7 @@ def pre_commit_command(
         for tail in PRE_COMMIT_TAILS:
             candidate = base / ".venv" / tail
             if candidate.is_file():
-                return [str(candidate)]
+                return venv_module_command(candidate)
     found = which("pre-commit")
     if found:
         return [found]
