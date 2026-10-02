@@ -396,3 +396,27 @@ def test_fix_refuses_with_a_remedy_when_no_pre_commit_exists(monkeypatch, capsys
     monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: None)
     assert ship._fix([]) == ship.EXIT_FIXERS_FAILED
     assert "provision first" in capsys.readouterr().err
+
+
+def test_a_failed_fix_names_the_command_it_ran(monkeypatch, capsys):
+    """4099febd: a launcher dying on uv's one-line `failed to canonicalize script path`
+    left the pass's pre-commit.log naming neither the launcher nor its venv."""
+    launcher = ["C:/checkout/.venv/Scripts/python.exe", "-m", "pre_commit"]
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M x.py\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: launcher)
+    monkeypatch.setattr(ship, "run_fixers", lambda paths, command: (7, "still fails"))
+    assert ship._fix([]) == 7
+    err = capsys.readouterr().err.splitlines()
+    assert err[-2] == f"ship: ran {' '.join(launcher)} run --files (1 path(s))"
+    # The verdict stays last: `ship_intent.refusal_line` falls back to the last line.
+    assert err[-1] == "ship: still fails"
+
+
+def test_a_quiet_fix_does_not_name_the_command(monkeypatch, capsys):
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M x.py\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: ["pre-commit"])
+    monkeypatch.setattr(ship, "run_fixers", lambda paths, command: (0, "quiet"))
+    assert ship._fix([]) == ship.EXIT_OK
+    assert "ship: ran" not in capsys.readouterr().out

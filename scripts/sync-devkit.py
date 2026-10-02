@@ -897,6 +897,41 @@ def regenerate_codex_hooks(root: Path) -> bool:
         return False
 
 
+CODEX_SKILLS_DIR = ".agents/skills"
+CODEX_CONTEXT_SCRIPT = "scripts/sync-codex-context.py"
+
+
+def remirror_codex_skills(root: Path) -> list[str]:
+    """Re-mirror `.claude/skills/` into `.agents/skills/`; the mirror paths it changed.
+
+    The skills mirror is the other Codex artifact a vendored script generates, and it
+    went stale exactly the way `.codex/hooks.json` did: v0.11.38 changed the vendored
+    `ship` and `go-nuts` skills, the pull copied them into `.claude/skills/`, and
+    social-scraper's adoption PR went red on the vendored mirror test because nothing
+    rewrote `.agents/skills/` -- only a project with its own pre-commit `sync-codex`
+    hook (carameli) ever got it refreshed.
+
+    Only for a project that already has the mirror, for the reason
+    `regenerate_codex_hooks` gives. In-process via the pulled `sync-codex-context.py`,
+    whose `mirror_tree` is the one definition of the mirror; absent or unloadable, this
+    does nothing, and the vendored test names the stale files in the project's gate.
+    """
+    mirror = root / CODEX_SKILLS_DIR
+    if not mirror.is_dir():
+        return []
+    context = _load_by_path("sync_codex_context", root / CODEX_CONTEXT_SCRIPT)
+    if context is None:
+        return []
+    source = root / ".claude" / "skills"
+    wanted, held = context.relative_files(source), context.relative_files(mirror)
+    changed = (wanted ^ held) | {
+        rel for rel in wanted & held if (mirror / rel).read_bytes() != (source / rel).read_bytes()
+    }
+    if changed:
+        context.mirror_tree(source, mirror)
+    return sorted(f"{CODEX_SKILLS_DIR}/{rel.as_posix()}" for rel in changed)
+
+
 # Not in MANIFEST, and it never will be: the file's content is a fact about one repo.
 # The name is shared so a pull can tell "already adopted" from "adopting now".
 UNTESTED_BASELINE_FILE = ".devkit-untested.txt"
@@ -1392,6 +1427,7 @@ class SyncOutcome:
     tightened: tuple[int, int] | None
     pull: bool
     reconciled: tuple[int, int] | None = None
+    codex_mirrored: tuple[str, ...] = ()
 
 
 def copy_manifest(
@@ -1455,6 +1491,8 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     # those settings, so regenerating first would bake back in whatever the prune
     # is about to remove.
     codex_regenerated = regenerate_codex_hooks(REPO_ROOT)
+    # After the copy and the deletions: the mirror is of the skills this pull left.
+    codex_mirrored = tuple(remirror_codex_skills(REPO_ROOT))
     # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
     # baseline seeded while the stamp is absent grandfathers every vendored module
     # into the consumer's numbers -- and once the stamp lands the gate stops scanning
@@ -1485,6 +1523,7 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
         tightened=tightened,
         pull=True,
         reconciled=reconciled,
+        codex_mirrored=codex_mirrored,
     )
 
 
@@ -1540,6 +1579,8 @@ def report_sync(outcome: SyncOutcome) -> None:
         # Named, because it is the one file the pull rewrote that was never copied
         # from the source: it is generated here, from this project's own settings.
         print(f"  (regenerated from {SETTINGS_FILE}) {CODEX_HOOKS_FILE}")
+    for rel in outcome.codex_mirrored:
+        print(f"  (re-mirrored from .claude/skills/) {rel}")
     if outcome.seeded is not None:
         # Only on the pull that adopts the gate. Named because it is a claim about
         # this repo that nobody wrote by hand, and because the number is the debt
