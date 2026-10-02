@@ -227,6 +227,24 @@ def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
     return [*tests, *extra]
 
 
+def by_test_root(targets: list[str]) -> list[list[str]]:
+    """`targets` split into one list per `TEST_DIRS` root, in first-seen order.
+
+    Each root may hold a top-level `conftest.py`, and pytest's default import mode loads
+    every one of them as the single module `conftest`: handed both trees in one process,
+    `tests/`'s `from conftest import IsolatedSettings` resolved against
+    `scripts/hooks/tests/conftest.py`, and every run errored with no test collected
+    (social-scraper, 659c4f62). One process per root is how the gate runs them anyway.
+    """
+    roots = sorted(TEST_DIRS, key=len, reverse=True)
+    groups: dict[str, list[str]] = {}
+    for target in targets:
+        posix = target.replace("\\", "/")
+        root = next((d for d in roots if posix.startswith(f"{d}/")), "")
+        groups.setdefault(root, []).append(target)
+    return list(groups.values())
+
+
 def _named_tests(posix: str) -> list[str]:
     """The test files the changed file `posix` could name, existing or not."""
     stem = posix.rsplit("/", 1)[-1]
@@ -409,8 +427,7 @@ def _run_planned(cmd: list[str], targets: list[str], front: list[str], failures:
         ARTIFACT.write_text("", encoding="utf-8")
         print("run-tests: nothing to run (artifact cleared)")
         return 0
-    if targets:
-        failures = [*failures, run_pytest(cmd + targets)]
+    failures = [*failures, *(run_pytest(cmd + group) for group in by_test_root(targets))]
     if front:
         failures = [*failures, run_vitest(front, REPO_ROOT)]
     return _finish(failures)

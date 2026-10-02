@@ -198,17 +198,21 @@ def reference_pattern(symbol: str) -> re.Pattern[str]:
     return re.compile(
         rf"\.{name}\b"  # module.symbol
         rf"|(?<![\w.]){name}\s*\("  # symbol(...) after a from-import
-        rf"|^\s*from\s+.*\bimport\b.*\b{name}\b",  # from mod import symbol
+        # from mod import symbol, and from mod import (\n    symbol,\n) across lines
+        rf"|^\s*from\s+.*\bimport\b[ \t]*(?:\([^)]*?\b{name}\b|[^\n(]*?\b{name}\b)",
         re.MULTILINE,
     )
 
 
 # The three shapes of `reference_pattern`, each capturing the name it would have been
 # asked about. `\w+` is greedy, so the captured word is the maximal identifier -- which
-# is exactly what the `\b` on the symbol side of `reference_pattern` demands.
+# is exactly what the `\b` on the symbol side of `reference_pattern` demands. The import
+# reads a parenthesised list to its `)`, across lines: sports_betting #50's
+# `from sports_betting.overlay.server import (\n    ...,\n    OverlayHandler,\n)` read as no
+# reference to anything it listed, so a class the test only compared by `is` was a gap.
 _ATTRIBUTE_RE = re.compile(r"\.(\w+)")
 _CALL_RE = re.compile(r"(?<![\w.])(\w+)\s*\(")
-_FROM_IMPORT_RE = re.compile(r"^\s*from\s+.*?\bimport\b(.*)", re.MULTILINE)
+_FROM_IMPORT_RE = re.compile(r"^\s*from\s+.*?\bimport\b[ \t]*(\([^)]*|[^\n(]*)", re.MULTILINE)
 _WORD_RE = re.compile(r"\w+")
 
 
@@ -381,8 +385,58 @@ def module_pattern(module: Path) -> re.Pattern[str]:
     )
 
 
-def corpus_files(module: Path, texts: dict[Path, str]) -> list[Path]:
-    """The test files that mention `module`, in the order `texts` lists them.
+def dotted_name(root: Path, directory: Path) -> str:
+    """`directory`'s import name: its path from the outermost enclosing package, dotted.
+
+    `directory` is relative to `root`. Empty where it is not a package. Walked up rather
+    than taken from the path, so a `src/` layout names `pkg.sub`, not `src.pkg.sub`.
+    """
+    parts: list[str] = []
+    current = directory
+    while current.name and (root / current / "__init__.py").is_file():
+        parts.insert(0, current.name)
+        current = current.parent
+    return ".".join(parts)
+
+
+def reexporting_package(root: Path, module: Path) -> str:
+    """The dotted name of `module`'s package where its `__init__.py` imports from it.
+
+    sports_betting #50: `from sports_betting.overlay import evaluate, parse_offers` is how
+    a test reaches a package's API, and it names neither `overlay/evaluate.py` nor
+    `overlay/offers.py`, so both read as untested while the test called every function.
+    `__init__.py` is skipped as a source because it is re-exports; this is the other half,
+    a test that reaches a module through them. One level: a package re-exported again by
+    its own parent is not followed. Empty where nothing re-exports `module`.
+    """
+    package = dotted_name(root, module.parent)
+    init = root / module.parent / "__init__.py"
+    if not package or not init.is_file():
+        return ""
+    try:
+        tree = ast.parse(init.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return ""
+    absolute = f"{package}.{module.stem}"
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        relative = node.level == 1 and node.module == module.stem
+        if relative or (node.level == 0 and node.module == absolute):
+            return package
+    return ""
+
+
+def package_pattern(package: str) -> re.Pattern[str]:
+    """Matches a test file's import of `package` itself -- not of a module inside it,
+    which `module_pattern` answers for that module."""
+    name = re.escape(package)
+    return re.compile(rf"^\s*(?:from\s+{name}\s+import\b|import\s+{name}\b(?!\.))", re.MULTILINE)
+
+
+def corpus_files(module: Path, texts: dict[Path, str], package: str = "") -> list[Path]:
+    """The test files that mention `module`, or import the `package` that re-exports it,
+    in the order `texts` lists them.
 
     The substring test in front of the regex is a **necessary condition of every
     alternative** {@link module_pattern} accepts -- each one contains either the file
@@ -397,15 +451,18 @@ def corpus_files(module: Path, texts: dict[Path, str]) -> list[Path]:
     60s timeout on `test_every_public_symbol_is_named_by_a_test`; a `in` check that
     settles the same question for most pairs brings it to about 4s. A timing-out gate
     is not a slow gate, it is a red one, and the failure names a regex rather than the
-    coverage it was asked about.
+    coverage it was asked about. The package's import spells `package` literally, so the
+    same prefilter holds for it.
     """
     mentions = module_pattern(module)
     name = module.name
     snake = module.stem.replace("-", "_")
+    via = package_pattern(package) if package else None
     return [
         rel
         for rel, text in texts.items()
-        if (name in text or snake in text) and mentions.search(text)
+        if ((name in text or snake in text) and mentions.search(text))
+        or (via is not None and package in text and via.search(text))
     ]
 
 
@@ -457,7 +514,7 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
             # louder. Skipping keeps a broken file from masking every other module.
             continue
         names: set[str] = set()
-        for rel in corpus_files(module, texts):
+        for rel in corpus_files(module, texts, reexporting_package(root, module)):
             names |= referenced[rel]
             names.update(name for name, files in owned[rel].items() if module.name in files)
         found.extend(entry(module, symbol) for symbol in symbols if symbol not in names)

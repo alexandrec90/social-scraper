@@ -55,6 +55,7 @@ scripts/report-workflow-failure.py::run_env
 scripts/report-workflow-failure.py::run_facts
 scripts/report-workflow-failure.py::stopped_body
 scripts/report-workflow-failure.py::sweep
+scripts/run-tests.py::by_test_root
 scripts/run-tests.py::cap_failure_blocks
 scripts/run-tests.py::changed_paths
 scripts/run-tests.py::default_branch
