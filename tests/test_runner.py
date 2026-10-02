@@ -42,6 +42,7 @@ def settings(tmp_path):
         reddit_subreddits="wallstreetbets",
         reddit_min_delay_s=0,
         reddit_max_delay_s=0,
+        reddit_active_hours="",
         x_active_hours="",
         x_pages_per_cycle=1,
         x_min_delay_s=0,
@@ -71,6 +72,13 @@ def test_policy_for_each_platform(settings):
     assert reddit.platform == REDDIT and reddit.active_hours is None
     assert x.platform == X and x.daily_budget == settings.x_daily_budget
     assert x.timezone == settings.scraper_timezone
+    assert x.block_cooldown_max_hours == settings.block_cooldown_max_hours
+
+
+def test_policy_for_reddit_keeps_its_own_active_hours(settings):
+    rested = settings.model_copy(update={"reddit_active_hours": "6-24"})
+    assert policy_for(rested, REDDIT).active_hours == (6, 24)
+    assert policy_for(rested, X).active_hours is None
 
 
 def test_x_plan_mirrors_settings(settings):
@@ -82,6 +90,7 @@ def test_default_browser_factory_builds_a_profile_per_platform(settings):
     browser = default_browser_factory(settings)(X)
     assert isinstance(browser, PlaywrightBrowser)
     assert browser.profile_dir == settings.profile_dir(X)
+    assert browser.minimized is settings.browser_minimized
 
 
 def test_universe_for_reads_the_cache(settings):
