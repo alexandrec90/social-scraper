@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     # "chrome" drives the installed Google Chrome (a real fingerprint, no download);
     # empty uses Playwright's bundled Chromium (`playwright install chromium`).
     browser_channel: str = "chrome"
-    browser_headless: bool = False
+    # Headless with the `HeadlessChrome` UA token renamed gets through Reddit and X
+    # (measured, see `browser.py`), and opens no window on the desktop. `login` is always
+    # visible; `scrape --headed` / `run --headed` show the window for debugging.
+    browser_headless: bool = True
     # IANA zone for the X active-hours window; a human account does not post at 04:00.
     scraper_timezone: str = "America/Toronto"
 

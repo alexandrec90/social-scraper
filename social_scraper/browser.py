@@ -9,6 +9,18 @@ Chrome's. `--disable-blink-features=AutomationControlled` and dropping
 `--enable-automation` remove the two loudest automation tells (`navigator.webdriver`
 and the "controlled by automated software" bar).
 
+Why headless works (`BROWSER_HEADLESS`, the default): measured 2026-10-02 with Chrome
+154 and logged-out throwaway profiles. Playwright's `headless=True` on the Chrome
+channel is Chrome's new headless mode, and its only tell that mattered was the
+user-agent token `HeadlessChrome/`: with it, Reddit served "blocked by network security"
+on every load and 403 on the JSON, and X answered with an HTTP error. Renaming the token
+(`headful_user_agent`) got through both, twice. Client hints (`Sec-CH-UA`), the WebGL
+renderer (the real GPU, not SwiftShader), plugins and `window.chrome` already match
+headful Chrome. Measured residual: `outerWidth/outerHeight` equal the viewport. The
+headful alternatives were worse: `--window-position=-32000,-32000` took the keyboard
+focus on the first navigation, and `--start-minimized` was ignored (the window opened on
+screen).
+
 Server-rendered data. X's 2026 web app streams the first page of a timeline into the
 HTML as JavaScript (TanStack Router / seroval: `self.$R`), not as a GraphQL XHR, and
 deletes `self.$R` once hydrated. `KEEP_SSR_JS` runs before any page script and keeps a
@@ -87,6 +99,11 @@ SSR_TWEETS_JS = """
 """
 
 
+def headful_user_agent(user_agent: str) -> str:
+    """Chrome's own user agent with the headless tell renamed (see the module docstring)."""
+    return user_agent.replace("HeadlessChrome/", "Chrome/")
+
+
 class PlaywrightBrowser:
     def __init__(self, profile_dir: Path, channel: str = "chrome", headless: bool = False) -> None:
         self.profile_dir = profile_dir
@@ -102,18 +119,37 @@ class PlaywrightBrowser:
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
-        self._ctx = self._pw.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            channel=self.channel or None,
-            headless=self.headless,
-            viewport={"width": 1366, "height": 900},
-            locale="en-US",
-            args=LAUNCH_ARGS,
-            ignore_default_args=["--enable-automation"],
-        )
+        user_agent = headful_user_agent(self._probe_user_agent()) if self.headless else None
+        self._ctx = self._pw.chromium.launch_persistent_context(**self.launch_options(user_agent))
         self._ctx.add_init_script(KEEP_SSR_JS)
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         return self
+
+    def launch_options(self, user_agent: str | None) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "user_data_dir": str(self.profile_dir),
+            "channel": self.channel or None,
+            "headless": self.headless,
+            "viewport": {"width": 1366, "height": 900},
+            "locale": "en-US",
+            "args": LAUNCH_ARGS,
+            "ignore_default_args": ["--enable-automation"],
+        }
+        if user_agent:
+            options["user_agent"] = user_agent
+        return options
+
+    def _probe_user_agent(self) -> str:
+        """The installed Chrome's own UA, read from a profile-less headless launch.
+
+        Read rather than hard-coded so the version always matches the binary: a UA
+        claiming Chrome 140 from a Chrome 154 engine is a tell of its own.
+        """
+        probe = self._pw.chromium.launch(channel=self.channel or None, headless=True)
+        try:
+            return probe.new_page().evaluate("navigator.userAgent")
+        finally:
+            probe.close()
 
     def __exit__(
         self,

@@ -1,10 +1,12 @@
 import argparse
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from conftest import Clock, IsolatedSettings
 
-from social_scraper import cli
+from social_scraper import cli, runner
 from social_scraper.cli import (
     build_parser,
     cmd_export,
@@ -16,9 +18,12 @@ from social_scraper.cli import (
     main,
     platforms_of,
 )
-from social_scraper.models import PLATFORMS, AuthorInfo, Post
+from social_scraper.db.repository import make_engine
+from social_scraper.db.throttle_store import DbThrottleStore
+from social_scraper.models import PLATFORMS, REDDIT, X, AuthorInfo, Post
 from social_scraper.pipeline import Ingestor
-from social_scraper.runner import RunReport
+from social_scraper.runner import RunReport, write_report
+from social_scraper.throttle import Block
 
 
 @pytest.fixture
@@ -28,6 +33,10 @@ def settings(tmp_path):
         archive_root=tmp_path / "lake",
         logs_dir=tmp_path / "logs",
     )
+
+
+def sqlite_engine_at(path):
+    return make_engine(f"sqlite:///{path.as_posix()}")
 
 
 def seed(engine, universe):
@@ -47,6 +56,10 @@ def test_parser_accepts_every_command():
     p = build_parser()
     assert p.parse_args(["scrape"]).platform == "all"
     assert p.parse_args(["scrape", "x", "--no-export"]).no_export
+    assert p.parse_args(["scrape", "--jitter"]).jitter
+    assert not p.parse_args(["scrape"]).jitter
+    assert p.parse_args(["run", "--headed"]).headed
+    assert not p.parse_args(["scrape"]).headed
     assert p.parse_args(["run", "reddit", "--cycles", "2"]).cycles == 2
     assert p.parse_args(["login", "x"]).platform == "x"
     assert p.parse_args(["lake", "--days", "7"]).days == 7
@@ -59,13 +72,64 @@ def test_platforms_of():
     assert platforms_of("x") == ("x",)
 
 
+def scrape_args(platform="x", jitter=False):
+    return argparse.Namespace(platform=platform, no_export=True, jitter=jitter)
+
+
+def report_body(settings):
+    return json.loads((settings.logs_dir / runner.REPORT_FILE).read_text())
+
+
 def test_scrape_writes_the_report_and_sets_exit_code(settings, engine, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", errors=["x: boom"]))
-    args = argparse.Namespace(platform="x", no_export=True)
-    assert cmd_scrape(settings, engine, args) == 1
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
     assert "FAILED" in capsys.readouterr().out
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
-    assert cmd_scrape(settings, engine, args) == 0
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+
+
+def test_scrape_with_the_database_down_exits_1_and_overwrites_the_report(settings, tmp_path):
+    write_report(RunReport("earlier"), settings.logs_dir)
+    unreachable = sqlite_engine_at(tmp_path / "no-such-dir" / "db.sqlite")
+    assert cmd_scrape(settings, unreachable, scrape_args()) == 1
+    body = report_body(settings)
+    assert body["ok"] is False and body["started_at"] != "earlier"
+    assert body["errors"][0].startswith("cycle: OperationalError")
+
+
+def test_scrape_reports_a_crash_outside_the_platform_guard(settings, engine, monkeypatch):
+    def crash(*a, **kw):
+        raise KeyError("payload shape changed")
+
+    monkeypatch.setattr(cli, "run_cycle", crash)
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    assert "KeyError" in report_body(settings)["errors"][0]
+
+
+def test_scrape_exits_0_when_every_platform_is_deliberately_paused(settings, engine):
+    """Outside X hours and Reddit's circuit open: nothing done, nothing failed."""
+    cache = settings.data_dir / "symbols" / "nasdaqtraded.txt"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("Nasdaq Traded|Symbol|Security Name|Test Issue\n")
+    hour = datetime.now(ZoneInfo(settings.scraper_timezone)).hour
+    start = (hour + 1) % 24
+    settings.x_active_hours = f"{start}-{start + 1}"
+    now = datetime.now(UTC)
+    DbThrottleStore(engine).set_block(REDDIT, Block(now + timedelta(hours=1), "captcha", 1), now)
+    assert cmd_scrape(settings, engine, scrape_args("all")) == 0
+    platforms = report_body(settings)["platforms"]
+    assert "outside active hours" in platforms[X]["skipped"]
+    assert "paused" in platforms[REDDIT]["skipped"]
+
+
+def test_scrape_jitter_waits_up_to_a_fifth_of_a_cycle(settings, engine, monkeypatch):
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", slept.append)
+    cmd_scrape(settings, engine, scrape_args())
+    assert slept == []
+    cmd_scrape(settings, engine, scrape_args(jitter=True))
+    assert len(slept) == 1 and 0 <= slept[0] <= 0.2 * 60 * settings.cycle_minutes
 
 
 def test_run_passes_options_through(settings, engine, monkeypatch):
@@ -105,6 +169,23 @@ def test_main_init_db_and_dispatch(tmp_path, monkeypatch, capsys):
     assert main(["init-db"]) == 0
     assert main(["status"]) == 0
     assert "tables ready" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("argv", "headless"), [(["scrape"], True), (["scrape", "--headed"], False)]
+)
+def test_main_scrape_is_headless_unless_headed(tmp_path, monkeypatch, argv, headless):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{(tmp_path / 'db.sqlite').as_posix()}")
+    monkeypatch.delenv("BROWSER_HEADLESS", raising=False)
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "run_cycle",
+        lambda s, *a, **kw: seen.update(headless=s.browser_headless) or RunReport("t"),
+    )
+    assert main(argv) == 0
+    assert seen["headless"] is headless
 
 
 def test_main_login_opens_the_profile(tmp_path, monkeypatch):

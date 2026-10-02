@@ -4,7 +4,8 @@ A real Chrome is not available in CI. What these pin down is the glue: which cal
 reach the page, how responses become `PageResult`s, that bodies are read after the
 page settles (never inside the event handler), and that the listener is removed. The
 real browser was exercised live on 2026-09-28 (Reddit JSON through a warmed-up
-profile; X server-streamed tweets from a logged-out profile page).
+profile; X server-streamed tweets from a logged-out profile page), and headless with the
+renamed user agent on 2026-10-02 (the same two reads, through this class).
 """
 
 from pathlib import Path
@@ -17,8 +18,99 @@ from social_scraper.browser import (
     SSR_PAYLOAD_SUFFIX,
     SSR_TWEETS_JS,
     PlaywrightBrowser,
+    headful_user_agent,
     open_for_login,
 )
+
+HEADLESS_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "HeadlessChrome/154.0.0.0 Safari/537.36"
+)
+
+
+class FakeLaunched:
+    """Stands in for both a probe `Browser` and a persistent context."""
+
+    def __init__(self, calls, ua=HEADLESS_UA):
+        self.calls, self.ua, self.pages = calls, ua, []
+
+    def new_page(self):
+        launched = self
+
+        class Page:
+            def evaluate(self, script):
+                assert script == "navigator.userAgent"
+                return launched.ua
+
+        return Page()
+
+    def add_init_script(self, script):
+        self.calls.append(("init_script", script))
+
+    def close(self):
+        self.calls.append(("close",))
+
+
+class FakePlaywright:
+    def __init__(self):
+        self.calls = []
+        self.chromium = self
+
+    def start(self):
+        return self
+
+    def stop(self):
+        self.calls.append(("stop",))
+
+    def launch(self, **kwargs):
+        self.calls.append(("probe", kwargs))
+        return FakeLaunched(self.calls)
+
+    def launch_persistent_context(self, **kwargs):
+        self.calls.append(("persistent", kwargs))
+        return FakeLaunched(self.calls)
+
+
+def enter(monkeypatch, tmp_path, headless):
+    fake = FakePlaywright()
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: fake)
+    with PlaywrightBrowser(tmp_path / "profile", "chrome", headless=headless):
+        pass
+    return fake.calls
+
+
+def test_headful_user_agent_renames_only_the_headless_token():
+    assert headful_user_agent(HEADLESS_UA) == HEADLESS_UA.replace("HeadlessChrome/", "Chrome/")
+    headful = HEADLESS_UA.replace("HeadlessChrome/", "Chrome/")
+    assert headful_user_agent(headful) == headful
+    assert headful_user_agent("") == ""
+
+
+def test_headless_launch_probes_the_real_ua_and_renames_it(monkeypatch, tmp_path):
+    calls = enter(monkeypatch, tmp_path, headless=True)
+    kinds = [c[0] for c in calls]
+    # The probe is closed before the profile is opened: one Chrome at a time.
+    assert kinds[:3] == ["probe", "close", "persistent"]
+    assert calls[0][1] == {"channel": "chrome", "headless": True}
+    options = calls[2][1]
+    assert options["headless"] is True
+    assert options["user_agent"] == headful_user_agent(HEADLESS_UA)
+    assert options["user_data_dir"] == str(tmp_path / "profile")
+    assert ("init_script", KEEP_SSR_JS) in calls
+
+
+def test_headed_launch_keeps_chromes_own_ua(monkeypatch, tmp_path):
+    calls = enter(monkeypatch, tmp_path, headless=False)
+    assert [c[0] for c in calls if c[0] in ("probe", "persistent")] == ["persistent"]
+    options = calls[0][1]
+    assert options["headless"] is False and "user_agent" not in options
+
+
+def test_launch_options_for_the_bundled_chromium():
+    options = PlaywrightBrowser(Path("p"), channel="").launch_options(None)
+    assert options["channel"] is None
+    assert "--disable-blink-features=AutomationControlled" in options["args"]
+    assert options["ignore_default_args"] == ["--enable-automation"]
 
 
 class FakeResponse:

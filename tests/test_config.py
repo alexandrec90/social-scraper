@@ -55,7 +55,7 @@ def test_defaults_are_conservative():
     assert "wallstreetbets" in s.subreddits
     assert s.x_daily_budget <= 200
     assert s.x_min_delay_s >= 30
-    assert s.browser_headless is False  # headless Chrome is blocked by Reddit (measured)
+    assert s.browser_headless is True  # passes Reddit and X once the UA is renamed (measured)
     assert len(s.x_queries) >= 3
 
 

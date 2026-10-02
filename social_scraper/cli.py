@@ -2,12 +2,19 @@
 
 init-db               create the operational tables
 login reddit|x        open a visible browser to sign in once; the profile keeps it
-scrape [reddit|x|all] one cycle now, then export (skip with --no-export)
+scrape [reddit|x|all] one cycle now, then export (skip with --no-export); --jitter
+                      first waits a random 0-20% of CYCLE_MINUTES, for schedulers
 run                   cycle forever every CYCLE_MINUTES (or --cycles N)
+                      scrape and run take --headed: show Chrome despite BROWSER_HEADLESS
 export                copy new rows to the lake
 status                budgets, pauses, row counts, trending symbols, X accounts
 lake [--days N]       what the lake holds, per symbol and day (DuckDB lens)
 universe              refresh the symbol directory and print its size
+
+`scrape` exits 1 when the cycle failed -- the database unreachable, a browser crash, a
+platform erroring, a failed export -- and 0 otherwise. A platform deliberately left alone
+(outside X active hours, budget spent, circuit breaker open) is a skip, not a failure, so
+a scheduler firing outside the active hours sees 0.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -26,7 +34,16 @@ from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.export import export_all
 from social_scraper.models import PLATFORMS, REDDIT, X
-from social_scraper.runner import run_cycle, run_forever, universe_for, write_report
+from social_scraper.runner import (
+    RunReport,
+    run_cycle,
+    run_forever,
+    start_jitter_s,
+    universe_for,
+    write_report,
+)
+
+log = logging.getLogger(__name__)
 
 LOGIN_URLS = {REDDIT: "https://www.reddit.com/login/", X: "https://x.com/i/flow/login"}
 
@@ -42,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
         cmd = sub.add_parser(name)
         cmd.add_argument("platform", nargs="?", default="all", choices=(*PLATFORMS, "all"))
         cmd.add_argument("--no-export", action="store_true")
+        cmd.add_argument("--headed", action="store_true")
+    sub.choices["scrape"].add_argument("--jitter", action="store_true")
     sub.choices["run"].add_argument("--cycles", type=int, default=None)
     sub.add_parser("export")
     sub.add_parser("status")
@@ -56,8 +75,22 @@ def platforms_of(choice: str) -> tuple[str, ...]:
 
 
 def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
-    schema.create_all(engine)
-    report = run_cycle(settings, engine, platforms_of(args.platform), export=not args.no_export)
+    if args.jitter:
+        # A scheduler fires on a fixed grid, and a fixed interval is a bot signature.
+        time.sleep(start_jitter_s(settings.cycle_minutes))
+    started = datetime.now(UTC).isoformat()
+    try:
+        schema.create_all(engine)
+        report = run_cycle(settings, engine, platforms_of(args.platform), export=not args.no_export)
+    except Exception as exc:
+        # The database down, or a bug outside the per-platform guard. Still overwrite the
+        # report: the previous run's "ok" must not be what is left on disk.
+        log.exception("scrape cycle crashed")
+        report = RunReport(
+            started_at=started,
+            finished_at=datetime.now(UTC).isoformat(),
+            errors=[f"cycle: {type(exc).__name__}: {exc}"],
+        )
     path = write_report(report, settings.logs_dir)
     print(f"{'ok' if report.ok else 'FAILED'} -- details in {path}")
     return 0 if report.ok else 1
@@ -130,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = Settings()
+    if getattr(args, "headed", False):
+        settings.browser_headless = False
     if args.command == "login":
         from social_scraper.browser import open_for_login
 

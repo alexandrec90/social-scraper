@@ -17,6 +17,7 @@ from social_scraper.runner import (
     run_cycle,
     run_forever,
     run_platform,
+    start_jitter_s,
     universe_for,
     write_report,
     x_plan,
@@ -111,6 +112,23 @@ def test_run_platform_skips_a_paused_platform_without_a_browser(settings, engine
     assert "paused" in run_platform(settings, X, engine, ingestor, never)["skipped"]
 
 
+def test_run_platform_skips_when_the_budget_is_spent(settings, engine):
+    settings.x_hourly_budget = 0
+    ingestor = runner.Ingestor(engine, Universe({}))
+    result = run_platform(settings, X, engine, ingestor, lambda p: FakeBrowser())
+    assert "budget" in result["skipped"] and "error" not in result
+
+
+def test_budget_running_out_mid_crawl_is_a_skip_not_an_error(settings, engine):
+    settings.symbol_universe_max_age_hours = 1e9
+    settings.reddit_hourly_budget = 1  # the warm-up spends it; the first listing stops
+    report = run_cycle(
+        settings, engine, (REDDIT,), factory=lambda p: reddit_browser(), export=False
+    )
+    assert report.ok, report.errors
+    assert "budget" in report.platforms[REDDIT]["skipped"]
+
+
 def test_run_platform_reports_browser_crash(settings, engine):
     def crash(platform):
         raise PlaywrightError("Chrome not found")
@@ -154,3 +172,10 @@ def test_run_forever_runs_n_cycles_and_sleeps_between(settings, engine, monkeypa
     assert len(slept) == 1
     assert 0.8 * 60 * settings.cycle_minutes <= slept[0] <= 1.2 * 60 * settings.cycle_minutes
     assert (settings.logs_dir / runner.REPORT_FILE).exists()
+
+
+def test_start_jitter_is_up_to_a_fifth_of_a_cycle():
+    waits = [start_jitter_s(30) for _ in range(200)]
+    assert all(0 <= w <= 0.2 * 30 * 60 for w in waits)
+    assert len(set(waits)) > 1
+    assert start_jitter_s(0) == 0
