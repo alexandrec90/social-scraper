@@ -23,6 +23,7 @@ from social_scraper.x.discovery import SEED, TRACKED
 from social_scraper.x.scraper import (
     QUERY_INDEX_KEY,
     SEARCHED_PREFIX,
+    TIMELINE_OPS,
     XPlan,
     XScraper,
     classify,
@@ -31,12 +32,21 @@ from social_scraper.x.scraper import (
 )
 
 GQL = "https://x.com/i/api/graphql/abc/SearchTimeline?variables=1"
+# The profile timeline's op since 2026-10-03; `UserTweets` no longer fires on a profile load.
+TIMELINE_GQL = (
+    "https://x.com/i/api/graphql/qtvmQffnepvr0oPe4A8MqQ/UserOriginalsTimeline?variables=1"
+)
 ALICE = x_user_classic("100", "alice", followers=20_000)
 BOB = x_user_classic("200", "bob", followers=3_000)
 
 
 def page(*tweets, status=200, url="https://x.com/search"):
     return PageResult(200, url, payloads=[Payload(GQL, status, x_search_payload(*tweets))])
+
+
+def timeline_page(*tweets, url="https://x.com/alice"):
+    """A profile load as X serves it logged in: the Posts tab's own GraphQL op."""
+    return PageResult(200, url, payloads=[Payload(TIMELINE_GQL, 200, x_search_payload(*tweets))])
 
 
 def scraper(engine, universe, browser, clock=None, **plan):
@@ -64,6 +74,13 @@ def test_graphql_filter_and_search_url():
         "https://x.com/search?q=%24NVDA%20lang%3Aen&src=typed_query&f=live"
     )
     assert search_url("x", False).endswith("f=top")
+
+
+def test_timeline_filter_takes_the_profile_posts_op():
+    want = graphql_filter(TIMELINE_OPS)
+    assert want(TIMELINE_GQL)
+    assert not want("https://x.com/i/api/graphql/abc/UserByScreenName?x")
+    assert not want(GQL)
 
 
 @pytest.mark.parametrize(
@@ -124,11 +141,10 @@ def test_timeline_visit_keeps_finance_tweets_and_learns_amplified(engine, univer
     with engine.begin() as conn:
         accounts.add_seeds(conn, ["alice"], NOW)
     rt_original = x_tweet_classic("9", "$TSLA squeeze incoming", BOB, ("TSLA",))
-    timeline = page(
+    timeline = timeline_page(
         x_tweet_classic("1", "coffee time", ALICE),
         x_tweet_classic("2", "$NVDA earnings beat", ALICE, ("NVDA",)),
         x_tweet_classic("3", "RT", ALICE, retweeted_status_result={"result": rt_original}),
-        url="https://x.com/alice",
     )
     browser = FakeBrowser({"https://x.com/alice": timeline})
     browser.default = page()
@@ -151,9 +167,7 @@ def test_login_wall_on_search_still_visits_timelines(engine, universe):
     browser = FakeBrowser(
         {
             "https://x.com/search": login,
-            "https://x.com/alice": page(
-                x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",)), url="https://x.com/alice"
-            ),
+            "https://x.com/alice": timeline_page(x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",))),
         }
     )
     stats = scraper(engine, universe, browser, pages=4, search_share=0.5, watchlist=("NVDA",)).run()

@@ -45,7 +45,10 @@ from social_scraper.x.parse import X_BASE, parse_payloads
 log = logging.getLogger(__name__)
 
 SEARCH_OPS = ("SearchTimeline",)
-TIMELINE_OPS = ("UserTweets", "UserTweetsAndReplies")
+# A signed-in profile load fetches its Posts tab as `UserOriginalsTimeline` (captured
+# 2026-10-03, when `UserTweets` stopped firing and every timeline visit came back empty);
+# the older names stay for the Replies tab and pagination.
+TIMELINE_OPS = ("UserOriginalsTimeline", "UserTweets", "UserTweetsAndReplies")
 # `/i/jf/onboarding/web?...mode=login` is where a logged-out search lands (2026-09-28).
 _LOGIN_PATHS = (
     "/login",
