@@ -3,19 +3,20 @@ from datetime import timedelta
 
 import pyarrow as pa
 import pytest
-from conftest import NOW
+from conftest import LAKE_BUCKET, NOW, bucket_keys
 
 from social_scraper.archive import manifest
 from social_scraper.archive.manifest import (
     REQUIRED_KEYS,
     DatasetSpec,
     ManifestError,
-    catalog_path,
+    catalog_key,
     load,
     partition_entry,
     validate,
     write,
 )
+from social_scraper.archive.store import LocalStore, S3Store
 
 SPEC = DatasetSpec(
     name="social_scraper_demo",
@@ -30,8 +31,9 @@ def test_schema_strings_use_arrow_type_names():
     assert SPEC.schema_strings() == {"id": "string", "created_at": "timestamp[us, tz=UTC]"}
 
 
-def test_catalog_path(tmp_path):
-    assert catalog_path(tmp_path, "d") == tmp_path / "_catalog" / "d.json"
+def test_catalog_key_is_data_lakes_manifest_key():
+    # data-lake's `manifest_key`: f"{CATALOG_PREFIX}{dataset}.json" with "_catalog/".
+    assert catalog_key("d") == "_catalog/d.json"
 
 
 def test_partition_entry_is_iso():
@@ -45,21 +47,37 @@ def test_partition_entry_is_iso():
 
 
 def test_write_produces_what_data_lake_reads(tmp_path):
+    store = LocalStore(tmp_path)
     parts = {"demo/part.parquet": partition_entry(1, NOW, NOW, NOW)}
-    written = write(tmp_path, SPEC, parts, NOW)
-    on_disk = json.loads(catalog_path(tmp_path, SPEC.name).read_text())
-    assert on_disk == written == load(tmp_path, SPEC.name)
+    written = write(store, SPEC, parts, NOW)
+    path = tmp_path / "_catalog" / f"{SPEC.name}.json"
+    on_disk = json.loads(path.read_text())
+    assert on_disk == written == load(store, SPEC.name)
     assert REQUIRED_KEYS <= on_disk.keys()
     # The key data-lake's DatasetManifest.from_dict requires (sports_betting once wrote
     # `timestamp_column` and the lake raised KeyError on it).
     assert on_disk["ts_column"] == "created_at"
     assert on_disk["schema_version"] == manifest.SCHEMA_VERSION == 1
     assert on_disk["key_columns"] == ["id"]
-    assert not catalog_path(tmp_path, SPEC.name).with_suffix(".json.tmp").exists()
+    assert [p.name for p in path.parent.iterdir()] == [path.name]  # no .tmp left
+
+
+def test_write_and_load_through_the_bucket(s3_client):
+    bucket = S3Store(s3_client, LAKE_BUCKET)
+    written = write(bucket, SPEC, {"demo/part.parquet": partition_entry(1, NOW, NOW, NOW)}, NOW)
+    assert bucket_keys(s3_client) == {f"_catalog/{SPEC.name}.json"}
+    assert load(bucket, SPEC.name) == written
 
 
 def test_load_missing_is_none(tmp_path):
-    assert load(tmp_path, "nope") is None
+    assert load(LocalStore(tmp_path), "nope") is None
+
+
+def test_load_damaged_manifest_is_an_error_not_absence(tmp_path):
+    store = LocalStore(tmp_path)
+    store.put_bytes(catalog_key("d"), b"{half a manifest")
+    with pytest.raises(ManifestError, match="not JSON"):
+        load(store, "d")
 
 
 @pytest.mark.parametrize(

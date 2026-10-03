@@ -2,10 +2,18 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import FakeBrowser, IsolatedSettings, reddit_listing, reddit_submission
+from conftest import (
+    LAKE_BUCKET,
+    FakeBrowser,
+    IsolatedSettings,
+    bucket_keys,
+    reddit_listing,
+    reddit_submission,
+)
 from playwright.sync_api import Error as PlaywrightError
 
 from social_scraper import runner
+from social_scraper.archive import store
 from social_scraper.browser import PlaywrightBrowser
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.fetch import PageResult
@@ -165,6 +173,17 @@ def test_failed_export_is_an_error_but_not_a_crash(settings, engine, monkeypatch
     report = run_cycle(settings, engine, (REDDIT,), factory=lambda p: reddit_browser())
     assert not report.ok
     assert any(e.startswith("export") for e in report.errors)
+
+
+def test_run_cycle_exports_to_the_bucket_when_configured(settings, engine, s3_client, monkeypatch):
+    settings.symbol_universe_max_age_hours = 1e9
+    settings.archive_backend = "s3"
+    settings.archive_s3_bucket = LAKE_BUCKET
+    monkeypatch.setattr(store, "make_s3_client", lambda s: s3_client)
+    report = run_cycle(settings, engine, (REDDIT,), factory=lambda p: reddit_browser())
+    assert report.ok, report.errors
+    assert "_catalog/social_scraper_posts.json" in bucket_keys(s3_client)
+    assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
 
 
 def test_write_report_overwrites_and_is_parseable(settings):

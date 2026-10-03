@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import Clock, IsolatedSettings
+from conftest import LAKE_BUCKET, Clock, IsolatedSettings, bucket_keys
 from sqlalchemy.exc import OperationalError
 
 from social_scraper import cli, runner
+from social_scraper.archive import store
 from social_scraper.cli import (
     build_parser,
     cmd_export,
@@ -64,6 +65,8 @@ def test_parser_accepts_every_command():
     assert p.parse_args(["run", "reddit", "--cycles", "2"]).cycles == 2
     assert p.parse_args(["login", "x"]).platform == "x"
     assert p.parse_args(["lake", "--days", "7"]).days == 7
+    assert p.parse_args(["export", "--full"]).full
+    assert not p.parse_args(["export"]).full
     with pytest.raises(SystemExit):
         p.parse_args(["login", "facebook"])
 
@@ -149,9 +152,55 @@ def test_run_passes_options_through(settings, engine, monkeypatch):
     assert seen == {"cycles": 3, "export": False}
 
 
+def test_scrape_exits_1_when_the_bucket_export_fails(
+    settings, engine, universe, s3_client, monkeypatch, capsys
+):
+    """README: a failed export is a failed cycle -- the bucket's included."""
+    seed(engine, universe)
+    cache = settings.data_dir / "symbols" / "nasdaqtraded.txt"
+    cache.parent.mkdir(parents=True)
+    cache.write_text("Nasdaq Traded|Symbol|Security Name|Test Issue\n")
+    settings.symbol_universe_max_age_hours = 1e9
+    settings.archive_backend = "s3"
+    settings.archive_s3_bucket = "no-such-bucket"
+    monkeypatch.setattr(store, "make_s3_client", lambda s: s3_client)
+    # No platforms, so no browser: the cycle is the export alone.
+    monkeypatch.setattr(
+        cli, "run_cycle", lambda s, e, p, export: runner.run_cycle(s, e, (), export=export)
+    )
+    args = argparse.Namespace(platform="all", no_export=False, jitter=False)
+    assert cmd_scrape(settings, engine, args) == 1
+    assert "FAILED" in capsys.readouterr().out
+    assert any("StoreError" in e for e in report_body(settings)["errors"])
+    # The local tree still took the rows: the lake degrades, it does not block.
+    assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
+
+
+def test_export_writes_the_bucket_and_full_resends_every_row(
+    settings, engine, universe, s3_client, monkeypatch, capsys
+):
+    seed(engine, universe)
+    settings.archive_backend = "s3"
+    settings.archive_s3_bucket = LAKE_BUCKET
+    monkeypatch.setattr(store, "make_s3_client", lambda s: s3_client)
+    assert cmd_export(settings, engine, argparse.Namespace(full=False)) == 0
+    assert "_catalog/social_scraper_posts.json" in bucket_keys(s3_client)
+    assert cmd_export(settings, engine, argparse.Namespace(full=False)) == 0
+    assert "social_scraper_posts: 0 rows" in capsys.readouterr().out
+    assert cmd_export(settings, engine, argparse.Namespace(full=True)) == 0
+    out = capsys.readouterr().out
+    assert "watermarks cleared" in out and "social_scraper_posts: 1 rows" in out
+
+
+def test_export_exits_1_when_it_fails(settings, engine, universe):
+    seed(engine, universe)
+    settings.archive_backend = "s3"  # and no bucket named
+    assert cmd_export(settings, engine, argparse.Namespace(full=False)) == 1
+
+
 def test_export_status_and_lake(settings, engine, universe, capsys):
     seed(engine, universe)
-    assert cmd_export(settings, engine, argparse.Namespace()) == 0
+    assert cmd_export(settings, engine, argparse.Namespace(full=False)) == 0
     assert cmd_status(settings, engine, argparse.Namespace()) == 0
     assert cmd_lake(settings, engine, argparse.Namespace(days=2)) == 0
     out = capsys.readouterr().out

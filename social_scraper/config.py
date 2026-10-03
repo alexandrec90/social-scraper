@@ -8,7 +8,9 @@ than a JSON array, and it is what the sibling projects already use.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SUBREDDITS = (
@@ -44,9 +46,24 @@ class Settings(BaseSettings):
 
     # --- where things live -------------------------------------------------------------
     data_dir: Path = Path("data")
-    # The pooled data-lake tree: data-lake's `load_catalog` reads `_catalog/` from here.
+    # The local lake tree: always written, the staging buffer and what `lake` reads.
     archive_root: Path = Path("../data-lake/data/archive")
     logs_dir: Path = Path("logs")
+
+    # --- the lake bucket (`archive/store.py`) --------------------------------------------
+    # The names and meanings of data-lake's `ArchiveSettings`, which is how ibkr_trader
+    # reads the bucket, so one block of R2 settings means the same thing in both repos.
+    # "s3" uploads every exported partition and catalog to the bucket as well as
+    # ARCHIVE_ROOT; "local" (the default) writes ARCHIVE_ROOT only.
+    archive_backend: Literal["local", "s3"] = "local"
+    archive_s3_bucket: str = ""
+    archive_s3_endpoint_url: str = ""
+    # Cloudflare R2 wants "auto".
+    archive_s3_region: str = ""
+    archive_s3_access_key_id: str = ""
+    archive_s3_secret_access_key: SecretStr = SecretStr("")
+    # Key prefix inside the bucket; empty puts `_catalog/` at the bucket root.
+    archive_s3_prefix: str = ""
 
     # --- browser -----------------------------------------------------------------------
     # "chrome" drives the installed Google Chrome (a real fingerprint, no download);

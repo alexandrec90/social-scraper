@@ -14,9 +14,11 @@
       Reddit blocks headless Chrome
 - [ ] Confirm `python scripts/sync-devkit.py --list` shows a stamped `DEVKIT_VERSION`
 - [ ] Set `DEVKIT_DIR` in CI so the drift check actually gates
-- [ ] Create the **private** object-storage bucket and fill the `ARCHIVE_S3_*` vars --
-      today the lake is the pooled local tree (`../data-lake/data/archive`), which is
-      what data-lake itself uses; no S3 upload is implemented yet
+- [ ] Set `ARCHIVE_BACKEND=s3` and copy ibkr_trader's `ARCHIVE_S3_*` R2 block into
+      `.env` (same names, same meaning; the bucket is `data-lake`), then run
+      `social-scraper export --full` once so the bucket gets the history the local
+      tree already holds. Until then the export reaches only `ARCHIVE_ROOT`, which
+      ibkr_trader does not read
 
 ## Hand-off to the consumers (other repos -- not changed from here)
 
@@ -35,7 +37,6 @@
 
 - [ ] Alembic: tables are created with `create_all` (idempotent, never alters). The
       first schema change needs a migration tool
-- [ ] S3 mirror of the local lake with verify-before-delete (`.claude/rules/data-lake.md`)
 - [ ] Company-name matching ("Nvidia" -> NVDA) from the directory's security names;
       today only cashtags and upper-case tickers count
 - [ ] X: read threads (`TweetDetail`) for high-engagement tweets; replies carry a lot of

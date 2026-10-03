@@ -212,6 +212,15 @@ def set_watermark(conn: Connection, dataset: str, through: datetime, now: dateti
     )
 
 
+def clear_watermarks(conn: Connection) -> int:
+    """Forget every dataset's watermark, so the next export re-sends every row.
+
+    How a newly configured bucket gets the history the local tree already holds:
+    the merge is idempotent, so re-exporting rows a store has costs time, not data.
+    """
+    return conn.execute(schema.export_watermarks.delete()).rowcount
+
+
 def table_counts(conn: Connection) -> dict[str, int]:
     """Row counts per operational table, for `status`."""
     return {

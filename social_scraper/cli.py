@@ -7,8 +7,10 @@ scrape [reddit|x|all] one cycle now, then export (skip with --no-export); --jitt
 run                   cycle forever every CYCLE_MINUTES (or --cycles N)
                       scrape and run take --headed: show Chrome despite BROWSER_HEADLESS
                       and BROWSER_MINIMIZED
-export                copy new rows to the lake
-status                budgets, pauses, row counts, trending symbols, X accounts
+export [--full]       copy new rows to the lake (the local tree, and the bucket when
+                      ARCHIVE_BACKEND=s3); --full re-sends every row, which is how a
+                      newly configured bucket gets the history
+status               budgets, pauses, row counts, trending symbols, X accounts
 lake [--days N]       what the lake holds, per symbol and day (DuckDB lens)
 universe              refresh the symbol directory and print its size
 
@@ -33,7 +35,7 @@ from social_scraper.archive import lens
 from social_scraper.config import Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
-from social_scraper.export import export_all
+from social_scraper.export import export_to_lake
 from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.runner import (
     RunReport,
@@ -61,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--headed", action="store_true")
     sub.choices["scrape"].add_argument("--jitter", action="store_true")
     sub.choices["run"].add_argument("--cycles", type=int, default=None)
-    sub.add_parser("export")
+    sub.add_parser("export").add_argument("--full", action="store_true")
     sub.add_parser("status")
     lake = sub.add_parser("lake")
     lake.add_argument("--days", type=int, default=3)
@@ -106,7 +108,11 @@ def cmd_run(settings: Settings, engine: Engine, args: argparse.Namespace) -> int
 
 
 def cmd_export(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
-    result = export_all(engine, settings.archive_root, datetime.now(UTC))
+    if args.full:
+        with engine.begin() as conn:
+            repository.clear_watermarks(conn)
+        print("watermarks cleared: re-exporting every row")
+    result = export_to_lake(engine, settings, datetime.now(UTC))
     for d in result.datasets:
         state = d.error or f"{d.rows} rows, {d.partitions} partitions"
         extra = f", {d.dropped_secrets} dropped (secret pattern)" if d.dropped_secrets else ""

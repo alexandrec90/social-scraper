@@ -29,7 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from social_scraper.browser import PlaywrightBrowser
 from social_scraper.config import Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
-from social_scraper.export import export_all
+from social_scraper.export import export_to_lake
 from social_scraper.fetch import Browser
 from social_scraper.models import REDDIT, X
 from social_scraper.pipeline import Ingestor
@@ -164,7 +164,7 @@ def run_cycle(
             report.errors.append(f"{platform}: {result['error']}")
     DbThrottleStore(engine).prune(datetime.now(UTC) - timedelta(days=REQUEST_LOG_RETENTION_DAYS))
     if export:
-        exported = export_all(engine, settings.archive_root, datetime.now(UTC))
+        exported = export_to_lake(engine, settings, datetime.now(UTC))
         report.export = [asdict(d) for d in exported.datasets]
         report.errors.extend(f"export {d.dataset}: {d.error}" for d in exported.datasets if d.error)
     report.finished_at = datetime.now(UTC).isoformat()

@@ -52,8 +52,8 @@ NO_FIX_SCOPE = ["scripts/hooks", "scripts/sync-devkit.py", "scripts/task_branch.
 # UnorderedKey is ignored deliberately, and narrowly — it is the one check here with
 # no correctness content. It wants every key alphabetised within its blank-line
 # group, which in `.env.example` means DATABASE_URL resequenced after the POSTGRES_*
-# components it is built from, ARCHIVE_ROOT after the S3 overrides that only apply
-# when it is *not* used, and the host ports shuffled out of service order. That
+# components it is built from, ARCHIVE_BACKEND ahead of the ARCHIVE_ROOT tree it
+# extends, and the host ports shuffled out of service order. That
 # grouping is the file's entire documentation value. Per the lint policy in
 # `.claude/rules/engineering.md`: a rule that fires on what a formatter would decide
 # is misconfigured, so turn it off rather than train everyone to read past it.

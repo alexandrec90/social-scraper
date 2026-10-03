@@ -4,6 +4,7 @@ from conftest import NOW, Clock
 
 from social_scraper.archive import lens
 from social_scraper.archive.lens import connect, symbol_daily
+from social_scraper.archive.store import LocalStore
 from social_scraper.export import export_all
 from social_scraper.models import AuthorInfo, Post
 from social_scraper.pipeline import Ingestor
@@ -33,7 +34,7 @@ def test_symbol_daily_over_exported_data(engine, universe, tmp_path):
         for i, body in enumerate(["$NVDA calls", "$NVDA puts", "$NVDA to the moon", "$AMD"])
     ]
     Ingestor(engine, universe, Clock()).ingest(posts)
-    export_all(engine, tmp_path, NOW)
+    export_all(engine, [LocalStore(tmp_path)], NOW)
     con = connect(tmp_path)
     try:
         views = {r[0] for r in con.execute("SELECT view_name FROM duckdb_views()").fetchall()}
