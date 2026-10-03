@@ -32,15 +32,17 @@ identical to one that stopped being scheduled at all, which is the failure
 passes as well; the file is still overwritten per run and still capped, so the cost is
 one bounded file rather than a growing one.
 
-**An unattended failure is also recorded on the harness-events ledger**, which is the
-half the artifact cannot cover. The artifact is overwritten per run, so a job that
-fails every night keeps only its most recent evidence and nothing anywhere says it has
-been failing since Tuesday. That is not hypothetical: the nightly release failed three
-nights running, each run erasing the previous one's reason, and the first anyone knew
-of it was a person trying to cut a release by hand and finding a stale branch. A
-`scheduled-job-failed` event is append-only and survives the next run, so
-`/triage-harness` finds it. Only `--always` callers record: a task someone clicked has
-already shown them the failure, and the ledger is for what nobody watched.
+**Every failure is also recorded on the harness-events ledger**, which is the half the
+artifact cannot cover. The artifact is overwritten per run, so a job that fails every
+night keeps only its most recent evidence and nothing anywhere says it has been failing
+since Tuesday. That is not hypothetical: the nightly release failed three nights
+running, each run erasing the previous one's reason, and the first anyone knew of it
+was a person trying to cut a release by hand and finding a stale branch. A
+`scheduled-job-failed` event is append-only and survives the next run, so the fix pass
+sends it to the devkit session. **A clicked task records too**, its message saying it
+was run by hand: it once did not, on the theory that the person had watched it fail,
+but watching is not fixing. Failures share causes, so every routine one goes to the one
+place they are aggregated, triaged and fixed together.
 
 **And the event needs evidence still on disk when it is triaged**, which is the half
 that was missing. The ledger entry survived; the file it pointed at did not. `Scheduled:
@@ -48,12 +50,12 @@ Devkit Release` failed on 2026-09-18 with exit 2, the next night's run passed an
 overwrote `logs/scheduled-devkit-release.log` with its own success, and the sweep that
 reached the event a day later could say only that it no longer reproduced -- no PR was
 opened, so the failure was somewhere in `release.prepare`, and which branch of it is now
-unknowable. So an unattended failure is kept a second time, at
-`logs/<slug>.failed.log`, and **that** is the path the event names. It is written only
-on a failure, so a pass never clears it and the next failure is the only thing that
-replaces it; the header says so, because a file whose mtime is a week old is evidence
-for the event a week old, not for this morning's run. One extra bounded file per job
-that has ever failed unattended.
+unknowable. So a failure is kept a second time, at `logs/<slug>.failed.log`, and
+**that** is the path the event names -- a click retried until green empties the per-run
+file just as a passing night does. It is written only on a failure, so a pass never
+clears it and the next failure is the only thing that replaces it; the header says so,
+because a file whose mtime is a week old is evidence for the event a week old, not for
+this morning's run. One extra bounded file per task that has ever failed.
 
 Colour survives the wrapping. A captured child is talking to a pipe rather than a
 terminal, and most tools drop their colour the moment they notice -- so `FORCE_COLOR`
@@ -115,7 +117,10 @@ HEX_ID = re.compile(r"\b[0-9a-f]{7,40}\b")
 NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 # Set on the child only when the caller has not, so `FORCE_COLOR=0` still wins.
-COLOR_ENV = {"FORCE_COLOR": "1", "PY_COLORS": "1"}
+# `PYTHONIOENCODING` matches what `stream` decodes: a Python child writing to a pipe
+# otherwise encodes with the locale's code page, cp1252 on Windows, and dies with
+# `UnicodeEncodeError` on the first character outside it.
+COLOR_ENV = {"FORCE_COLOR": "1", "PY_COLORS": "1", "PYTHONIOENCODING": "utf-8"}
 
 # Windows only. This wrapper has two kinds of caller and the flag is for the unattended
 # one: a scheduled task runs it under `pythonw.exe`, which has no console, and Windows
@@ -251,7 +256,7 @@ def artifact_body(
     """
     if code == 0 and not always:
         return ""
-    stamped = f"# when: {_now()}\n" if always else ""
+    stamped = f"# when: {_now()}\n" if always or kept else ""
     freshness = (
         "kept until the NEXT failure -- a pass does not clear it, so read `# when:` above"
         if kept
@@ -402,7 +407,7 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
         print(
             f"\nlog-wrap: FAILED (exit {code}) -- details in {LOGS_DIR}/{name}.log", file=sys.stderr
         )
-    if code != 0 and always:
+    if code != 0:
         # The kept copy first, so the event never names a path that is not there yet.
         # `since` is not passed: this file is only ever written by a failure, so it has
         # no retraction to hold back and the concurrency case `write_artifact` guards
@@ -413,8 +418,14 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             artifact_body(title, command, code, output, always, kept=True),
         )
         artifact = artifact_ref(name, kept=kept is not None)
-        record_failure(title, command, code, artifact, root, output)
+        record_failure(failure_message(title, always), command, code, artifact, root, output)
     return code
+
+
+def failure_message(title: str, unattended: bool) -> str:
+    """The ledger row's message: which task, and whether a schedule or a person ran it --
+    two groups, since a job failing nightly and a click failing once rarely share why."""
+    return f"{'unattended ' if unattended else ''}task {title!r} failed"
 
 
 def artifact_ref(name: str, kept: bool = True) -> str:
@@ -428,15 +439,15 @@ def artifact_ref(name: str, kept: bool = True) -> str:
 
 
 def record_failure(
-    title: str,
+    message: str,
     command: list[str],
     code: int,
     artifact: str,
     root: Path | None = None,
     output: str = "",
 ) -> None:
-    """Leave an unattended failure on the harness-events ledger, naming `artifact`
-    (`artifact_ref`) as the file that holds its `output`.
+    """Leave a failure on the harness-events ledger under `message` (`failure_message`),
+    naming `artifact` (`artifact_ref`) as the file that holds its `output`.
 
     Best-effort twice over. `harness_events` swallows its own errors by contract, and
     the import is guarded because this module is vendored into projects that may hold a
@@ -468,7 +479,7 @@ def record_failure(
             ("command", " ".join(command)),
             ("artifact", artifact),
             ("exit", code),
-            ("message", f"unattended task {title!r} failed"),
+            ("message", message),
             ("cause", cause or "-"),
             *((("said", said),) if said and said != cause else ()),
         ),

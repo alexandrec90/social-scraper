@@ -69,6 +69,33 @@ def test_a_rendered_baseline_reads_back_as_exactly_its_numbers(tmp_path):
     assert sb.read_baseline(path) == entries
 
 
+def test_existing_header_reads_back_the_opening_comment_block_verbatim(tmp_path):
+    """What a rewrite carries through, so a tighten's diff is only the lines it moved.
+    The block ends at the first entry, blank line or log marker; no file is `None`, which
+    `render_baseline` answers with `BASELINE_HEADER`, and a headerless file stays one."""
+    path = tmp_path / sb.BASELINE_NAME
+    assert sb.existing_header(path) is None
+    assert sb.render_baseline({}, header=None) == sb.BASELINE_HEADER
+
+    path.write_text("# old wording\n#\n# second\na::x = 1\n# not header\n", encoding="utf-8")
+    assert sb.existing_header(path) == "# old wording\n#\n# second\n"
+
+    path.write_text("a::x = 1\n", encoding="utf-8")
+    assert sb.existing_header(path) == ""
+    assert sb.render_baseline({"a::x": 1}, header="") == "a::x = 1\n"
+
+    path.write_text("# only a header", encoding="utf-8")  # no trailing newline
+    assert sb.existing_header(path) == "# only a header\n"
+
+    path.write_text("# h\n" + sb.RECORD_MARKER + "\n# note\n", encoding="utf-8")
+    assert sb.existing_header(path) == "# h\n"
+
+    custom = sb.render_baseline({"a::x": 1}, ["# n"], header="# mine\n")
+    path.write_text(custom, encoding="utf-8")
+    assert sb.existing_header(path) == "# mine\n"
+    assert sb.render_baseline({"a::x": 1}, ["# n"], sb.existing_header(path)) == custom
+
+
 def test_existing_notes_reads_back_the_log_and_nothing_above_it(tmp_path):
     path = tmp_path / sb.BASELINE_NAME
     path.write_text(sb.render_baseline({"a::x": 1}), encoding="utf-8")

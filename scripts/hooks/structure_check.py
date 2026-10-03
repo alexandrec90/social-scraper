@@ -63,6 +63,7 @@ from structure_baseline import (
     BASELINE_NAME,
     SIZE_HINT,
     baseline_path,
+    existing_header,
     existing_notes,
     read_baseline,
     reason_lines,
@@ -881,9 +882,8 @@ def record(
         reason_lines(reason, stamp)
         + [f"#   {f.key} -> {f.value}" for f in sorted(allowed, key=lambda f: f.key)]
     )
-    path.write_text(
-        render_baseline(entries, [*existing_notes(path), note]), encoding="utf-8", newline="\n"
-    )
+    body = render_baseline(entries, [*existing_notes(path), note], existing_header(path))
+    path.write_text(body, encoding="utf-8", newline="\n")
     return allowed, []
 
 
@@ -907,8 +907,10 @@ def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:
     if dropped or lowered:
         # The `--record` log is carried through: it explains lines that are still here,
         # and a tighten that silently dropped it would leave the next reader with raised
-        # numbers and no account of who raised them.
-        path.write_text(render_baseline(kept, existing_notes(path)), encoding="utf-8", newline="\n")
+        # numbers and no account of who raised them. The header is carried through too, so
+        # a tighten's diff is the lines it dropped or lowered and nothing else.
+        body = render_baseline(kept, existing_notes(path), existing_header(path))
+        path.write_text(body, encoding="utf-8", newline="\n")
     return dropped, lowered
 
 

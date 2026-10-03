@@ -103,6 +103,19 @@ def test_the_child_keeps_colour_unless_the_caller_decided():
     assert lw.child_env({"FORCE_COLOR": "0"})["FORCE_COLOR"] == "0"
 
 
+def test_the_child_writes_the_utf8_this_wrapper_reads(monkeypatch):
+    """`stream` decodes UTF-8, but a Python child writing to a pipe encodes with the
+    locale's code page -- cp1252 on Windows -- and dies on the first character outside
+    it. Every scheduled job now runs under this wrapper, so that was a working job
+    turned into a crashing one by the act of recording its failures (2026-10-03)."""
+    assert lw.child_env({})["PYTHONIOENCODING"] == "utf-8"
+    assert lw.child_env({"PYTHONIOENCODING": "cp1252"})["PYTHONIOENCODING"] == "cp1252"
+    for name in ("PYTHONIOENCODING", "PYTHONUTF8"):
+        monkeypatch.delenv(name, raising=False)
+    code, output = lw.stream([sys.executable, "-c", "print('\\u2713 done')"])
+    assert (code, output.strip()) == (0, "✓ done")
+
+
 # --- capping ------------------------------------------------------------------
 
 
@@ -393,24 +406,41 @@ def test_the_kept_copy_does_not_claim_to_be_this_mornings_run(tmp_path, monkeypa
     assert "NEXT failure" in kept and "# when:" in kept
 
 
-def test_a_clicked_failure_leaves_no_kept_copy(tmp_path, monkeypatch):
-    """The second file exists for the ledger row, and a click files none: the person
-    watched it fail and `logs/` is not a place to accumulate what nobody will read."""
-    _ledger(tmp_path, monkeypatch)
-
-    lw.main(["Clicked", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
-
-    assert not (tmp_path / lw.LOGS_DIR / f"clicked{lw.FAILED_SUFFIX}.log").exists()
-    assert "boom" in (tmp_path / lw.LOGS_DIR / "clicked.log").read_text(encoding="utf-8")
-
-
-def test_a_clicked_task_leaves_no_event(tmp_path, monkeypatch):
-    """Without `--always` a person is watching and has already seen the failure. The
-    ledger is for what nobody watched; filling it with clicks makes a backlog nobody
-    reads."""
+def test_a_clicked_failure_is_recorded_for_triage_too(tmp_path, monkeypatch):
+    """Clicks used to file nothing, on the theory that the person had watched the
+    failure. The owner's rule is the opposite: every routine task that fails reaches the
+    ledger, because failures share causes and are triaged and fixed together. A person
+    who saw it fail had still been left to fix it alone (2026-10-03)."""
     ledger = _ledger(tmp_path, monkeypatch)
 
     assert lw.main(["Clicked", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path) == 2
+    line = ledger.read_text(encoding="utf-8").strip()
+    assert lw.FAILED_EVENT in line and "exit=2" in line
+    assert "task 'Clicked' failed" in line and "unattended" not in line, "says it was run by hand"
+
+
+def test_a_clicked_failure_is_kept_where_its_rerun_cannot_erase_it(tmp_path, monkeypatch):
+    """A click retried until green empties the per-run artifact, and the ledger row then
+    names a file holding nothing: the kept copy is what the row points at."""
+    _ledger(tmp_path, monkeypatch)
+    logs = tmp_path / lw.LOGS_DIR
+
+    lw.main(["Clicked", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
+    lw.main(["Clicked", "--", "x"], run=lambda _c: (0, "fine"), root=tmp_path)
+
+    assert "boom" in (logs / f"clicked{lw.FAILED_SUFFIX}.log").read_text(encoding="utf-8")
+    assert (logs / "clicked.log").read_text(encoding="utf-8") == ""
+
+
+def test_failure_message_tells_a_schedule_from_a_person():
+    assert lw.failure_message("Nightly", unattended=True) == "unattended task 'Nightly' failed"
+    assert lw.failure_message("Clicked", unattended=False) == "task 'Clicked' failed"
+
+
+def test_a_passing_clicked_run_leaves_no_event(tmp_path, monkeypatch):
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    assert lw.main(["Clicked", "--", "x"], run=lambda _c: (0, "ok"), root=tmp_path) == 0
     assert not ledger.exists()
 
 
