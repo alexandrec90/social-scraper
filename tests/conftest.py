@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from social_scraper.config import Settings
 from social_scraper.db import schema
+from social_scraper.browser import SSR_PAYLOAD_SUFFIX
 from social_scraper.fetch import PageResult
 from social_scraper.symbols.universe import Security, Universe
 
@@ -125,9 +127,18 @@ class FakeBrowser:
     def capture(
         self, url: str, want: Callable[[str], bool], scrolls: int, between: Callable[[], None]
     ) -> PageResult:
+        """Hands back only the payloads `want` admits, as `PlaywrightBrowser` does.
+
+        A fake that served every queued payload regardless hid X renaming the profile
+        timeline op (`UserTweets` -> `UserOriginalsTimeline`, 2026-10-03): the tests
+        stayed green while every live timeline visit captured nothing. The
+        server-streamed payload is the real browser's own addition, so it passes too.
+        """
         for _ in range(scrolls):
             between()
-        return self._answer(url)
+        result = self._answer(url)
+        kept = [p for p in result.payloads if want(p.url) or SSR_PAYLOAD_SUFFIX in p.url]
+        return replace(result, payloads=kept)
 
     def __enter__(self) -> FakeBrowser:
         return self

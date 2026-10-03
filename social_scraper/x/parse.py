@@ -2,8 +2,9 @@
 
 Tweets are never read out of the DOM, which is obfuscated and reshuffled constantly.
 They are read from the data the X web app loads for itself, which arrives two ways:
-GraphQL XHR responses (`SearchTimeline`, `UserTweets`, pagination) and the first page
-streamed into the HTML (see `browser.py`, "Server-rendered data").
+GraphQL XHR responses (`SearchTimeline`, `UserOriginalsTimeline`, `UserTweets`,
+pagination) and the first page streamed into the HTML (see `browser.py`,
+"Server-rendered data").
 
 Two object shapes are in the wild, and both are read:
 
