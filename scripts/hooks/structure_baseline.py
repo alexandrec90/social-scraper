@@ -92,16 +92,40 @@ def read_baseline(path: Path) -> dict[str, int]:
     return out
 
 
-def render_baseline(entries: dict[str, int], notes: list[str] | None = None) -> str:
+def render_baseline(
+    entries: dict[str, int], notes: list[str] | None = None, header: str | None = None
+) -> str:
     """The whole file: header, the sorted findings, then the `--record` log.
 
     The log goes *after* the entries so the sorted block stays a clean diff -- a note
-    inserted between two lines would move every line under it.
+    inserted between two lines would move every line under it. `header` is the file's
+    own (`existing_header`); `None` means a new file, which gets `BASELINE_HEADER`.
     """
-    body = BASELINE_HEADER + "".join(f"{k} = {entries[k]}\n" for k in sorted(entries))
+    top = BASELINE_HEADER if header is None else header
+    body = top + "".join(f"{k} = {entries[k]}\n" for k in sorted(entries))
     if not notes:
         return body
     return body + "\n" + RECORD_MARKER + "\n" + "\n\n".join(notes) + "\n"
+
+
+def existing_header(path: Path) -> str | None:
+    """The comment block the file opens with, verbatim; `None` when there is no file.
+
+    `--tighten` and `--record` rewrite the file, and used to write `BASELINE_HEADER` over
+    whatever header it had. The header is the project's copy of the text it was seeded
+    with, so once devkit reworded it, a tighten that only dropped a stale `dependency::`
+    line in a consumer also carried a paragraph of unrelated prose in its diff. A rewrite
+    changes the numbers and the log; the prose above them is left as it was found.
+    """
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    head: list[str] = []
+    for line in lines:
+        if not line.startswith("#") or line.startswith(RECORD_MARKER.strip()):
+            break
+        head.append(line if line.endswith("\n") else line + "\n")
+    return "".join(head)
 
 
 def existing_notes(path: Path) -> list[str]:

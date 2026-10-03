@@ -728,6 +728,38 @@ def test_tighten_carries_the_record_log_through(tmp_path):
     assert "kept through a tighten" in sc.baseline_path(tmp_path).read_text(encoding="utf-8")
 
 
+OLD_HEADER = "# Structural findings, as worded when this project adopted the gate.\n#\n# Older.\n"
+
+
+def test_tighten_keeps_the_header_the_file_already_had(tmp_path):
+    """The regression. A consumer seeded under an older `BASELINE_HEADER` ran `--tighten`
+    to drop one stale `dependency::` line, and the rewrite replaced its header with
+    devkit's current wording too -- a tighten-only change carrying a paragraph of
+    unrelated prose. The diff of a tighten is the lines it moved and nothing else."""
+    write(tmp_path, "src/main.py", "x = 1  # noqa\n")
+    path = write(
+        tmp_path,
+        sc.BASELINE_NAME,
+        OLD_HEADER + "orphan::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+
+    assert sc.tighten(tmp_path, config()) == (1, 0)
+
+    assert path.read_text(encoding="utf-8") == OLD_HEADER + "suppressions::src/main.py = 1\n"
+
+
+def test_record_keeps_the_header_the_file_already_had(tmp_path):
+    _oversized(tmp_path)
+    path = write(tmp_path, sc.BASELINE_NAME, OLD_HEADER)
+
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "the split is its own PR")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "x")  # nothing new: no write
+
+    body = path.read_text(encoding="utf-8")
+    assert body.startswith(OLD_HEADER + "function_lines::src/big.py::f = ")
+    assert "the split is its own PR" in body
+
+
 def test_a_recorded_baseline_still_reads_back_as_numbers(tmp_path):
     """The log is comments, so `read_baseline` must be blind to it."""
     _oversized(tmp_path)
