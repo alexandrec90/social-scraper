@@ -116,8 +116,13 @@ def test_scrape_exits_0_when_every_platform_is_deliberately_paused(settings, eng
     cache = settings.data_dir / "symbols" / "nasdaqtraded.txt"
     cache.parent.mkdir(parents=True)
     cache.write_text("Nasdaq Traded|Symbol|Security Name|Test Issue\n")
+    # Both windows are pinned to the wall clock, which this path reads directly. Reddit's
+    # default rest (6-24) would otherwise skip it as "outside active hours" before its
+    # circuit is consulted, red only overnight. X's window starts two hours out, so an
+    # hour that turns over mid-test cannot open it.
+    settings.reddit_active_hours = ""
     hour = datetime.now(ZoneInfo(settings.scraper_timezone)).hour
-    start = (hour + 1) % 24
+    start = (hour + 2) % 24
     settings.x_active_hours = f"{start}-{start + 1}"
     now = datetime.now(UTC)
     DbThrottleStore(engine).set_block(REDDIT, Block(now + timedelta(hours=1), "captcha", 1), now)
