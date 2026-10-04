@@ -1,12 +1,12 @@
 {
-  "devkit_tag": "v0.11.46",
+  "devkit_tag": "v0.11.47",
   "files": {
     ".claude/engineering-evidence.md": "c1f5a57dc081b8c09014f80fdafb7c73bda3cdf689bfa3c4e08639bf600b7ebe",
     ".claude/fixer.md": "aea4596d9e27ad0004e4853252b8bdd054a264b4c60409a74fe3ecf6fd3015c0",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
     ".claude/rules/authoring.md": "6b2ac11c4fbfe094c1c7b4fa64406d8a5af6fef57467090848c3983dd076ea11",
     ".claude/rules/engineering.md": "ac1aca201f02f96c889e329b34821267a9bbc3ae75c26a5d0b099e8bd18a575c",
-    ".claude/rules/session-scope.md": "a050ad79d4406741318ab89738609dc9c5aaeefb7177b071a612ea7c03fb2992",
+    ".claude/rules/session-scope.md": "ca116a548b9540dac4405160d0d90a0b159a75ccbe4afbb32e88e2361a2c7a17",
     ".claude/skills/go-nuts/SKILL.md": "78bed86970494e5176b46060ef48fbcaa4fe08bc9d9ea804023f2e7145a63bf2",
     ".claude/skills/ship/SKILL.md": "8522894b72484652c153e3e4b900db9fb5daf8f9da9c8fa855bb98d49bf9517f",
     ".github/workflows/dependabot-automerge.yml": "025aa7b49df365ed38d285f0c46f41892ec0cf2d41eb3f539fea5e952738afb8",
