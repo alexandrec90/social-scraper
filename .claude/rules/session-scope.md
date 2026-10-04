@@ -11,7 +11,8 @@ A coding session makes the change and describes it. It does **not**:
 
 - `git commit`, `git push`, or open a PR (`gh pr create`) — finish with the `/ship`
   skill, which writes the commit message to a file and stops;
-- run the whole test suite, or wait on a CI gate.
+- run the whole test suite — `pytest tests`, or any run naming no test file, however
+  few tests it holds — or wait on a CI gate.
 
 Running the tests for what you touched is optional. Where `scripts/run-tests.py --help`
 says it picks them, run it bare: it builds the `.venv` a `claude --worktree` tree
@@ -19,9 +20,8 @@ arrives without, which `uv run pytest` builds lacking the dev extra.
 The scheduled fix pass commits, pushes, opens the PR and runs the full gate in CI; a red
 gate comes back to a fresh session with the failures named.
 
-**Fixer sessions are exempt.** A fixer, a session the fix pass dispatched as its
-prompt's first sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md),
-including where they say to run the tests.
+**Fixer sessions are exempt:** one the fix pass dispatched, as its prompt's first
+sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md), tests included.
 
 ## An environment that cannot run the checks is part of the fix
 
