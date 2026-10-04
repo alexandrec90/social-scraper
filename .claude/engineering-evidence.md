@@ -268,7 +268,9 @@ tests pass by agreeing that nothing happened.
 
 Not the guard, and not devkit: Claude Code's Bash tool delivers a doubled backslash as a
 single one, inside `<<'EOF'` as well as in a single-quoted argument, so a Python patch
-script written that way arrives with its escapes changed. Its `assert old in text` fails,
+script written that way arrives with its escapes changed. The one spelling it leaves
+alone is a run of backslashes ending at a `"` (`"\\"` arrives intact, `'\\'` does not),
+which is why the same write is damaged in one file and not the next. Its `assert old in text` fails,
 or worse, the replacement writes a different regex than the one reviewed. On 2026-09-26
 alone five sessions filed it (ledger `f5f07c62`, `c979d748`, `f0997a7c`, `b957e0cf`, and
 the session that retired those), each after the rule already said "use Write or Edit"
