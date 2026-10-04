@@ -27,6 +27,7 @@ dependency::pyproject.toml::pyarrow = 1
 dependency::pyproject.toml::pydantic-settings = 1
 dependency::pyproject.toml::pytest = 1
 dependency::pyproject.toml::pytest-cov = 1
+dependency::pyproject.toml::pytz = 1
 dependency::pyproject.toml::ruff = 1
 dependency::pyproject.toml::sqlalchemy = 1
 function_lines::scripts/lint-all.py::main = 99
@@ -46,3 +47,6 @@ swallowed_errors::scripts/notify.py = 1
 
 # 2026-10-03  recorded: moto (dev only): an in-process S3 for the lake export's tests -- real boto3 requests and error codes (NoSuchKey, NoSuchBucket, CopyObject) with no network and no bucket credentials, which a hand-rolled fake client would only imitate.
 #   dependency::pyproject.toml::moto -> 1
+
+# 2026-10-04  recorded: pytz: duckdb's undeclared runtime dependency for TIMESTAMPTZ -> datetime; without it the lake lens raises on created_at
+#   dependency::pyproject.toml::pytz -> 1
