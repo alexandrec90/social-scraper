@@ -381,6 +381,47 @@ def drop_covered_baseline(paths: list[str], reconcile=None) -> tuple[list[str], 
     return kept, f"dropped {result[0]} line(s) this change covered from {name}"
 
 
+CODEX_CONTEXT_SCRIPT = "scripts/sync-codex-context.py"
+CODEX_SKILLS_DIR = ".agents/skills"
+
+
+def mirror_codex_skills(root: Path = REPO_ROOT) -> str:
+    """Re-mirror `.claude/skills/` into `.agents/skills/`: the line saying so, else "".
+
+    The vendored `test_sync_codex_context.py` fails a stale mirror, and only devkit's own
+    pre-commit config re-mirrors at commit time -- a generated project's does not, so
+    roguelike #81 edited `art-check`'s source and went red in CI on the copy. Every
+    session's change is committed through `--fix`, which makes this the one place the
+    mirror can be kept current in every consumer at once, like a formatter rewrite.
+
+    Only where the mirror exists (a project that opted into Codex), and in-process via
+    the vendored `sync-codex-context.py`, whose `mirror_tree` is the one definition of
+    the mirror. Loaded here rather than through `scripts/precommit/_loader.py`, which is
+    not vendored; absent, there is nothing to do and the gate names the stale files.
+    """
+    mirror, script = root / CODEX_SKILLS_DIR, root / CODEX_CONTEXT_SCRIPT
+    if not mirror.is_dir() or not script.is_file():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("sync_codex_context", script)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {script}")
+        context = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = context
+        spec.loader.exec_module(context)
+    except (ImportError, OSError, SyntaxError) as exc:
+        return f"could not load {CODEX_CONTEXT_SCRIPT} to re-mirror .agents/skills/: {exc}"
+    source = root / ".claude" / "skills"
+    wanted, held = context.relative_files(source), context.relative_files(mirror)
+    changed = (wanted ^ held) | {
+        rel for rel in wanted & held if (mirror / rel).read_bytes() != (source / rel).read_bytes()
+    }
+    if not changed:
+        return ""
+    context.mirror_tree(source, mirror)
+    return f"re-mirrored {len(changed)} file(s) into {CODEX_SKILLS_DIR}/ for Codex"
+
+
 def _fix(explicit: list[str]) -> int:
     paths, dropped = drop_covered_baseline(explicit or changed_paths(_porcelain()))
     if dropped:
@@ -405,6 +446,11 @@ def _fix(explicit: list[str]) -> int:
         # line, which `ship_intent.refusal_line` may take into a signature.
         print(f"ship: ran {' '.join(command)} run --files ({len(paths)} path(s))", file=sys.stderr)
     print(f"ship: {verdict}", file=sys.stderr if code else sys.stdout)
+    # After the fixers, so a skill source they rewrote is what the mirror copies; the
+    # caller stages the whole tree (`ship_intent.commit_intent`), deletions included.
+    mirrored = "" if code else mirror_codex_skills()
+    if mirrored:
+        print(f"ship: {mirrored}")
     return code
 
 

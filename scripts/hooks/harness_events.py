@@ -101,6 +101,16 @@ VALUE_LIMIT = 300
 # path cut short names nothing at all.
 FIELD_LIMITS = {"message": 4000, "detail": 2000, "evidence": 2000}
 
+# `command` keeps the flat cap but loses its *middle*, not its end. Its head is an
+# interpreter and absolute paths, its tail the arguments that say which invocation it
+# was -- and how much of the cap the paths eat depends on how deep the checkout is. Cut
+# from the end, `sweep.py ... --branch --slug lint-autofix --yes` filed from a long
+# `.claude/worktrees/<name>` lost every argument that told its step apart (10b3cce0).
+# A value at or under the cap is untouched, so a writer that pre-cuts to the cap
+# (`session_friction`) still reads back exactly what it wrote.
+TAIL_KEPT = frozenset({"command"})
+ELISION = " ... "
+
 
 # The line every *block* message ends with: how to report the block itself as wrong.
 #
@@ -253,17 +263,31 @@ def limit_for(key: str) -> int:
     return FIELD_LIMITS.get(key, VALUE_LIMIT)
 
 
-def clean(value: object, limit: int = VALUE_LIMIT) -> str:
+def clean(value: object, limit: int = VALUE_LIMIT, *, keep_tail: bool = False) -> str:
     """One field value, made safe for the line format: whitespace collapsed (tabs and
-    newlines are the field and record separators), truncated, never empty."""
+    newlines are the field and record separators), truncated, never empty.
+
+    `keep_tail` truncates from the middle, joining both ends with `ELISION`. See
+    `TAIL_KEPT`."""
     text = " ".join(str(value).split()) or "-"
-    return text[:limit]
+    if len(text) <= limit or not keep_tail or limit <= len(ELISION):
+        return text[:limit]
+    head = (limit - len(ELISION)) // 2
+    tail = limit - len(ELISION) - head
+    return text[:head] + ELISION + text[-tail:]
 
 
 def event_line(stamp: str, event: str, fields: tuple[tuple[str, object], ...]) -> str:
     """One ledger record. Pure, so the format is testable."""
     pairs = (("event", event), *fields)
-    return stamp + "\t" + "\t".join(f"{key}={clean(value, limit_for(key))}" for key, value in pairs)
+    return (
+        stamp
+        + "\t"
+        + "\t".join(
+            f"{key}={clean(value, limit_for(key), keep_tail=key in TAIL_KEPT)}"
+            for key, value in pairs
+        )
+    )
 
 
 def _main_checkout(root: Path) -> Path:

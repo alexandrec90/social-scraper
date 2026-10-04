@@ -8,15 +8,18 @@ import pytest
 from conftest import load_module
 
 ship = load_module("scripts/ship.py")
-# Before the autouse stub below replaces it in every test.
+# Before the autouse stubs below replace them in every test.
 real_reconcile_baseline = ship.reconcile_baseline
+real_mirror_codex_skills = ship.mirror_codex_skills
 
 
 @pytest.fixture(autouse=True)
 def _no_baseline_scan(monkeypatch):
     """`_fix` reconciles the real baseline, which scans and may REWRITE this checkout's
-    `.devkit-untested.txt`; every test here gets a reconcile that found nothing."""
+    `.devkit-untested.txt`; every test here gets a reconcile that found nothing. It also
+    re-mirrors this checkout's `.agents/skills/`, so every test gets a current mirror."""
     monkeypatch.setattr(ship, "reconcile_baseline", lambda: ((0, 0), ".devkit-untested.txt"))
+    monkeypatch.setattr(ship, "mirror_codex_skills", lambda: "")
 
 
 class _Result:
@@ -516,3 +519,75 @@ def test_reconcile_baseline_records_nothing_new(monkeypatch):
     monkeypatch.setitem(sys.modules, "untested_symbols", fake)
     assert real_reconcile_baseline() == ((3, 0), ".devkit-untested.txt")
     assert calls == [("root", "cfg", None)]
+
+
+def _codex_tree(tmp_path, mirrored: str | None):
+    """A tree with this checkout's `sync-codex-context.py`, one skill, and its mirror
+    holding `mirrored` (no mirror at all when None)."""
+    script = tmp_path / ship.CODEX_CONTEXT_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_bytes((ship.REPO_ROOT / ship.CODEX_CONTEXT_SCRIPT).read_bytes())
+    skill = tmp_path / ".claude" / "skills" / "art-check"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("new", encoding="utf-8")
+    if mirrored is not None:
+        copy = tmp_path / ".agents" / "skills" / "art-check"
+        copy.mkdir(parents=True)
+        (copy / "SKILL.md").write_text(mirrored, encoding="utf-8")
+        (copy / "retired.md").write_text("x", encoding="utf-8")
+    return tmp_path
+
+
+def test_fix_re_mirrors_a_skill_the_change_edited(tmp_path):
+    """roguelike #81 edited `.claude/skills/art-check/SKILL.md`, and the vendored
+    `test_sync_codex_context.py` went red on the stale `.agents/skills/` copy: only
+    devkit's own pre-commit config re-mirrors, and a consumer's generated one does not."""
+    root = _codex_tree(tmp_path, mirrored="old")
+    line = real_mirror_codex_skills(root)
+    mirror = root / ".agents" / "skills" / "art-check"
+    assert (mirror / "SKILL.md").read_text(encoding="utf-8") == "new"
+    assert not (mirror / "retired.md").exists()
+    assert line == "re-mirrored 2 file(s) into .agents/skills/ for Codex"
+    assert real_mirror_codex_skills(root) == ""
+
+
+def test_a_project_without_the_mirror_is_not_given_one(tmp_path):
+    """No `.agents/skills/` is a project that has not opted into Codex."""
+    root = _codex_tree(tmp_path, mirrored=None)
+    assert real_mirror_codex_skills(root) == ""
+    assert not (root / ".agents").exists()
+
+
+def test_a_missing_or_broken_sync_script_leaves_the_mirror_to_the_gate(tmp_path):
+    root = _codex_tree(tmp_path, mirrored="old")
+    (root / ship.CODEX_CONTEXT_SCRIPT).write_text("raise ImportError('x')\n", encoding="utf-8")
+    assert "could not load" in real_mirror_codex_skills(root)
+    (root / ship.CODEX_CONTEXT_SCRIPT).unlink()
+    assert real_mirror_codex_skills(root) == ""
+    assert (root / ".agents" / "skills" / "art-check" / "SKILL.md").read_text() == "old"
+
+
+def test_fix_re_mirrors_after_the_fixers_and_says_so(monkeypatch, capsys):
+    """After, so a fixer that rewrote a skill's source is what the mirror copies."""
+    order: list[str] = []
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M .claude/skills/s/SKILL.md\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: ["pre-commit"])
+    monkeypatch.setattr(
+        ship, "run_fixers", lambda paths, command: order.append("fixers") or (0, "quiet")
+    )
+    monkeypatch.setattr(ship, "mirror_codex_skills", lambda: order.append("mirror") or "did")
+    assert ship._fix([]) == ship.EXIT_OK
+    assert order == ["fixers", "mirror"]
+    assert "ship: did" in capsys.readouterr().out
+
+
+def test_a_failed_fix_does_not_re_mirror(monkeypatch):
+    called: list[str] = []
+    monkeypatch.setattr(ship, "_porcelain", lambda: " M x.py\n")
+    monkeypatch.setattr(ship, "_git", lambda *args: _Result(0, stdout=""))
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root, checkout: ["pre-commit"])
+    monkeypatch.setattr(ship, "run_fixers", lambda paths, command: (7, "still fails"))
+    monkeypatch.setattr(ship, "mirror_codex_skills", lambda: called.append("m") or "")
+    assert ship._fix([]) == 7
+    assert called == []
