@@ -110,6 +110,8 @@ def test_a_reference_is_a_call_an_attribute_or_an_import(text):
         '"alpha"',  # a bare mention in prose or a string
         "# alpha is untested",
         "from acme import (\n    beta,\n)\nalpha = 1",  # after the list closes
+        "from acme.alpha import beta",  # a module path, not a symbol
+        "    import acme.alpha",
     ],
 )
 def test_a_bare_substring_is_not_a_reference(text):
@@ -135,6 +137,10 @@ def test_a_bare_substring_is_not_a_reference(text):
         ("alphabet = 1", set()),
         ('"alpha"', set()),
         ("# alpha is untested", set()),
+        # A dotted path in an import statement names modules, not symbols (27c631a4).
+        ("from acme.alpha import beta", {"beta"}),
+        ("import acme.alpha", set()),
+        ("import acme.alpha as beta", set()),
     ],
 )
 def test_referenced_names_reads_the_three_shapes_a_reference_takes(text, expected):
@@ -542,9 +548,60 @@ def test_a_receiver_the_file_does_not_bind_by_path_vouches_as_before(tmp_path, b
 
 
 @pytest.mark.parametrize(
+    "reach",
+    [
+        "from vendor.alpha import run\n\n\ndef test_it():\n    run()\n",
+        "import vendor.alpha\n",
+        "import vendor\n\n\ndef test_it():\n    vendor.alpha.run()\n",
+        "import vendor as v\n\n\ndef test_it():\n    v.alpha.run()\n",
+        "def test_it():\n    import vendor.sub as v\n    v.alpha()\n",
+    ],
+)
+def test_a_name_off_a_module_the_project_does_not_define_vouches_for_nothing(tmp_path, reach):
+    """27c631a4: `typer.main.get_command`, and even `from typer.main import get_command`,
+    in a test file that loads four scripts by path read as coverage of each script's
+    `main`, and the ratchet demanded their baseline lines be dropped as "now covered".
+    A dotted path in an import statement names modules, never a symbol; and a name
+    reached off a module the file imports belongs to that module."""
+    write(tmp_path, "src/acme-tool.py", "def alpha():\n    pass\n\n\ndef beta():\n    pass\n")
+    loads = "def test_load():\n    load('src/acme-tool.py').beta()\n"
+    write(tmp_path, "tests/test_tools.py", reach + "\n\n" + loads)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/acme-tool.py::alpha"], reach
+
+
+@pytest.mark.parametrize(
+    "reach, uncovered",
+    [
+        ("import acme_tool\n\n\ndef test_it():\n    acme_tool.alpha()\n", "pkg/core.py"),
+        ("import src.acme_tool as tool\n\n\ndef test_it():\n    tool.alpha()\n", "pkg/core.py"),
+        ("import src\n\n\ndef test_it():\n    src.acme_tool.alpha()\n", "pkg/core.py"),
+        # reached through another module that imports it
+        ("import other\n\n\ndef test_it():\n    other.acme_tool.alpha()\n", "pkg/core.py"),
+        # reached through the package that re-exports it
+        ("import pkg as p\n\n\ndef test_it():\n    p.alpha()\n", "src/acme_tool.py"),
+    ],
+)
+def test_a_name_off_an_imported_project_module_still_vouches_for_it(tmp_path, reach, uncovered):
+    """The other side of 27c631a4: a module the file imports under its own name, a
+    dotted path or an alias still covers what is reached off it."""
+    write(tmp_path, "src/__init__.py")
+    write(tmp_path, "src/acme_tool.py", "def alpha():\n    pass\n")
+    write(tmp_path, "pkg/__init__.py", "from .core import alpha\n")
+    write(tmp_path, "pkg/core.py", "def alpha():\n    pass\n")
+    write(tmp_path, "tests/test_tools.py", reach)
+    found = us.gaps(tmp_path, config(sources=["src", "pkg"]))
+    assert found == [f"{uncovered}::alpha"], reach
+
+
+@pytest.mark.parametrize(
     "text, expected",
     [
         ("t = load('s/a-b.py')\nt.alpha()\n", {"alpha": {"a-b.py"}}),
+        ("import acme\nacme.alpha()\n", {"alpha": {"acme.py"}}),
+        ("import x.acme as t, y\nt.alpha()\n", {"alpha": {"x.py", "acme.py"}}),
+        ("import x\nx.acme.alpha()\n", {"acme": {"x.py"}, "alpha": {"x.py", "acme.py"}}),
+        ("import x\nx = 1\nx.alpha()\n", {}),  # also bound some other way
+        ("import x.alpha\nfrom y.beta import z\n", {}),  # an import path is no attribute
         ('t = load(r"s\\\\a.py")\nt.alpha()\nt.alpha\n', {"alpha": {"a.py"}}),
         (
             "def f():\n    t = load('a.py')\n    t.x()\n\ndef g():\n    t = load('b.py')\n    t.x()\n",

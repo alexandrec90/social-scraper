@@ -27,9 +27,10 @@ A *reference* is a call, an attribute access, or an import. Never a bare substri
 which `cap` satisfies inside `capsys`. And never a bare call of a name the test file
 defines itself (`shadowed_names`): a fixture named after the function it stands in for
 is that fixture, not the function, unless the file also reaches the real one through
-its module or an import. And an attribute off a name the file loaded one module into by
-path (`tool = load("scripts/a.py")`, then `tool.x()`) vouches for that module only
-(`attributes_by_module`), not for every other module the same file names.
+its module or an import. And an attribute off a name the file loaded one module into, by
+path (`tool = load("scripts/a.py")`, then `tool.x()`) or by `import` (`typer.main`),
+vouches for that module only (`attributes_by_module`), not for every other module the
+same file names. The dotted path of an import statement is no attribute at all.
 
 ## The baseline is debt, not configuration
 
@@ -193,10 +194,14 @@ def reference_pattern(symbol: str) -> re.Pattern[str]:
     The definition of a reference. `referenced_names` is the same three shapes read the
     other way round -- every name a text references, in one pass -- and the scan uses
     that; `test_referenced_names_agrees_with_reference_pattern` holds the two together.
+
+    The attribute shape is never read on an import statement's line: the dotted path
+    there names modules, never a symbol, and 27c631a4's `from typer.main import
+    get_command` read as coverage of `main` in every script its file loaded.
     """
     name = re.escape(symbol)
     return re.compile(
-        rf"\.{name}\b"  # module.symbol
+        rf"^(?![ \t]*(?:import|from)\b)[^\n]*?\.{name}\b"  # module.symbol
         rf"|(?<![\w.]){name}\s*\("  # symbol(...) after a from-import
         # from mod import symbol, and from mod import (\n    symbol,\n) across lines
         rf"|^\s*from\s+.*\bimport\b[ \t]*(?:\([^)]*?\b{name}\b|[^\n(]*?\b{name}\b)",
@@ -214,6 +219,14 @@ _ATTRIBUTE_RE = re.compile(r"\.(\w+)")
 _CALL_RE = re.compile(r"(?<![\w.])(\w+)\s*\(")
 _FROM_IMPORT_RE = re.compile(r"^\s*from\s+.*?\bimport\b[ \t]*(\([^)]*|[^\n(]*)", re.MULTILINE)
 _WORD_RE = re.compile(r"\w+")
+# An import statement's line, which the attribute shape never reads (`reference_pattern`).
+_IMPORT_LINE_RE = re.compile(r"^[ \t]*(?:import|from)\b[^\n]*", re.MULTILINE)
+
+
+def _without_import_lines(text: str) -> str:
+    """`text` with every import statement's line blanked, offsets kept, for the
+    attribute shape to read."""
+    return _IMPORT_LINE_RE.sub(lambda found: " " * len(found[0]), text)
 
 
 def referenced_names(text: str) -> frozenset[str]:
@@ -227,7 +240,7 @@ def referenced_names(text: str) -> frozenset[str]:
     names it references and taking a set union per module answers the same question
     in well under a second.
     """
-    names: set[str] = set(_ATTRIBUTE_RE.findall(text))
+    names: set[str] = set(_ATTRIBUTE_RE.findall(_without_import_lines(text)))
     names.update(_CALL_RE.findall(text))
     for rest_of_line in _FROM_IMPORT_RE.findall(text):
         names.update(_WORD_RE.findall(rest_of_line))
@@ -255,7 +268,7 @@ def shadowed_names(text: str) -> frozenset[str]:
     this is the whole file's answer to whether a bare call can mean the module's symbol.
     """
     defined = set(_DEFINITION_RE.findall(text))
-    reached = set(_ATTRIBUTE_RE.findall(text))
+    reached = set(_ATTRIBUTE_RE.findall(_without_import_lines(text)))
     for rest_of_line in _FROM_IMPORT_RE.findall(text):
         reached.update(_WORD_RE.findall(rest_of_line))
     return frozenset(defined - reached)
@@ -271,12 +284,33 @@ _LOADED_RE = re.compile(
     re.MULTILINE,
 )
 _ASSIGNED_RE = re.compile(r"^[ \t]*(\w+)[ \t]*(?::[^=\n]*)?=(?!=)", re.MULTILINE)
-_RECEIVER_RE = re.compile(r"(?<![\w.])(\w+)\.(\w+)")
+# `import a.b as c, d`: the clauses, split on `,` by `_imported`.
+_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([\w. \t,]+)", re.MULTILINE)
+_IMPORT_CLAUSE_RE = re.compile(r"\s*([\w.]+)(?:\s+as\s+(\w+))?\s*")
+# `receiver.a.b`: a name and the dotted chain off it.
+_CHAIN_RE = re.compile(r"(?<![\w.])(\w+)((?:\.\w+)+)")
+
+
+def _imported(scope: str) -> dict[str, set[str]]:
+    """Each name an `import` statement in `scope` binds, with the file names of the
+    modules on its dotted path: `import a.b as c` binds `c` to `a.py` and `b.py`, and
+    `import a.b` binds `a` to `a.py`, the chain off it reaching the rest."""
+    bound: dict[str, set[str]] = {}
+    for statement in _IMPORT_RE.findall(scope):
+        for clause in statement.split(","):
+            found = _IMPORT_CLAUSE_RE.fullmatch(clause)
+            if not found:
+                continue
+            parts = found[1].split(".")
+            name, modules = (found[2], parts) if found[2] else (parts[0], parts[:1])
+            bound.setdefault(name, set()).update(f"{part}.py" for part in modules)
+    return bound
 
 
 def _loaded(scope: str) -> dict[str, frozenset[str]]:
-    """Each name `scope` assigns, with the file names of the modules it loads into it --
-    empty for a name also assigned any other way, which says nothing about its module."""
+    """Each name `scope` loads a module into, by path or by `import`, with the file names
+    of those modules -- empty for a name also assigned any other way, which says nothing
+    about its module."""
     files: dict[str, set[str]] = {}
     loads: dict[str, int] = {}
     for found in _LOADED_RE.finditer(scope):
@@ -284,6 +318,9 @@ def _loaded(scope: str) -> dict[str, frozenset[str]]:
         loads[found[1]] = loads.get(found[1], 0) + 1
     for name in _ASSIGNED_RE.findall(scope):
         loads[name] = loads.get(name, 0) - 1
+    for name, modules in _imported(scope).items():
+        files.setdefault(name, set()).update(modules)
+        loads.setdefault(name, 0)
     return {
         name: frozenset(files.get(name, ())) if count == 0 else frozenset()
         for name, count in loads.items()
@@ -291,16 +328,21 @@ def _loaded(scope: str) -> dict[str, frozenset[str]]:
 
 
 def attributes_by_module(text: str) -> dict[str, frozenset[str]]:
-    """Names `text` reaches only as `receiver.name`, with `receiver` bound to a module
-    loaded by path, each mapped to those modules' file names.
+    """Names `text` reaches only off a receiver bound to a module, each mapped to the file
+    names of the modules that reach it.
 
     1a0918d0: `installer.runner_script()`, with `installer` loaded from
     install-collectors.py, read as coverage of install-global-tools.py's `runner_script`
     because another test in the file loaded that one into the same local name. A name in
     this map vouches only for the modules it maps to; every other reference -- a bare call,
-    an import, an attribute off a fixture or off anything the file does not load by path --
-    is left out and vouches for the whole corpus as before, so this can only move a
-    symbol out of coverage where the file itself says which module it reached.
+    a from-import, an attribute off a fixture or off anything the file does not bind to a
+    module -- is left out and vouches for the whole corpus as before, so this can only
+    move a symbol out of coverage where the file itself says which module it reached.
+
+    27c631a4: `typer.main.get_command` read as coverage of `main` in every script the file
+    loaded by path. A receiver bound by `import` names its modules too, and each link of a
+    chain belongs to the receiver's modules and the links before it -- `typer.py` for
+    `main`, which no project module is, while `pkg.mod.alpha` still reaches `mod.py`.
     """
     scopes = _SCOPE_RE.split(text)
     module_level = _loaded(scopes[0])
@@ -310,11 +352,18 @@ def attributes_by_module(text: str) -> dict[str, frozenset[str]]:
         free.update(_WORD_RE.findall(rest_of_line))
     for index, scope in enumerate(scopes):
         bound = {**module_level, **_loaded(scope)} if index else module_level
+        code = _without_import_lines(scope)
         dots: dict[int, frozenset[str]] = {}
-        for found in _RECEIVER_RE.finditer(scope):
-            if bound.get(found[1]):
-                dots[found.start(2) - 1] = bound[found[1]]
-        for found in _ATTRIBUTE_RE.finditer(scope):
+        for found in _CHAIN_RE.finditer(code):
+            owners = bound.get(found[1])
+            if not owners:
+                continue
+            dot = found.start(2)
+            for link in found[2].split(".")[1:]:
+                dots[dot] = owners
+                owners = owners | {f"{link}.py"}
+                dot += len(link) + 1
+        for found in _ATTRIBUTE_RE.finditer(code):
             if found.start() in dots:
                 owned.setdefault(found[1], set()).update(dots[found.start()])
             else:
@@ -513,10 +562,15 @@ def gaps(root: Path, cfg: harness_config.Config, texts: dict[Path, str] | None =
             # Not this gate's job to report: the linter and the interpreter both say so
             # louder. Skipping keeps a broken file from masking every other module.
             continue
+        package = reexporting_package(root, module)
+        # The spellings an owner may give `module`: its file name, its import name, and the
+        # packages it is reached through when one re-exports it.
+        spellings = {module.name, module.name.replace("-", "_")}
+        spellings.update(f"{part}.py" for part in package.split(".") if part)
         names: set[str] = set()
-        for rel in corpus_files(module, texts, reexporting_package(root, module)):
+        for rel in corpus_files(module, texts, package):
             names |= referenced[rel]
-            names.update(name for name, files in owned[rel].items() if module.name in files)
+            names.update(name for name, files in owned[rel].items() if spellings & files)
         found.extend(entry(module, symbol) for symbol in symbols if symbol not in names)
     return sorted(found)
 
