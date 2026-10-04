@@ -58,8 +58,8 @@ def test_parser_accepts_every_command():
     p = build_parser()
     assert p.parse_args(["scrape"]).platform == "all"
     assert p.parse_args(["scrape", "x", "--no-export"]).no_export
-    assert p.parse_args(["scrape", "--jitter"]).jitter
-    assert not p.parse_args(["scrape"]).jitter
+    assert p.parse_args(["scrape", "--now"]).now
+    assert not p.parse_args(["scrape"]).now
     assert p.parse_args(["run", "--headed"]).headed
     assert not p.parse_args(["scrape"]).headed
     assert p.parse_args(["run", "reddit", "--cycles", "2"]).cycles == 2
@@ -76,8 +76,8 @@ def test_platforms_of():
     assert platforms_of("x") == ("x",)
 
 
-def scrape_args(platform="x", jitter=False):
-    return argparse.Namespace(platform=platform, no_export=True, jitter=jitter)
+def scrape_args(platform="x", now=True):
+    return argparse.Namespace(platform=platform, no_export=True, now=now)
 
 
 def report_body(settings):
@@ -135,14 +135,16 @@ def test_scrape_exits_0_when_every_platform_is_deliberately_paused(settings, eng
     assert "paused" in platforms[REDDIT]["skipped"]
 
 
-def test_scrape_jitter_waits_up_to_a_fifth_of_a_cycle(settings, engine, monkeypatch):
+def test_scrape_waits_up_to_a_fifth_of_a_cycle_unless_now(settings, engine, monkeypatch, capsys):
+    """The scheduler fires bare `scrape` on a fixed grid, so the wait is the default."""
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
     slept = []
     monkeypatch.setattr(cli.time, "sleep", slept.append)
-    cmd_scrape(settings, engine, scrape_args())
-    assert slept == []
-    cmd_scrape(settings, engine, scrape_args(jitter=True))
+    cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export"]))
     assert len(slept) == 1 and 0 <= slept[0] <= 0.2 * 60 * settings.cycle_minutes
+    assert "--now to skip" in capsys.readouterr().out
+    cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export", "--now"]))
+    assert len(slept) == 1
 
 
 def test_run_passes_options_through(settings, engine, monkeypatch):
@@ -168,7 +170,7 @@ def test_scrape_exits_1_when_the_bucket_export_fails(
     monkeypatch.setattr(
         cli, "run_cycle", lambda s, e, p, export: runner.run_cycle(s, e, (), export=export)
     )
-    args = argparse.Namespace(platform="all", no_export=False, jitter=False)
+    args = argparse.Namespace(platform="all", no_export=False, now=True)
     assert cmd_scrape(settings, engine, args) == 1
     assert "FAILED" in capsys.readouterr().out
     assert any("StoreError" in e for e in report_body(settings)["errors"])
