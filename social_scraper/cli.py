@@ -2,8 +2,8 @@
 
 init-db               create the operational tables
 login reddit|x        open a visible browser to sign in once; the profile keeps it
-scrape [reddit|x|all] one cycle now, then export (skip with --no-export); --jitter
-                      first waits a random 0-20% of CYCLE_MINUTES, for schedulers
+scrape [reddit|x|all] one cycle, then export (skip with --no-export); first waits a
+                      random 0-20% of CYCLE_MINUTES, for schedulers -- --now skips it
 run                   cycle forever every CYCLE_MINUTES (or --cycles N)
                       scrape and run take --headed: show Chrome despite BROWSER_HEADLESS
                       and BROWSER_MINIMIZED
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("platform", nargs="?", default="all", choices=(*PLATFORMS, "all"))
         cmd.add_argument("--no-export", action="store_true")
         cmd.add_argument("--headed", action="store_true")
-    sub.choices["scrape"].add_argument("--jitter", action="store_true")
+    sub.choices["scrape"].add_argument("--now", action="store_true")
     sub.choices["run"].add_argument("--cycles", type=int, default=None)
     sub.add_parser("export").add_argument("--full", action="store_true")
     sub.add_parser("status")
@@ -76,9 +76,13 @@ def platforms_of(choice: str) -> tuple[str, ...]:
 
 
 def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
-    if args.jitter:
-        # A scheduler fires on a fixed grid, and a fixed interval is a bot signature.
-        time.sleep(start_jitter_s(settings.cycle_minutes))
+    if not args.now:
+        # A scheduler fires on a fixed grid, and a fixed interval is a bot signature. The
+        # default, not a flag: devkit's scheduled task runs bare `scrape`, and with the
+        # old opt-in `--jitter` every cycle started at :00:0x or :30:0x (2026-10-03).
+        wait = start_jitter_s(settings.cycle_minutes)
+        print(f"waiting {wait:.0f} s so the start is off the clock grid (--now to skip)")
+        time.sleep(wait)
     started = datetime.now(UTC).isoformat()
     try:
         schema.create_all(engine)

@@ -56,12 +56,12 @@ one never touches the other's cookies.
 ## Quick start
 
 ```bash
-cp .env.example .env              # then fill in the placeholders
-docker compose up -d --wait db    # Postgres: the scraper's operational state
+cp .env.example .env                # then fill in the placeholders
+docker compose up -d --wait db      # Postgres: the scraper's operational state
 uv run social-scraper init-db
-uv run social-scraper login x     # optional: sign in once in the window, then close it
-uv run social-scraper scrape      # one cycle of both platforms, then export
-uv run social-scraper run         # forever, every CYCLE_MINUTES
+uv run social-scraper login x       # optional: sign in once in the window, then close it
+uv run social-scraper scrape --now  # one cycle of both platforms, then export
+uv run social-scraper run           # forever, every CYCLE_MINUTES
 ```
 
 Run these from the checkout root in any shell, with no venv activated: `uv run` creates
@@ -79,7 +79,7 @@ your personal one.
 
 | Command | What it does |
 | --- | --- |
-| `scrape [reddit\|x\|all] [--no-export] [--jitter]` | one cycle now; report in `logs/scrape-run.json` |
+| `scrape [reddit\|x\|all] [--no-export] [--now]` | one cycle; report in `logs/scrape-run.json` |
 | `run [reddit\|x\|all] [--cycles N]` | repeat forever (or N times) |
 | `status` | budgets used, pauses, row counts, trending symbols, X accounts |
 | `export [--full]` | copy new rows to the lake; `--full` resends every row |
@@ -92,8 +92,9 @@ and every notice -- on success too. The terminal gets a status line and that pat
 `scrape` is what a scheduler fires (devkit runs it every `CYCLE_MINUTES`). It exits 1
 when the cycle failed -- database unreachable, browser crash, a platform erroring, a
 failed export -- and 0 when a platform was deliberately left alone (outside X active
-hours, budget spent, circuit breaker open). `--jitter` first waits a random 0-20% of
-`CYCLE_MINUTES`, so a fixed scheduler grid does not become a fixed request interval.
+hours, budget spent, circuit breaker open). It first waits a random 0-20% of
+`CYCLE_MINUTES`, so a fixed scheduler grid does not become a fixed request interval;
+`--now` skips the wait for a run by hand.
 
 ## Data contract (data-lake / ibkr_trader)
 
