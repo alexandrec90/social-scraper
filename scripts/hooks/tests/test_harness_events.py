@@ -80,6 +80,39 @@ class TestFieldLimits:
         assert line.count("\t") == 2
 
 
+class TestCommandKeepsBothEnds:
+    """A command's head is an interpreter and absolute paths, its tail the arguments
+    that say which invocation it was. Cut from the end, a deep worktree path pushed
+    `--branch --slug lint-autofix --yes` off the row entirely (10b3cce0)."""
+
+    def _deep(self):
+        root = "C:/Users/x/vs-code/devkit/.claude/worktrees/bridge-cse_" + "q" * 200
+        return f"python {root}/scripts/sweep.py --only alpha --branch --slug lint-autofix --yes"
+
+    def test_a_long_commands_arguments_survive_into_the_line(self):
+        line = events.event_line("s", "scheduled-job-failed", (("command", self._deep()),))
+        assert line.endswith("--branch --slug lint-autofix --yes")
+
+    def test_and_so_does_its_interpreter(self):
+        kept = events.clean(self._deep(), events.limit_for("command"), keep_tail=True)
+        assert kept.startswith("python C:/Users/x/vs-code/devkit/")
+        assert events.ELISION in kept
+
+    def test_it_is_still_bounded(self):
+        kept = events.clean(self._deep(), events.limit_for("command"), keep_tail=True)
+        assert len(kept) == events.limit_for("command")
+
+    def test_a_short_command_is_untouched(self):
+        assert events.clean("python x.py --yes", 300, keep_tail=True) == "python x.py --yes"
+
+    def test_a_limit_too_small_for_the_marker_cuts_the_head(self):
+        assert events.clean("x" * 50, limit=3, keep_tail=True) == "xxx"
+
+    def test_other_fields_still_cut_from_the_end(self):
+        line = events.event_line("s", "e", (("project", "p" * 400 + "END"),))
+        assert line == "s\tevent=e\tproject=" + "p" * events.VALUE_LIMIT
+
+
 class TestEventLine:
     def test_format(self):
         line = events.event_line(
