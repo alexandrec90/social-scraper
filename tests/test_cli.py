@@ -1,10 +1,11 @@
 import argparse
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import LAKE_BUCKET, Clock, IsolatedSettings, bucket_keys
+from conftest import LAKE_BUCKET, Clock, IsolatedSettings, bucket_keys, reddit_submission
 from sqlalchemy.exc import OperationalError
 
 from social_scraper import cli, runner
@@ -13,13 +14,16 @@ from social_scraper.cli import (
     build_parser,
     cmd_export,
     cmd_lake,
+    cmd_reddit_import,
     cmd_run,
     cmd_scrape,
     cmd_status,
     cmd_universe,
     main,
     platforms_of,
+    utc_date,
 )
+from social_scraper.reddit import dumps
 from social_scraper.db.repository import make_engine
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.models import PLATFORMS, REDDIT, X, AuthorInfo, Post
@@ -69,6 +73,86 @@ def test_parser_accepts_every_command():
     assert not p.parse_args(["export"]).full
     with pytest.raises(SystemExit):
         p.parse_args(["login", "facebook"])
+    imp = p.parse_args(["reddit-import", "a.zst", "dumps", "--until", "2026-01-01", "--dry-run"])
+    assert imp.paths == [Path("a.zst"), Path("dumps")] and imp.dry_run
+    assert imp.since == dumps.DEFAULT_SINCE and imp.until == datetime(2026, 1, 1, tzinfo=UTC)
+    assert not (imp.all_posts or imp.local_only)
+    with pytest.raises(SystemExit):
+        p.parse_args(["reddit-import"])
+    with pytest.raises(SystemExit):
+        p.parse_args(["reddit-import", "a.zst", "--since", "last tuesday"])
+
+
+def test_utc_date_reads_dates_and_aware_timestamps():
+    assert utc_date("2021-01-27") == datetime(2021, 1, 27, tzinfo=UTC)
+    assert utc_date("2021-01-27T05:00:00+05:00") == datetime(2021, 1, 27, tzinfo=UTC)
+
+
+def dump_line(post_id, title):
+    data = reddit_submission(post_id, datetime(2021, 1, 27, tzinfo=UTC).timestamp(), title=title)
+    return json.dumps(data["data"]) + "\n"
+
+
+def import_args(*paths, **over):
+    base = {
+        "since": dumps.DEFAULT_SINCE,
+        "until": None,
+        "all_posts": False,
+        "local_only": False,
+        "dry_run": False,
+    }
+    return argparse.Namespace(paths=list(paths), **(base | over))
+
+
+def test_reddit_import_writes_the_lake_and_its_report(
+    settings, engine, universe, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    folder = tmp_path / "downloads"
+    folder.mkdir()
+    (folder / "wsb_submissions.jsonl").write_text(dump_line("a", "$GME") + dump_line("b", "hi"))
+    assert cmd_reddit_import(settings, engine, import_args(folder)) == 0
+    out = capsys.readouterr().out
+    assert "2021: 1 posts (0 comments), 1 symbols" in out
+    assert "1 file(s): 1 posts, 1 mentions in 2 partitions" in out
+    body = json.loads((settings.logs_dir / dumps.REPORT_FILE).read_text())
+    assert body["ok"] and body["files"][0]["skipped"] == {"no_symbol": 1}
+    assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
+    # The spool is temporary: nothing is left behind in data/.
+    assert list(settings.data_dir.iterdir()) == []
+
+
+def test_reddit_import_dry_run_and_local_only_never_touch_the_bucket(
+    settings, engine, universe, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    settings.archive_backend = "s3"  # and no bucket named: building its store would raise
+    path = tmp_path / "s.jsonl"
+    path.write_text(dump_line("a", "$GME"))
+    assert cmd_reddit_import(settings, engine, import_args(path, dry_run=True)) == 0
+    assert "would be written" in capsys.readouterr().out
+    assert not settings.archive_root.exists()
+    assert cmd_reddit_import(settings, engine, import_args(path, local_only=True)) == 0
+    assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
+
+
+def test_reddit_import_exits_1_on_a_bad_file(settings, engine, universe, monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    args = import_args(tmp_path / "missing.zst")
+    assert cmd_reddit_import(settings, engine, args) == 1
+    body = json.loads((settings.logs_dir / dumps.REPORT_FILE).read_text())
+    assert "missing.zst" in body["errors"][0]
+
+
+def test_reddit_import_reports_then_raises_when_it_cannot_start(
+    settings, engine, monkeypatch, capsys, tmp_path
+):
+    settings.archive_backend = "s3"  # no bucket named
+    with pytest.raises(store.StoreError):
+        cmd_reddit_import(settings, engine, import_args(tmp_path / "s.zst"))
+    assert "FAILED -- details in" in capsys.readouterr().out
+    body = json.loads((settings.logs_dir / dumps.REPORT_FILE).read_text())
+    assert body["ok"] is False and body["errors"][0].startswith("import: StoreError")
 
 
 def test_platforms_of():
