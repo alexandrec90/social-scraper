@@ -82,7 +82,7 @@ your personal one.
 | `scrape [reddit\|x\|all] [--no-export] [--jitter]` | one cycle now; report in `logs/scrape-run.json` |
 | `run [reddit\|x\|all] [--cycles N]` | repeat forever (or N times) |
 | `status` | budgets used, pauses, row counts, trending symbols, X accounts |
-| `export` | copy new rows to the lake |
+| `export [--full]` | copy new rows to the lake; `--full` resends every row |
 | `lake [--days N]` | per-symbol daily mentions/authors/stance from the lake |
 | `universe` | refresh the symbol directory |
 
@@ -97,9 +97,19 @@ hours, budget spent, circuit breaker open). `--jitter` first waits a random 0-20
 
 ## Data contract (data-lake / ibkr_trader)
 
-`export` writes Hive-style Parquet plus `_catalog/<dataset>.json` into `ARCHIVE_ROOT`,
-the pooled tree data-lake's `load_catalog` reads -- no shared database, no shared
-code. Verified against data-lake's own `DatasetManifest.from_dict`.
+`export` writes Hive-style Parquet plus `_catalog/<dataset>.json` to two places:
+
+- **`ARCHIVE_ROOT`**, the local tree -- always. It is the staging buffer, and what
+  `lake` reads.
+- **The private S3-compatible bucket ibkr_trader reads** (Cloudflare R2, `data-lake`)
+  -- when `ARCHIVE_BACKEND=s3`. The `ARCHIVE_S3_*` settings are data-lake's own names
+  (`BUCKET`, `ENDPOINT_URL`, `REGION`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `PREFIX`),
+  so ibkr_trader's R2 block is copied over unchanged. Each object lands at the same key
+  relative to the archive root as in the local tree (under `ARCHIVE_S3_PREFIX`, if
+  set), so data-lake's `load_catalog` reads the bucket as it is -- no shared database,
+  no shared code. After switching the bucket on, `export --full` sends it the history.
+
+The catalog is verified against data-lake's own `DatasetManifest.from_dict`.
 
 | Dataset | Grain | Key | Partition |
 | --- | --- | --- | --- |
@@ -119,7 +129,10 @@ phone numbers are scrubbed from text; a post matching a credential pattern is dr
 never exported.
 
 Partitions are rewritten by merge (new rows win), verified by read-back, then
-catalogued -- a late comment or refreshed score lands in the right day's file.
+catalogued -- a late comment or refreshed score lands in the right day's file. Each
+store does this against its own copy: the bucket's merge reads the partition back from
+the bucket. A store that fails (a refused or unreachable bucket included) fails the
+export, which leaves the watermark where it was so the next run resends the same rows.
 
 In VS Code, `Ctrl+Shift+B` runs the default build task and the task quick-pick
 (`Ctrl+Shift+P` → "Run Task") lists everything else, each with a one-line `detail`
@@ -152,7 +165,7 @@ social_scraper/
   pipeline.py             scrub, extract, score, upsert
   stance.py, privacy.py   trading-slang stance; PII scrubbing and secret filter
   db/                     operational tables (Postgres; SQLite in tests)
-  export.py, archive/     lake writer, catalog, DuckDB read lens
+  export.py, archive/     lake writer, catalog, local/S3 stores, DuckDB read lens
 tests/                    tests (SQLite always; Postgres too when DATABASE_URL is one)
 scripts/                  project scripts (Python, each with tests)
 scripts/hooks/            vendored agent harness — edit upstream in devkit

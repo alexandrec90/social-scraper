@@ -92,6 +92,42 @@ def db(request: pytest.FixtureRequest) -> Iterator[Engine]:
         base.dispose()
 
 
+LAKE_BUCKET = "data-lake"
+
+
+@pytest.fixture
+def aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake AWS credentials, and none of the developer's profiles or config files."""
+    for name in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_CONFIG_FILE", os.devnull)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", os.devnull)
+
+
+@pytest.fixture
+def s3_client(aws_env: None) -> Iterator[Any]:
+    """An in-process S3 (moto) holding one empty bucket, `LAKE_BUCKET`. No network.
+
+    The client has no custom endpoint on purpose: moto intercepts AWS-shaped URLs only,
+    so an R2-style `endpoint_url` would send a real request.
+    """
+    import boto3
+    from moto import mock_aws
+
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=LAKE_BUCKET)
+        yield client
+
+
+def bucket_keys(client: Any, bucket: str = LAKE_BUCKET) -> set[str]:
+    page = client.list_objects_v2(Bucket=bucket)
+    return {item["Key"] for item in page.get("Contents", [])}
+
+
 def make_universe(*symbols: str) -> Universe:
     return Universe({s: Security(s, f"{s} Inc", "Q", is_etf=s in {"SPY", "QQQ"}) for s in symbols})
 

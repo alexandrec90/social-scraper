@@ -3,8 +3,10 @@
 Each dataset has a watermark (`export_watermarks`): the change-timestamp through which
 it has been exported. A run reads rows past it in batches, drops any post whose text
 matches a credential shape (`privacy.contains_secret` -- dropped, never uploaded),
-merges each partition (`archive.writer`), and only then advances the watermark. A
-failure leaves the watermark where it was, so the next run retries the same rows.
+merges each partition into every store (`archive.writer`; the local tree, then the
+bucket when `ARCHIVE_BACKEND=s3`), and only then advances the watermark. A failure in
+any store leaves the watermark where it was, so the next run retries the same rows --
+the merge is idempotent, so a store that already took them takes them again unchanged.
 
 An unwritable lake **degrades, never blocks** (`.claude/rules/data-lake.md`): the error
 is returned in the result for the run artifact, and scraping carries on.
@@ -14,9 +16,9 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -25,7 +27,9 @@ from sqlalchemy.engine import Connection, Engine
 
 from social_scraper.archive import datasets
 from social_scraper.archive.manifest import DatasetSpec, ManifestError
+from social_scraper.archive.store import ObjectStore, StoreError, stores_for
 from social_scraper.archive.writer import VerifyError, write_partition
+from social_scraper.config import Settings
 from social_scraper.db import repository, schema
 from social_scraper.models import as_utc
 from social_scraper.privacy import contains_secret
@@ -95,7 +99,11 @@ def lake_rows(spec: DatasetSpec, rows: list[dict[str, Any]]) -> tuple[list[dict]
 
 
 def export_dataset(
-    engine: Engine, root: Path, spec: DatasetSpec, now: datetime, batch: int = BATCH_ROWS
+    engine: Engine,
+    stores: Sequence[ObjectStore],
+    spec: DatasetSpec,
+    now: datetime,
+    batch: int = BATCH_ROWS,
 ) -> DatasetExport:
     table, ts_column = SOURCES[spec.name]
     report = DatasetExport(spec.name)
@@ -111,7 +119,8 @@ def export_dataset(
         for row in out:
             groups[spec.partition_of(row)].append(row)
         for part, group in groups.items():
-            write_partition(root, spec, part, group, now)
+            for store in stores:
+                write_partition(store, spec, part, group, now)
         with engine.begin() as conn:
             repository.set_watermark(conn, spec.name, as_utc(rows[-1][ts_column]), now)
         report.rows += len(out)
@@ -122,14 +131,32 @@ def export_dataset(
     return report
 
 
-def export_all(engine: Engine, root: Path, now: datetime) -> ExportResult:
-    """Export every dataset; one failing dataset does not stop the others."""
+def export_all(engine: Engine, stores: Sequence[ObjectStore], now: datetime) -> ExportResult:
+    """Export every dataset to every store; one failing dataset does not stop the others."""
     result = ExportResult()
     for spec in datasets.ALL:
         try:
-            report = export_dataset(engine, root, spec, now)
+            report = export_dataset(engine, stores, spec, now)
+        # StoreError is an OSError: an unreachable or refusing bucket fails like a full disk.
         except (OSError, VerifyError, ManifestError, pa.ArrowException) as exc:
             log.warning("export of %s failed: %s", spec.name, exc)
             report = DatasetExport(spec.name, error=f"{type(exc).__name__}: {exc}")
         result.datasets.append(report)
     return result
+
+
+def export_to_lake(
+    engine: Engine, settings: Settings, now: datetime, client: Any = None
+) -> ExportResult:
+    """`export_all` into the stores `settings` configure (`client`: an S3 client to use).
+
+    A bucket that cannot even be configured fails every dataset rather than raising, so
+    a run still writes its report and `scrape` still exits 1.
+    """
+    try:
+        stores = stores_for(settings, client)
+    except StoreError as exc:
+        log.warning("lake export not configured: %s", exc)
+        error = f"{type(exc).__name__}: {exc}"
+        return ExportResult([DatasetExport(spec.name, error=error) for spec in datasets.ALL])
+    return export_all(engine, stores, now)

@@ -30,6 +30,9 @@ dev = [
   # so the version is pinned with everything else, and so `session-start.sh` can wire the
   # git hook right after `uv sync` without a separate bootstrap step.
   "pre-commit>=4.6",
+  # An in-process S3 for the lake export's tests: real boto3 requests and error codes,
+  # no network and no bucket credentials.
+  "moto[s3]>=5.0",
 ]
 
 [build-system]
@@ -59,4 +62,10 @@ exclude = '^scripts/(hooks/|sync-harness\.py)'
 # `import-untyped`. Declared once here rather than suppressed at each import.
 [[tool.mypy.overrides]]
 module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+# boto3 and botocore ship no type information either; their clients are generated at
+# runtime, so `archive/store.py` types the client as `Any` rather than pull in stubs.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true

@@ -17,10 +17,11 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
+
+from social_scraper.archive.store import ObjectStore
 
 CATALOG_DIR = "_catalog"
 SCHEMA_VERSION = 1
@@ -53,8 +54,9 @@ class DatasetSpec:
         return {f.name: str(f.type) for f in self.schema}
 
 
-def catalog_path(root: Path, dataset: str) -> Path:
-    return root / CATALOG_DIR / f"{dataset}.json"
+def catalog_key(dataset: str) -> str:
+    """The manifest's root-relative key -- data-lake's `manifest_key`."""
+    return f"{CATALOG_DIR}/{dataset}.json"
 
 
 def partition_entry(rows: int, min_ts: datetime, max_ts: datetime, updated_at: datetime) -> dict:
@@ -86,17 +88,27 @@ def validate(manifest: dict[str, Any]) -> None:
                 raise ManifestError(f"partition {key}.{field} is not ISO-8601") from exc
 
 
-def load(root: Path, dataset: str) -> dict[str, Any] | None:
-    path = catalog_path(root, dataset)
-    if not path.exists():
+def load(store: ObjectStore, dataset: str) -> dict[str, Any] | None:
+    """The stored manifest, or `None` if there is none.
+
+    A manifest that exists but is not JSON raises `ManifestError`, never `None`: the
+    bucket is shared, and reporting damage as absence would let the next write replace
+    the record of every partition with a record of one.
+    """
+    try:
+        raw = store.get_bytes(catalog_key(dataset))
+    except KeyError:
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:  # JSONDecodeError is a ValueError
+        raise ManifestError(f"{store.name}: {catalog_key(dataset)} is not JSON: {exc}") from exc
 
 
 def write(
-    root: Path, spec: DatasetSpec, partitions: dict[str, dict], updated_at: datetime
+    store: ObjectStore, spec: DatasetSpec, partitions: dict[str, dict], updated_at: datetime
 ) -> dict[str, Any]:
-    """Validate and atomically write the manifest. Returns what was written."""
+    """Validate and write the manifest (atomically: a whole-object put). Returns it."""
     manifest = {
         "dataset": spec.name,
         "schema_version": SCHEMA_VERSION,
@@ -108,9 +120,6 @@ def write(
         "producer": PRODUCER,
     }
     validate(manifest)
-    path = catalog_path(root, spec.name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    body = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+    store.put_bytes(catalog_key(spec.name), body)
     return manifest

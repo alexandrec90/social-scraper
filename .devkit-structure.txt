@@ -18,6 +18,7 @@
 complexity::scripts/lint-all.py::main = 19
 dependency::pyproject.toml::boto3 = 1
 dependency::pyproject.toml::duckdb = 1
+dependency::pyproject.toml::moto = 1
 dependency::pyproject.toml::mypy = 1
 dependency::pyproject.toml::playwright = 1
 dependency::pyproject.toml::pre-commit = 1
@@ -42,3 +43,6 @@ swallowed_errors::scripts/notify.py = 1
 
 # 2026-09-29  recorded: playwright: the scraper's only transport. Reddit answers a plain HTTP client with 403 (measured 2026-09-28) and X has no usable read API, so a real, logged-in Chrome driven by Playwright is how both are reached.
 #   dependency::pyproject.toml::playwright -> 1
+
+# 2026-10-03  recorded: moto (dev only): an in-process S3 for the lake export's tests -- real boto3 requests and error codes (NoSuchKey, NoSuchBucket, CopyObject) with no network and no bucket credentials, which a hand-rolled fake client would only imitate.
+#   dependency::pyproject.toml::moto -> 1

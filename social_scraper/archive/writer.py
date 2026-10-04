@@ -1,22 +1,22 @@
-"""Write one Hive-style partition: merge, verify, replace, catalog.
+"""Write one Hive-style partition into one store: merge, verify, replace, catalog.
 
 The same sequence sports_betting's `EventArchive` uses, so the pooled lake behaves one
-way whoever wrote to it:
+way whoever wrote to it, and the same sequence whichever store it is written to (the
+local tree or the bucket, `archive/store.py`):
 
-1. Read the partition's existing file, if any, and merge the new rows in on the
-   natural key -- **the new row wins**, because a re-observed post carries fresher
-   engagement than the copy already archived.
+1. Read the partition's existing object **from that store**, if any, and merge the new
+   rows in on the natural key -- **the new row wins**, because a re-observed post
+   carries fresher engagement than the copy already archived.
 2. Write the result to `part.parquet.tmp`.
-3. **Verify**: read the temp file back and check its row count and exact key set.
-4. Atomically replace `part.parquet`, then update `_catalog/<dataset>.json` in the
-   same call -- never as a later backfill (`.claude/rules/data-lake.md`).
+3. **Verify**: read the staged object back and check its row count and exact key set.
+4. Replace `part.parquet` with it, then update `_catalog/<dataset>.json` in the same
+   call -- never as a later backfill (`.claude/rules/data-lake.md`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -24,9 +24,11 @@ import pyarrow.parquet as pq
 
 from social_scraper.archive import manifest
 from social_scraper.archive.manifest import DatasetSpec
+from social_scraper.archive.store import ObjectStore
 from social_scraper.models import as_utc
 
 PART_FILE = "part.parquet"
+STAGED_SUFFIX = ".tmp"
 
 
 class VerifyError(RuntimeError):
@@ -55,10 +57,22 @@ def merge(existing: pa.Table | None, new: pa.Table, key_columns: tuple[str, ...]
     return pa.concat_tables([existing.filter(keep), new])
 
 
-def _read_existing(path: Path, schema: pa.Schema) -> pa.Table | None:
-    if not path.exists():
+def to_parquet(table: pa.Table) -> bytes:
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, compression="zstd")
+    return sink.getvalue().to_pybytes()
+
+
+def from_parquet(data: bytes) -> pa.Table:
+    return pq.read_table(pa.BufferReader(data))
+
+
+def _read_existing(store: ObjectStore, key: str, schema: pa.Schema) -> pa.Table | None:
+    try:
+        data = store.get_bytes(key)
+    except KeyError:
         return None
-    table = pq.read_table(path)
+    table = from_parquet(data)
     # Columns added to the spec since the file was written arrive as nulls.
     for field in schema:
         if field.name not in table.column_names:
@@ -67,37 +81,42 @@ def _read_existing(path: Path, schema: pa.Schema) -> pa.Table | None:
 
 
 def write_partition(
-    root: Path, spec: DatasetSpec, partition_dir: str, rows: list[dict[str, Any]], now: datetime
+    store: ObjectStore,
+    spec: DatasetSpec,
+    partition_dir: str,
+    rows: list[dict[str, Any]],
+    now: datetime,
 ) -> PartitionResult:
-    """Merge `rows` into one partition and record it in the catalog."""
+    """Merge `rows` into one partition of `store` and record it in that store's catalog."""
     rel = f"{partition_dir}/{PART_FILE}"
-    path = root / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
     merged = merge(
-        _read_existing(path, spec.schema),
+        _read_existing(store, rel, spec.schema),
         pa.Table.from_pylist(rows, schema=spec.schema),
         spec.key_columns,
     )
     expected = set(_keys(merged, spec.key_columns))
     if len(expected) != merged.num_rows:
-        raise VerifyError(f"{rel}: duplicate keys in the merged partition")
-    tmp = path.with_name(PART_FILE + ".tmp")
-    pq.write_table(merged, tmp, compression="zstd")
-    check = pq.read_table(tmp)
+        raise VerifyError(f"{store.name}: {rel}: duplicate keys in the merged partition")
+    staged = rel + STAGED_SUFFIX
+    store.put_bytes(staged, to_parquet(merged))
+    try:
+        check = from_parquet(store.get_bytes(staged))
+    except KeyError:
+        raise VerifyError(f"{store.name}: {staged}: gone on read-back") from None
     if check.num_rows != merged.num_rows or set(_keys(check, spec.key_columns)) != expected:
-        tmp.unlink(missing_ok=True)
-        raise VerifyError(f"{rel}: read-back did not match what was written")
-    tmp.replace(path)
+        store.delete(staged)
+        raise VerifyError(f"{store.name}: {rel}: read-back did not match what was written")
+    store.promote(staged, rel)
     stamps = [as_utc(t) for t in merged.column(spec.ts_column).to_pylist() if t is not None]
     result = PartitionResult(rel, merged.num_rows, min(stamps), max(stamps))
-    _record(root, spec, result, now)
+    _record(store, spec, result, now)
     return result
 
 
-def _record(root: Path, spec: DatasetSpec, result: PartitionResult, now: datetime) -> None:
-    current = manifest.load(root, spec.name) or {}
+def _record(store: ObjectStore, spec: DatasetSpec, result: PartitionResult, now: datetime) -> None:
+    current = manifest.load(store, spec.name) or {}
     partitions = dict(current.get("partitions") or {})
     partitions[result.key] = manifest.partition_entry(
         result.rows, result.min_ts, result.max_ts, now
     )
-    manifest.write(root, spec, partitions, now)
+    manifest.write(store, spec, partitions, now)

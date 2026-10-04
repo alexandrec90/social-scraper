@@ -1,0 +1,160 @@
+import pytest
+from conftest import LAKE_BUCKET, IsolatedSettings, bucket_keys
+
+from social_scraper.archive import store
+from social_scraper.archive.store import (
+    LocalStore,
+    ObjectStore,
+    S3Store,
+    StoreError,
+    make_s3_client,
+    stores_for,
+)
+
+
+def s3_settings(**over):
+    return IsolatedSettings(archive_backend="s3", archive_s3_bucket=LAKE_BUCKET, **over)
+
+
+# --- LocalStore -----------------------------------------------------------------------
+
+
+def test_local_store_round_trip(tmp_path):
+    s = LocalStore(tmp_path)
+    s.put_bytes("a/b/c.json", b"one")
+    assert s.get_bytes("a/b/c.json") == b"one"
+    assert s.path("a/b/c.json") == tmp_path / "a" / "b" / "c.json"
+    assert [p.name for p in (tmp_path / "a" / "b").iterdir()] == ["c.json"]  # no .tmp left
+    assert s.name == str(tmp_path)
+
+
+def test_local_store_missing_is_key_error(tmp_path):
+    with pytest.raises(KeyError):
+        LocalStore(tmp_path).get_bytes("nope")
+
+
+def test_local_store_promote_and_delete(tmp_path):
+    s = LocalStore(tmp_path)
+    s.put_bytes("k", b"old")
+    s.put_bytes("k.tmp", b"new")
+    s.promote("k.tmp", "k")
+    assert s.get_bytes("k") == b"new"
+    assert not s.path("k.tmp").exists()
+    s.delete("k")
+    s.delete("k")  # absent is not an error
+    assert not s.path("k").exists()
+
+
+# --- S3Store --------------------------------------------------------------------------
+
+
+def test_s3_store_round_trip_under_a_prefix(s3_client):
+    s = S3Store(s3_client, LAKE_BUCKET, prefix="/lake/")
+    s.put_bytes("_catalog/d.json", b"{}")
+    assert s.get_bytes("_catalog/d.json") == b"{}"
+    # Stored under the prefix, as data-lake's S3ObjectStore._key reads it.
+    assert bucket_keys(s3_client) == {"lake/_catalog/d.json"}
+    assert s.object_key("x") == "lake/x"
+    assert s.name == f"s3://{LAKE_BUCKET}/lake"
+
+
+def test_s3_store_without_a_prefix_writes_at_the_bucket_root(s3_client):
+    s = S3Store(s3_client, LAKE_BUCKET)
+    s.put_bytes("_catalog/d.json", b"{}")
+    assert bucket_keys(s3_client) == {"_catalog/d.json"}
+    assert s.name == f"s3://{LAKE_BUCKET}"
+
+
+def test_s3_store_missing_object_is_key_error(s3_client):
+    with pytest.raises(KeyError):
+        S3Store(s3_client, LAKE_BUCKET).get_bytes("nope")
+
+
+def test_s3_store_promote_replaces_and_removes_the_staged_object(s3_client):
+    s = S3Store(s3_client, LAKE_BUCKET)
+    s.put_bytes("p/part.parquet", b"old")
+    s.put_bytes("p/part.parquet.tmp", b"new")
+    s.promote("p/part.parquet.tmp", "p/part.parquet")
+    assert s.get_bytes("p/part.parquet") == b"new"
+    assert bucket_keys(s3_client) == {"p/part.parquet"}
+    s.delete("p/part.parquet")
+    s.delete("p/part.parquet")  # absent is not an error
+    assert bucket_keys(s3_client) == set()
+
+
+def test_s3_store_failures_are_store_errors(s3_client):
+    s = S3Store(s3_client, "no-such-bucket")
+    for call in (
+        lambda: s.get_bytes("k"),
+        lambda: s.put_bytes("k", b"x"),
+        lambda: s.promote("k.tmp", "k"),
+        lambda: s.delete("k"),
+    ):
+        with pytest.raises(StoreError, match="no-such-bucket"):
+            call()
+    assert issubclass(StoreError, OSError)  # an export treats it like a full disk
+
+
+def test_s3_store_needs_a_bucket(s3_client):
+    with pytest.raises(StoreError, match="ARCHIVE_S3_BUCKET"):
+        S3Store(s3_client, "")
+
+
+# --- building the stores from settings -------------------------------------------------
+
+
+def test_make_s3_client_uses_the_r2_settings(aws_env, monkeypatch):
+    # No request is made: building a boto3 client is offline.
+    monkeypatch.setenv("ARCHIVE_S3_SECRET_ACCESS_KEY", "fake-secret")
+    client = make_s3_client(
+        s3_settings(
+            archive_s3_endpoint_url="https://acct.r2.cloudflarestorage.com",
+            archive_s3_region="auto",
+            archive_s3_access_key_id="fake-id",
+        )
+    )
+    assert client.meta.endpoint_url == "https://acct.r2.cloudflarestorage.com"
+    assert client.meta.region_name == "auto"
+    creds = client._request_signer._credentials
+    assert (creds.access_key, creds.secret_key) == ("fake-id", "fake-secret")
+
+
+def test_make_s3_client_rejects_a_malformed_endpoint(aws_env):
+    with pytest.raises(StoreError, match="S3 client"):
+        make_s3_client(s3_settings(archive_s3_endpoint_url="not a url"))
+
+
+def test_stores_for_defaults_to_the_local_tree_only(tmp_path, monkeypatch):
+    def never(settings):
+        raise AssertionError("no S3 client without ARCHIVE_BACKEND=s3")
+
+    monkeypatch.setattr(store, "make_s3_client", never)
+    # A bucket name alone does not switch the bucket on: ARCHIVE_BACKEND does.
+    stores = stores_for(IsolatedSettings(archive_root=tmp_path, archive_s3_bucket=LAKE_BUCKET))
+    assert len(stores) == 1 and isinstance(stores[0], LocalStore)
+    assert stores[0].root == tmp_path
+
+
+def test_stores_for_s3_writes_local_first_then_the_bucket(tmp_path, s3_client, monkeypatch):
+    monkeypatch.setattr(store, "make_s3_client", lambda settings: s3_client)
+    local, bucket = stores_for(s3_settings(archive_root=tmp_path, archive_s3_prefix="p"))
+    assert isinstance(local, LocalStore) and local.root == tmp_path
+    assert isinstance(bucket, S3Store)
+    assert (bucket.client, bucket.bucket, bucket.prefix) == (s3_client, LAKE_BUCKET, "p")
+
+
+def test_stores_for_prefers_an_injected_client(tmp_path, s3_client, monkeypatch):
+    monkeypatch.setattr(store, "make_s3_client", lambda settings: pytest.fail("built a client"))
+    bucket = stores_for(s3_settings(archive_root=tmp_path), client=s3_client)[1]
+    assert isinstance(bucket, S3Store) and bucket.client is s3_client
+
+
+def test_both_stores_are_object_stores(tmp_path, s3_client):
+    assert isinstance(LocalStore(tmp_path), ObjectStore)
+    assert isinstance(S3Store(s3_client, LAKE_BUCKET), ObjectStore)
+    assert not isinstance(object(), ObjectStore)
+
+
+def test_stores_for_s3_without_a_bucket_is_a_store_error(tmp_path, s3_client):
+    with pytest.raises(StoreError, match="ARCHIVE_S3_BUCKET"):
+        stores_for(IsolatedSettings(archive_backend="s3"), client=s3_client)

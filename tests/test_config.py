@@ -87,6 +87,47 @@ def test_default_x_pace_fits_its_budgets():
     assert hourly * _active_hours_per_day(s.x_hours) <= s.x_daily_budget
 
 
+def test_the_lake_is_local_only_by_default():
+    s = settings()
+    assert s.archive_backend == "local"
+    assert s.archive_s3_bucket == s.archive_s3_endpoint_url == s.archive_s3_prefix == ""
+    assert s.archive_s3_secret_access_key.get_secret_value() == ""
+
+
+FAKE_SECRET = "fake-secret"  # pragma: allowlist secret - invented value, never a credential
+
+
+def test_bucket_settings_read_data_lakes_names(monkeypatch):
+    """One block of R2 settings means the same thing here and in ibkr_trader/data-lake."""
+    env = {
+        "ARCHIVE_BACKEND": "s3",
+        "ARCHIVE_S3_BUCKET": "data-lake",
+        "ARCHIVE_S3_ENDPOINT_URL": "https://acct.r2.cloudflarestorage.com",
+        "ARCHIVE_S3_REGION": "auto",
+        "ARCHIVE_S3_ACCESS_KEY_ID": "fake-id",
+        "ARCHIVE_S3_SECRET_ACCESS_KEY": FAKE_SECRET,
+        "ARCHIVE_S3_PREFIX": "",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    s = settings()
+    assert s.archive_backend == "s3"
+    assert s.archive_s3_bucket == "data-lake"
+    assert s.archive_s3_endpoint_url == "https://acct.r2.cloudflarestorage.com"
+    assert s.archive_s3_region == "auto"
+    assert s.archive_s3_access_key_id == "fake-id"
+    assert s.archive_s3_secret_access_key.get_secret_value() == FAKE_SECRET
+    assert s.archive_s3_prefix == ""
+    # The secret never reaches a repr, a log line or a run report by accident.
+    assert FAKE_SECRET not in repr(s)
+
+
+def test_an_unknown_archive_backend_is_refused(monkeypatch):
+    monkeypatch.setenv("ARCHIVE_BACKEND", "gcs")
+    with pytest.raises(ValueError, match="archive_backend"):
+        settings()
+
+
 def test_profile_dir_is_per_platform(tmp_path):
     s = settings(data_dir=tmp_path)
     assert s.profile_dir("x") != s.profile_dir("reddit")

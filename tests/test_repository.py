@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from social_scraper.db import repository, schema
 from social_scraper.db.repository import (
+    clear_watermarks,
     dialect_insert,
     get_state,
     get_watermark,
@@ -135,6 +136,17 @@ def test_watermark_roundtrip(db):
         set_watermark(conn, "d", NOW + timedelta(hours=1), NOW)
     with db.connect() as conn:
         assert get_watermark(conn, "d") == NOW + timedelta(hours=1)
+
+
+def test_clear_watermarks_forgets_every_dataset(db):
+    with db.begin() as conn:
+        assert clear_watermarks(conn) == 0
+        set_watermark(conn, "d", NOW, NOW)
+        set_watermark(conn, "e", NOW, NOW)
+    with db.begin() as conn:
+        assert clear_watermarks(conn) == 2
+    with db.connect() as conn:
+        assert get_watermark(conn, "d") is None and get_watermark(conn, "e") is None
 
 
 def test_table_counts(db):
