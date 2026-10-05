@@ -12,8 +12,11 @@ still follows `X_SEED_ACCOUNTS` and anything already tracked -- no account at ri
 
 What gets stored:
 - every search result (the query chose them, so they are on-topic);
-- from a timeline, only the tweets that mention a symbol -- the rest are counted, for
-  the account's finance ratio, and discarded.
+- from a timeline, only the on-topic tweets (`is_relevant`) -- the rest are counted,
+  for the account's relevance ratio, and discarded.
+
+`XCrawler` is the loop; a domain subclass says what to search and what is on-topic.
+`XScraper` is the stock one (cashtags); `sports.x.SportsXScraper` the sports one.
 """
 
 from __future__ import annotations
@@ -24,12 +27,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
+from sqlalchemy import Table
 from sqlalchemy.engine import Engine
 
-from social_scraper.db import repository
+from social_scraper.db import repository, schema
 from social_scraper.fetch import Browser, FetchFailed, PageResult
 from social_scraper.models import Post
-from social_scraper.pipeline import Ingestor, IngestStats
+from social_scraper.pipeline import Ingestor, IngestStats, PostIngestor
 from social_scraper.symbols.extract import extract_mentions
 from social_scraper.throttle import (
     CHALLENGED,
@@ -110,12 +114,16 @@ class XPlan:
     min_followers: int = 500
 
 
-class XScraper:
+class XCrawler:
+    """The X cycle, whatever the domain. Subclasses supply `queries` and `is_relevant`."""
+
+    accounts_table: Table = schema.x_accounts
+
     def __init__(
         self,
         browser: Browser,
         throttle: Throttle,
-        ingestor: Ingestor,
+        ingestor: PostIngestor,
         engine: Engine,
         plan: XPlan,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -128,11 +136,23 @@ class XScraper:
         self.clock = clock
         self.stats = XRunStats()
 
+    def queries(self, n: int) -> list[tuple[str, bool]]:
+        """`n` searches as `(query, latest)`; records whatever rotation state it needs."""
+        raise NotImplementedError
+
+    def is_relevant(self, post: Post) -> bool:
+        """Whether a timeline tweet is on-topic, so worth storing."""
+        raise NotImplementedError
+
+    def is_tout(self, post: Post) -> bool:
+        """Whether a tweet sells picks. Only the sports domain has touts."""
+        return False
+
     def run(self) -> XRunStats:
         """One cycle. `ThrottleStop` propagates; a wall or rate limit ends the cycle."""
         now = self.clock()
         with self.engine.connect() as conn:
-            rows = accounts.load(conn)
+            rows = accounts.load(conn, self.accounts_table)
         tracked = [r for r in rows if r.status in (discovery.TRACKED, discovery.SEED)]
         n_search, n_timeline = discovery.split_budget(
             self.plan.pages, self.plan.search_share, bool(tracked)
@@ -173,6 +193,79 @@ class XScraper:
                 if exc.outcome in (CHALLENGED, RATE_LIMITED, LOGIN_REQUIRED):
                     return
 
+    def search(self, query: str, latest: bool) -> None:
+        result = self.fetch(search_url(query, latest), SEARCH_OPS, "search")
+        posts = parse_payloads([p.data for p in result.payloads], channel="search")
+        self.stats.searches += 1
+        self.stats.ingest.add(self.ingestor.ingest(posts))
+        with self.engine.begin() as conn:
+            self.stats.new_accounts += accounts.observe(
+                conn, posts, accounts.SEARCH, self.clock(), self.accounts_table
+            )
+
+    def timeline(self, account: discovery.AccountRow) -> None:
+        result = self.fetch(f"{X_BASE}/{quote(account.handle)}", TIMELINE_OPS, "timeline")
+        posts = parse_payloads([p.data for p in result.payloads], channel="timeline")
+        handle = account.handle.lower()
+        own = [p for p in posts if (p.author.name or "").lower() == handle]
+        relevant = [p for p in posts if self.is_relevant(p)]
+        relevant_ids = {p.external_id for p in relevant}
+        self.stats.timelines += 1
+        self.stats.ingest.add(self.ingestor.ingest(relevant))
+        table = self.accounts_table
+        with self.engine.begin() as conn:
+            user_id = account.user_id
+            if own and own[0].author.user_id:
+                user_id = accounts.resolve_seed(conn, user_id, own[0].author.user_id, table)
+            sample = accounts.TimelineSample(
+                tweets=len(own),
+                relevant=sum(p.external_id in relevant_ids for p in own),
+                touts=sum(self.is_tout(p) for p in own),
+            )
+            accounts.record_visit(conn, user_id, sample, self.clock(), table)
+            amplified = [p for p in relevant if (p.author.name or "").lower() != handle]
+            self.stats.new_accounts += accounts.observe(
+                conn, amplified, accounts.AMPLIFIED, self.clock(), table
+            )
+
+    def reconcile(self) -> None:
+        with self.engine.begin() as conn:
+            rows = accounts.load(conn, self.accounts_table)
+            accounts.apply(
+                conn,
+                discovery.reconcile(rows, self.plan.max_tracked, self.plan.min_followers),
+                self.accounts_table,
+            )
+
+    def fetch(self, url: str, ops: tuple[str, ...], kind: str) -> PageResult:
+        """One throttled page load with scrolling. Raises `FetchFailed` on a wall."""
+        self.throttle.acquire()
+        result = self.browser.capture(
+            url, graphql_filter(ops), self.plan.scrolls, self.throttle.dwell
+        )
+        self.stats.requests += 1
+        outcome, detail = classify(result)
+        self.throttle.record(outcome, kind, result.status, detail)
+        if outcome != OK:
+            raise FetchFailed(outcome, f"{detail} <- {url}")
+        return result
+
+
+class XScraper(XCrawler):
+    """The stock domain: cashtag searches, and a tweet is on-topic when it names a symbol."""
+
+    def __init__(
+        self,
+        browser: Browser,
+        throttle: Throttle,
+        ingestor: Ingestor,
+        engine: Engine,
+        plan: XPlan,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        super().__init__(browser, throttle, ingestor, engine, plan, clock)
+        self.universe = ingestor.universe
+
     def queries(self, n: int) -> list[tuple[str, bool]]:
         """`n` searches: alternate symbol cashtags (latest) with generic queries (top)."""
         if n <= 0:
@@ -200,58 +293,5 @@ class XScraper:
                 repository.set_state(conn, SEARCHED_PREFIX + s, now.isoformat(), now)
         return out
 
-    def search(self, query: str, latest: bool) -> None:
-        result = self.fetch(search_url(query, latest), SEARCH_OPS, "search")
-        posts = parse_payloads([p.data for p in result.payloads], channel="search")
-        self.stats.searches += 1
-        self.stats.ingest.add(self.ingestor.ingest(posts))
-        with self.engine.begin() as conn:
-            self.stats.new_accounts += accounts.observe(conn, posts, accounts.SEARCH, self.clock())
-
-    def timeline(self, account: discovery.AccountRow) -> None:
-        result = self.fetch(f"{X_BASE}/{quote(account.handle)}", TIMELINE_OPS, "timeline")
-        posts = parse_payloads([p.data for p in result.payloads], channel="timeline")
-        handle = account.handle.lower()
-        own = [p for p in posts if (p.author.name or "").lower() == handle]
-        finance = [p for p in posts if self._mentions_symbol(p)]
-        finance_ids = {p.external_id for p in finance}
-        self.stats.timelines += 1
-        self.stats.ingest.add(self.ingestor.ingest(finance))
-        with self.engine.begin() as conn:
-            user_id = account.user_id
-            if own and own[0].author.user_id:
-                user_id = accounts.resolve_seed(conn, user_id, own[0].author.user_id)
-            accounts.record_visit(
-                conn,
-                user_id,
-                len(own),
-                sum(p.external_id in finance_ids for p in own),
-                self.clock(),
-            )
-            amplified = [p for p in finance if (p.author.name or "").lower() != handle]
-            self.stats.new_accounts += accounts.observe(
-                conn, amplified, accounts.AMPLIFIED, self.clock()
-            )
-
-    def reconcile(self) -> None:
-        with self.engine.begin() as conn:
-            rows = accounts.load(conn)
-            accounts.apply(
-                conn, discovery.reconcile(rows, self.plan.max_tracked, self.plan.min_followers)
-            )
-
-    def fetch(self, url: str, ops: tuple[str, ...], kind: str) -> PageResult:
-        """One throttled page load with scrolling. Raises `FetchFailed` on a wall."""
-        self.throttle.acquire()
-        result = self.browser.capture(
-            url, graphql_filter(ops), self.plan.scrolls, self.throttle.dwell
-        )
-        self.stats.requests += 1
-        outcome, detail = classify(result)
-        self.throttle.record(outcome, kind, result.status, detail)
-        if outcome != OK:
-            raise FetchFailed(outcome, f"{detail} <- {url}")
-        return result
-
-    def _mentions_symbol(self, post: Post) -> bool:
-        return bool(extract_mentions(post.text, self.ingestor.universe, post.tagged_symbols))
+    def is_relevant(self, post: Post) -> bool:
+        return bool(extract_mentions(post.text, self.universe, post.tagged_symbols))

@@ -1,18 +1,22 @@
 """Which X accounts are worth following, and what to search for next. All pure.
 
-The loop:
+The loop is the same for every domain (stocks, sports); only what counts as an
+on-topic tweet differs:
 
-1. **Search** cashtags (the watchlist plus whatever is trending across both platforms)
-   and a rotating set of generic finance queries. Every author found is a
-   *candidate*, and so is anyone a tracked account retweets or quotes ("amplified").
+1. **Search** the domain's subjects (cashtags for stocks, teams and athletes for sports)
+   and a rotating set of generic queries. Every author found is a *candidate*, and so
+   is anyone a tracked account retweets or quotes ("amplified").
 2. **Score** candidates on activity, reach and engagement. A search sample is biased
    -- every tweet a `$NVDA` search returns mentions a ticker -- so an account's
-   *finance ratio* is only trusted once its own timeline has been read.
+   *relevance ratio* is only trusted once its own timeline has been read. An account
+   that is an organisation's (X's affiliate label, or a Business/Government
+   verification) scores higher: it is a newsroom, a team, a league.
 3. **Promote** the best candidates to *tracked*, up to `max_tracked`. Tracked accounts
    get their timelines visited, stalest-and-best first.
-4. **Drop** a tracked account whose timeline turns out to be mostly not about markets.
+4. **Drop** a tracked account whose timeline turns out to be mostly off-topic, or --
+   sports -- too often selling picks (`tout_tweets`; always 0 for stocks).
 
-Seeds (`X_SEED_ACCOUNTS`) are always tracked and never dropped.
+Seeds are always tracked and never dropped.
 """
 
 from __future__ import annotations
@@ -29,10 +33,15 @@ SEED = "seed"
 
 MIN_TIMELINE_SAMPLE = 8
 DROP_BELOW_RATIO = 0.2
+# Share of an account's own tweets that sell picks at which it is dropped. One promo
+# in ten is a sponsor read; one in five is the business.
+DROP_TOUT_RATIO = 0.2
 MIN_SIGHTINGS = 2
 # A tracked account keeps its place unless a candidate beats it by this factor, so
 # the tracked set does not churn on noise.
 TRACKED_BONUS = 1.15
+# An organisation's account (affiliate label, Business/Government verification).
+AFFILIATED_BONUS = 1.5
 
 
 @dataclass(frozen=True)
@@ -44,20 +53,30 @@ class AccountRow:
     search_hits: int = 0
     search_engagement: int = 0
     timeline_tweets: int = 0
-    timeline_finance_tweets: int = 0
+    timeline_relevant_tweets: int = 0
     mentioned_by_tracked: int = 0
     last_timeline_at: datetime | None = None
+    affiliated: bool = False
+    tout_tweets: int = 0
 
 
-def finance_ratio(row: AccountRow) -> float:
-    """Share of the account's own tweets that name a ticker, smoothed toward 0.5.
+def relevance_ratio(row: AccountRow) -> float:
+    """Share of the account's own tweets that are on-topic, smoothed toward 0.5.
 
     Before `MIN_TIMELINE_SAMPLE` timeline tweets it is the neutral prior -- the search
     sample says nothing about what else the account posts.
     """
     if row.timeline_tweets < MIN_TIMELINE_SAMPLE:
         return 0.5
-    return (row.timeline_finance_tweets + 1) / (row.timeline_tweets + 2)
+    return (row.timeline_relevant_tweets + 1) / (row.timeline_tweets + 2)
+
+
+def is_tout(row: AccountRow) -> bool:
+    """Enough of the account's own timeline sells picks that it is a tipster, not a source."""
+    return (
+        row.timeline_tweets >= MIN_TIMELINE_SAMPLE
+        and row.tout_tweets / row.timeline_tweets >= DROP_TOUT_RATIO
+    )
 
 
 def score_account(row: AccountRow) -> float:
@@ -65,7 +84,8 @@ def score_account(row: AccountRow) -> float:
     activity = math.log1p(sightings)
     reach = math.log10((row.followers or 0) + 10)
     engagement = math.log1p(row.search_engagement / max(row.search_hits, 1))
-    return round(finance_ratio(row) * (activity + 0.5 * reach + 0.5 * engagement), 4)
+    bonus = AFFILIATED_BONUS if row.affiliated else 1.0
+    return round(bonus * relevance_ratio(row) * (activity + 0.5 * reach + 0.5 * engagement), 4)
 
 
 def _eligible(row: AccountRow, min_followers: int) -> bool:
@@ -78,6 +98,16 @@ def _eligible(row: AccountRow, min_followers: int) -> bool:
     )
 
 
+def should_drop(row: AccountRow) -> bool:
+    """A tracked account whose own timeline is off-topic, or sells picks."""
+    if row.status != TRACKED:
+        return False
+    off_topic = (
+        row.timeline_tweets >= MIN_TIMELINE_SAMPLE and relevance_ratio(row) < DROP_BELOW_RATIO
+    )
+    return off_topic or is_tout(row)
+
+
 def reconcile(
     rows: Sequence[AccountRow], max_tracked: int, min_followers: int
 ) -> dict[str, tuple[str, float]]:
@@ -86,11 +116,7 @@ def reconcile(
     scores = {r.user_id: score_account(r) for r in rows}
     ranked: list[tuple[float, str]] = []
     for r in rows:
-        if (
-            r.status == TRACKED
-            and r.timeline_tweets >= MIN_TIMELINE_SAMPLE
-            and finance_ratio(r) < DROP_BELOW_RATIO
-        ):
+        if should_drop(r):
             out[r.user_id] = (DROPPED, scores[r.user_id])
         elif _eligible(r, min_followers):
             bonus = TRACKED_BONUS if r.status == TRACKED else 1.0

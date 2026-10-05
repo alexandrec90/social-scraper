@@ -2,11 +2,13 @@ from datetime import UTC, datetime, timedelta
 
 from conftest import NOW
 
+from social_scraper.db import schema
 from social_scraper.models import X, AuthorInfo, Engagement, Post
 from social_scraper.x import accounts
 from social_scraper.x.accounts import (
     AMPLIFIED,
     SEARCH,
+    TimelineSample,
     add_seeds,
     apply,
     engagement_of,
@@ -69,12 +71,39 @@ def test_apply_and_record_visit(db):
     with db.begin() as conn:
         observe(conn, [tweet()], SEARCH, NOW)
         apply(conn, {"1": (TRACKED, 3.5)})
-        record_visit(conn, "1", 10, 7, NOW)
-        record_visit(conn, "1", 5, 1, NOW + timedelta(hours=1))
+        record_visit(conn, "1", TimelineSample(10, 7), NOW)
+        record_visit(conn, "1", TimelineSample(5, 1), NOW + timedelta(hours=1))
     row = by_id(db)["1"]
     assert row.status == TRACKED
-    assert (row.timeline_tweets, row.timeline_finance_tweets) == (15, 8)
+    assert (row.timeline_tweets, row.timeline_relevant_tweets) == (15, 8)
     assert row.last_timeline_at == NOW + timedelta(hours=1)
+
+
+def test_the_sports_table_keeps_affiliation_and_tout_evidence(db):
+    t = schema.sports_x_accounts
+    org = tweet(uid="9", handle="newsroom")
+    org = Post(**{**org.__dict__, "author": AuthorInfo("newsroom", "9", 9000, True, None, True)})
+    with db.begin() as conn:
+        assert observe(conn, [org], SEARCH, NOW, t) == 1
+        # A later sighting without the label (None) does not erase it.
+        unknown = Post(**{**org.__dict__, "author": AuthorInfo("newsroom", "9", 9000)})
+        observe(conn, [unknown], SEARCH, NOW, t)
+        record_visit(conn, "9", TimelineSample(10, 9, touts=2), NOW, t)
+        (row,) = load(conn, t)
+    assert row.affiliated is True and row.search_hits == 2
+    assert (row.timeline_tweets, row.timeline_relevant_tweets, row.tout_tweets) == (10, 9, 2)
+    with db.connect() as conn:
+        assert load(conn) == []  # the stock table is a separate list
+
+
+def test_sports_seeds_and_resolution(db):
+    t = schema.sports_x_accounts
+    with db.begin() as conn:
+        assert add_seeds(conn, ["NHL", "nhl", "CFL"], NOW, t) == 2
+        assert resolve_seed(conn, "seed:nhl", "50", t) == "50"
+        apply(conn, {"50": (SEED, 1.0)}, t)
+        rows = {r.user_id: r for r in load(conn, t)}
+    assert set(rows) == {"50", "seed:cfl"} and rows["50"].tout_tweets == 0
 
 
 def test_add_seeds_is_idempotent_and_marks_known_handles(db):
@@ -108,7 +137,7 @@ def test_resolve_seed_merges_into_existing_account(db):
                 search_hits=0,
                 search_engagement=0,
                 timeline_tweets=0,
-                timeline_finance_tweets=0,
+                timeline_relevant_tweets=0,
                 mentioned_by_tracked=0,
                 score=0.0,
                 first_seen_at=NOW,

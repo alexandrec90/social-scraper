@@ -36,6 +36,8 @@ POST_MUTABLE_FIELDS = (
     "body",
     "flair",
     "symbols",
+    "entities",
+    "leagues",
     "author_followers",
     "author_verified",
     "stance",
@@ -55,10 +57,15 @@ def dialect_insert(conn: Connection, table: Table):
     return dialect.insert(table)
 
 
-def upsert_post(conn: Connection, row: dict[str, Any], now: datetime) -> None:
-    """Insert a post, or refresh its mutable fields; `created_at`/`first_seen_at` stick."""
+def upsert_post(
+    conn: Connection, row: dict[str, Any], now: datetime, table: Table = schema.posts
+) -> None:
+    """Insert a post, or refresh its mutable fields; `created_at`/`first_seen_at` stick.
+
+    `table` is the domain's posts table (`posts`, `sports_posts`).
+    """
     values = {**row, "first_seen_at": now, "last_seen_at": now, "updated_at": now}
-    stmt = dialect_insert(conn, schema.posts).values(**values)
+    stmt = dialect_insert(conn, table).values(**values)
     update = {f: stmt.excluded[f] for f in POST_MUTABLE_FIELDS if f in row}
     update |= {"last_seen_at": now, "updated_at": now}
     conn.execute(
@@ -67,10 +74,15 @@ def upsert_post(conn: Connection, row: dict[str, Any], now: datetime) -> None:
 
 
 def record_engagement(
-    conn: Connection, platform: str, external_id: str, observed_at: datetime, values: dict
+    conn: Connection,
+    platform: str,
+    external_id: str,
+    observed_at: datetime,
+    values: dict,
+    table: Table = schema.engagement,
 ) -> bool:
     """Append a snapshot unless it equals the latest one. Returns whether it wrote."""
-    t = schema.engagement
+    t = table
     latest = conn.execute(
         select(*[t.c[f] for f in ENGAGEMENT_FIELDS])
         .where(and_(t.c.platform == platform, t.c.external_id == external_id))

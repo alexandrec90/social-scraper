@@ -27,7 +27,7 @@ from sqlalchemy.engine import Engine
 
 from social_scraper.db import repository
 from social_scraper.fetch import Browser, FetchFailed, PageResult
-from social_scraper.pipeline import Ingestor, IngestStats
+from social_scraper.pipeline import IngestStats, PostIngestor
 from social_scraper.reddit.parse import REDDIT_BASE, parse_listing
 from social_scraper.throttle import CHALLENGED, ERROR, OK, RATE_LIMITED, Throttle
 
@@ -102,7 +102,7 @@ class RedditScraper:
         self,
         browser: Browser,
         throttle: Throttle,
-        ingestor: Ingestor,
+        ingestor: PostIngestor,
         engine: Engine,
         options: RedditOptions | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -118,18 +118,22 @@ class RedditScraper:
         self.clock = clock
         self.stats = RedditRunStats()
 
-    def run(self, subreddits: tuple[str, ...], rng: random.Random | None = None) -> RedditRunStats:
+    def run(
+        self, subreddits: tuple[str, ...], rng: random.Random | None = None, warm: bool = True
+    ) -> RedditRunStats:
         """Crawl every subreddit once, in random order.
 
         `ThrottleStop` propagates (the platform is paused or out of budget). A wall or
         rate limit ends the run early; the throttle has already recorded the pause.
+        `warm=False` skips the warm-up, for a browser an earlier run already warmed.
         """
         order = list(subreddits)
         if not order:
             return self.stats
         (rng or secrets.SystemRandom()).shuffle(order)
         try:
-            self.warm_up(order[0])
+            if warm:
+                self.warm_up(order[0])
             for sub in order:
                 for listing in ("new", "comments"):
                     self._guarded(sub, listing)

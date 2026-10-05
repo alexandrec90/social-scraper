@@ -37,6 +37,11 @@ X_BASE = "https://x.com"
 TWITTER_TIME = "%a %b %d %H:%M:%S %z %Y"
 _RETWEET_KEYS = ("retweeted_status_result", "retweeted_tweet_results")
 _QUOTE_KEYS = ("quoted_status_result", "quoted_tweet_results")
+# `verification.verified_type` of an organisation's account: the gold (Business) and
+# grey (Government) checks, as opposed to a paid personal blue check. The field is in
+# the 2026 shape `conftest.x_tweet_2026` mirrors; the affiliate label's path is the
+# classic GraphQL one and has not been confirmed in a 2026 payload.
+ORG_VERIFIED_TYPES = frozenset({"Business", "Government"})
 
 
 def _dig(obj: Any, *path: str) -> Any:
@@ -104,6 +109,9 @@ def parse_author(result: dict[str, Any]) -> AuthorInfo:
         user.get("is_blue_verified"),
         legacy.get("verified"),
     )
+    verified_type = _first(_dig(user, "verification", "verified_type"), legacy.get("verified_type"))
+    label = _dig(user, "affiliates_highlighted_label", "label", "description")
+    affiliated = verified_type in ORG_VERIFIED_TYPES or bool(label)
     return AuthorInfo(
         name=_first(core.get("screen_name"), legacy.get("screen_name")),
         user_id=user.get("rest_id"),
@@ -114,6 +122,7 @@ def parse_author(result: dict[str, Any]) -> AuthorInfo:
         created_at=parse_time(
             _first(core.get("created_at_ms"), core.get("created_at"), legacy.get("created_at"))
         ),
+        affiliated=affiliated,
     )
 
 

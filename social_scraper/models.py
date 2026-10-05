@@ -78,6 +78,9 @@ class AuthorInfo:
     followers: int | None = None
     verified: bool | None = None
     created_at: datetime | None = None
+    # The account speaks for an organisation: X's affiliate label (a newsroom's or a
+    # team's staff) or a Business/Government verification. X only; never exported.
+    affiliated: bool | None = None
 
     @property
     def hash(self) -> str | None:

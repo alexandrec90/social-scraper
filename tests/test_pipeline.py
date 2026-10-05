@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from social_scraper.db import schema
 from social_scraper.models import AuthorInfo, Engagement, Post, stable_hash
-from social_scraper.pipeline import Ingestor, IngestStats, build_row
+from social_scraper.pipeline import Ingestor, IngestStats, PostIngestor, build_row
 
 
 def post(external_id="p1", body="Loading $NVDA calls, email me a@b.co", **over):
@@ -73,3 +73,12 @@ def test_ingest_stats_add():
     a = IngestStats(1, 1, 1, 1)
     a.add(IngestStats(2, 2, 2, 2))
     assert a == IngestStats(3, 3, 3, 3)
+
+
+def test_both_domains_ingestors_are_post_ingestors(engine, universe):
+    """The crawlers take a `PostIngestor`: the stock `Ingestor` and the sports one."""
+    from social_scraper.sports.ingest import SportsIngestor
+    from social_scraper.sports.matcher import Matcher
+
+    sinks: list[PostIngestor] = [Ingestor(engine, universe), SportsIngestor(engine, Matcher([]))]
+    assert [type(s.ingest([])) for s in sinks] == [IngestStats, IngestStats]

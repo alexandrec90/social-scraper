@@ -116,7 +116,9 @@ symbols = Table(
 )
 
 # X accounts the discovery loop knows about. `handle` is kept here, and only here,
-# because visiting a timeline needs it; the lake sees `author_hash` alone.
+# because visiting a timeline needs it; the lake sees `author_hash` alone. The stock
+# table's on-topic count is the column `timeline_finance_tweets`; `key` gives it the
+# domain-neutral name `x.accounts` uses for both tables, with no migration.
 x_accounts = Table(
     "x_accounts",
     metadata,
@@ -129,7 +131,13 @@ x_accounts = Table(
     Column("search_hits", Integer, nullable=False, default=0),
     Column("search_engagement", BigInteger, nullable=False, default=0),
     Column("timeline_tweets", Integer, nullable=False, default=0),
-    Column("timeline_finance_tweets", Integer, nullable=False, default=0),
+    Column(
+        "timeline_finance_tweets",
+        Integer,
+        key="timeline_relevant_tweets",
+        nullable=False,
+        default=0,
+    ),
     Column("mentioned_by_tracked", Integer, nullable=False, default=0),
     Column("score", Float, nullable=False, default=0.0),
     Column("first_seen_at", TS, nullable=False),
@@ -177,6 +185,156 @@ export_watermarks = Table(
     Column("dataset", String(64), primary_key=True),
     Column("exported_through", TS, nullable=False),
     Column("updated_at", TS, nullable=False),
+)
+
+# --- the sports domain (`social_scraper/sports/`) ----------------------------------------
+# Its own tables rather than a `domain` column on the stock ones: `create_all` adds a
+# table but never alters one, and the two domains share no subject to join on. Shapes
+# follow the stock tables, so the crawlers and the export treat both alike.
+
+sports_posts = Table(
+    "sports_posts",
+    metadata,
+    Column("id", BIG_ID, primary_key=True, autoincrement=True),
+    Column("platform", String(16), nullable=False),
+    Column("external_id", String(64), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("channel", String(64), nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("first_seen_at", TS, nullable=False),
+    Column("last_seen_at", TS, nullable=False),
+    Column("updated_at", TS, nullable=False),
+    Column("author_hash", String(64)),
+    Column("title", Text),
+    Column("body", Text),
+    Column("url", Text),
+    Column("parent_id", String(64)),
+    Column("lang", String(8)),
+    Column("flair", String(128)),
+    Column("entities", JSON, nullable=False),
+    Column("leagues", JSON, nullable=False),
+    Column("score", BigInteger),
+    Column("num_comments", BigInteger),
+    Column("upvote_ratio", Float),
+    Column("likes", BigInteger),
+    Column("reposts", BigInteger),
+    Column("quotes", BigInteger),
+    Column("views", BigInteger),
+    Column("bookmarks", BigInteger),
+    Column("author_followers", BigInteger),
+    Column("author_verified", Boolean),
+    Column("raw", JSON),
+    UniqueConstraint("platform", "external_id", name="uq_sports_posts_platform_external_id"),
+    Index("ix_sports_posts_updated_at", "updated_at"),
+    Index("ix_sports_posts_created_at", "created_at"),
+)
+
+sports_mentions = Table(
+    "sports_mentions",
+    metadata,
+    Column("platform", String(16), primary_key=True),
+    Column("external_id", String(64), primary_key=True),
+    Column("entity_id", String(32), primary_key=True),
+    Column("match_type", String(16), nullable=False),
+    Column("channel", String(64), nullable=False),
+    Column("created_at", TS, nullable=False),
+    Column("updated_at", TS, nullable=False),
+    Index("ix_sports_mentions_entity_created", "entity_id", "created_at"),
+    Index("ix_sports_mentions_updated_at", "updated_at"),
+)
+
+sports_engagement = Table(
+    "sports_engagement_snapshots",
+    metadata,
+    Column("platform", String(16), primary_key=True),
+    Column("external_id", String(64), primary_key=True),
+    Column("observed_at", TS, primary_key=True),
+    Column("score", BigInteger),
+    Column("num_comments", BigInteger),
+    Column("upvote_ratio", Float),
+    Column("likes", BigInteger),
+    Column("reposts", BigInteger),
+    Column("quotes", BigInteger),
+    Column("views", BigInteger),
+    Column("bookmarks", BigInteger),
+    Index("ix_sports_engagement_observed_at", "observed_at"),
+)
+
+# Teams and athletes a mention can name: Wikidata's, refreshed weekly
+# (`sports.wikidata`), plus athletes confirmed from text (`sports.discover`). `entity_id`
+# is the Wikidata QID. `subreddit` and `x_handle` stay here -- the lake gets neither.
+sports_entities = Table(
+    "sports_entities",
+    metadata,
+    Column("entity_id", String(32), primary_key=True),
+    Column("kind", String(16), nullable=False),  # team | athlete
+    Column("name", Text, nullable=False),
+    Column("aliases", JSON, nullable=False),
+    Column("subreddit", String(64)),
+    Column("x_handle", String(32)),
+    Column("team_id", String(32)),
+    Column("popularity", Integer, nullable=False, default=0),
+    Column("source", String(16), nullable=False),  # wikidata | discovered
+    Column("active", Boolean, nullable=False),
+    Column("first_seen_at", TS, nullable=False),
+    Column("refreshed_at", TS, nullable=False),
+    Column("mention_count", BigInteger, nullable=False, default=0),
+    Column("last_mentioned_at", TS),
+    Column("updated_at", TS, nullable=False),
+)
+
+# Which leagues an entity plays in: a club is in its domestic league and in Europe.
+# `source` says who vouches for the membership: a weekly sync retires only its own.
+sports_entity_leagues = Table(
+    "sports_entity_leagues",
+    metadata,
+    Column("entity_id", String(32), primary_key=True),
+    Column("league", String(32), primary_key=True),
+    Column("source", String(16), nullable=False),  # wikidata | discovered
+    Column("active", Boolean, nullable=False),
+    Column("refreshed_at", TS, nullable=False),
+)
+
+# `x_accounts` for the sports domain, plus the reputation evidence the stock table
+# lacks: an organisation's account, and how many of its own tweets sell picks.
+sports_x_accounts = Table(
+    "sports_x_accounts",
+    metadata,
+    Column("user_id", String(32), primary_key=True),
+    Column("handle", String(32), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("source", String(16), nullable=False),
+    Column("followers", BigInteger),
+    Column("verified", Boolean),
+    Column("affiliated", Boolean, nullable=False, default=False),
+    Column("search_hits", Integer, nullable=False, default=0),
+    Column("search_engagement", BigInteger, nullable=False, default=0),
+    Column("timeline_tweets", Integer, nullable=False, default=0),
+    Column("timeline_relevant_tweets", Integer, nullable=False, default=0),
+    Column("tout_tweets", Integer, nullable=False, default=0),
+    Column("mentioned_by_tracked", Integer, nullable=False, default=0),
+    Column("score", Float, nullable=False, default=0.0),
+    Column("first_seen_at", TS, nullable=False),
+    Column("last_seen_at", TS, nullable=False),
+    Column("last_timeline_at", TS),
+    Index("ix_sports_x_accounts_status_score", "status", "score"),
+)
+
+# Capitalised names seen in a league's posts that no entity matched: the athletes
+# Wikidata's rosters missed, until a lookup confirms or rejects them. Never exported;
+# unconfirmed names are pruned (`sports.discover.CANDIDATE_RETENTION`).
+sports_name_candidates = Table(
+    "sports_name_candidates",
+    metadata,
+    Column("name", String(128), primary_key=True),
+    Column("league", String(32), primary_key=True),
+    Column("sightings", Integer, nullable=False),
+    Column("status", String(16), nullable=False),  # pending | confirmed | rejected
+    Column("entity_id", String(32)),
+    Column("first_seen_at", TS, nullable=False),
+    Column("last_seen_at", TS, nullable=False),
+    Column("checked_at", TS),
+    Index("ix_sports_name_candidates_status", "status", "sightings"),
 )
 
 

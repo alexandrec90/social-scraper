@@ -10,9 +10,12 @@ run                   cycle forever every CYCLE_MINUTES (or --cycles N)
 export [--full]       copy new rows to the lake (the local tree, and the bucket when
                       ARCHIVE_BACKEND=s3); --full re-sends every row, which is how a
                       newly configured bucket gets the history
-status               budgets, pauses, row counts, trending symbols, X accounts
+status               budgets, pauses, row counts, trending symbols, X accounts (and the
+                      sports equivalents when DOMAINS includes sports)
 lake [--days N]       what the lake holds, per symbol and day (DuckDB lens)
 universe              refresh the symbol directory and print its size
+sports-sync [KEY...]  re-read the named leagues (default: all) from Wikidata now; the
+                      outcome goes to logs/sports-sync.json, and any failure exits 1
 
 `scrape` exits 1 when the cycle failed -- the database unreachable, a browser crash, a
 platform erroring, a failed export -- and 0 otherwise. A platform deliberately left alone
@@ -23,16 +26,19 @@ a scheduler firing outside the active hours sees 0.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from social_scraper.archive import lens
-from social_scraper.config import Settings
+from social_scraper.config import SPORTS, Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.export import export_to_lake
@@ -45,6 +51,10 @@ from social_scraper.runner import (
     universe_for,
     write_report,
 )
+from social_scraper.sports import registry as sports_registry
+from social_scraper.sports.leagues import LeagueConfigError, load_leagues
+from social_scraper.sports.sync import SyncPolicy, sync_leagues
+from social_scraper.sports.wikidata import WikidataClient
 
 LOGIN_URLS = {REDDIT: "https://www.reddit.com/login/", X: "https://x.com/i/flow/login"}
 
@@ -68,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     lake = sub.add_parser("lake")
     lake.add_argument("--days", type=int, default=3)
     sub.add_parser("universe")
+    sub.add_parser("sports-sync").add_argument("leagues", nargs="*", metavar="KEY")
     return parser
 
 
@@ -145,6 +156,15 @@ def cmd_status(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         t = schema.x_accounts
         rows = conn.execute(select(t.c.status, func.count()).group_by(t.c.status)).all()
         print("x accounts: " + ", ".join(f"{s} {n}" for s, n in rows))
+        if SPORTS in settings.enabled_domains:
+            print("sports:")
+            for table, count in sports_registry.counts(conn).items():
+                print(f"  {table}: {count}")
+            hot = sports_registry.trending(conn, now - timedelta(hours=24), 15)
+            print("  trending (24h): " + ", ".join(f"{name} {n}" for _, name, n in hot))
+            t = schema.sports_x_accounts
+            rows = conn.execute(select(t.c.status, func.count()).group_by(t.c.status)).all()
+            print("  x accounts: " + ", ".join(f"{s} {n}" for s, n in rows))
     return 0
 
 
@@ -165,6 +185,38 @@ def cmd_universe(settings: Settings, engine: Engine, args: argparse.Namespace) -
     settings.symbol_universe_max_age_hours = 0
     print(f"{len(universe_for(settings))} symbols")
     return 0
+
+
+SPORTS_SYNC_FILE = "sports-sync.json"
+
+
+def cmd_sports_sync(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    """Force a Wikidata refresh now; the result is an artifact, failures exit 1."""
+    path = settings.logs_dir / SPORTS_SYNC_FILE
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    body: dict[str, Any] = {"started_at": datetime.now(UTC).isoformat()}
+    try:
+        leagues = load_leagues(settings.sports_leagues_file)
+        unknown = sorted(set(args.leagues) - {lg.key for lg in leagues})
+        if unknown:
+            raise LeagueConfigError(f"no such league: {', '.join(unknown)}")
+        chosen = tuple(lg for lg in leagues if not args.leagues or lg.key in args.leagues)
+        schema.create_all(engine)
+        policy = SyncPolicy(timedelta(0), settings.sports_players_per_team)
+        stats = sync_leagues(engine, WikidataClient(), chosen, datetime.now(UTC), policy)
+    except LeagueConfigError as exc:
+        body |= {"ok": False, "error": str(exc)}
+        path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        print(f"FAILED -- {exc} (details in {path})")
+        return 1
+    body |= {"ok": not stats.errors, **asdict(stats)}
+    path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    for key, n in stats.synced.items():
+        print(f"{key}: {n} entities")
+    for key, error in stats.errors.items():
+        print(f"{key}: FAILED {error}")
+    print(f"{'ok' if not stats.errors else 'FAILED'} -- details in {path}")
+    return 0 if not stats.errors else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "lake": cmd_lake,
         "universe": cmd_universe,
+        "sports-sync": cmd_sports_sync,
     }[args.command]
     return handler(settings, engine, args)
 
