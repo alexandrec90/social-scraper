@@ -500,3 +500,160 @@ def test_no_rerun_returns_none_and_runs_nothing(tmp_path):
     run = FakeRun(root)
     assert tc.rerun_in_venv(root, "json", root / "x.py", [], env={}, run=run) is None
     assert run.calls == []
+
+
+# --- a tree `.venv` older than its lock: `resync_if_stale` -----------------------------
+
+
+def _venv(root: Path, age: float) -> None:
+    """An existing `.venv`, its `pyvenv.cfg` dated `age` seconds before the lock files."""
+    python = tc.venv_python(root)
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text("", encoding="utf-8")
+    cfg = root / ".venv" / "pyvenv.cfg"
+    cfg.write_text("home = x\n", encoding="utf-8")
+    newest = max(f.stat().st_mtime for f in root.iterdir() if f.is_file())
+    os.utime(cfg, (newest - age, newest - age))
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        pytest.param(LOCKED, ["uv.lock"], id="uv-lock-not-pyproject"),
+        pytest.param(
+            {"requirements-dev.txt": "", "requirements.txt": ""},
+            ["requirements.txt", "requirements-dev.txt"],
+            id="locks",
+        ),
+        pytest.param({"pyproject.toml": PYPROJECT}, ["pyproject.toml"], id="unlocked"),
+        pytest.param({"requirements.txt": ""}, [], id="nothing-the-ladder-reads"),
+    ],
+)
+def test_dependency_files_are_the_ones_the_ladder_installs_from(tmp_path, files, expected):
+    root = _checkout(tmp_path, files)
+    assert [f.name for f in tc.dependency_files(root)] == expected
+
+
+def test_a_venv_is_stale_once_its_lock_is_newer_than_its_last_install(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    assert tc.stale_dependency(root) is None, "no venv: nothing to date"
+    _venv(root, age=60)
+    assert tc.stale_dependency(root) == root / "uv.lock"
+    (root / ".venv" / tc.SYNC_STAMP).touch()
+    os.utime(root / "uv.lock", (0, 0))
+    assert tc.stale_dependency(root) is None, "the stamp dates a sync after the lock"
+
+
+def test_a_venv_with_neither_mark_is_not_judged(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    (root / ".venv").mkdir()
+    assert tc.stale_dependency(root) is None
+
+
+def test_a_borrowed_venv_is_the_checkouts_to_sync_not_this_trees(tmp_path):
+    checkout = _checkout(tmp_path / "checkout", LOCKED)
+    _venv(checkout, age=60)
+    tree = _checkout(tmp_path / "tree", LOCKED)
+    if sys.platform == "win32":  # spelled so mypy narrows `_winapi` off Windows
+        # A junction, which Windows creates unprivileged, where a symlink needs developer mode.
+        import _winapi
+
+        _winapi.CreateJunction(str(checkout / ".venv"), str(tree / ".venv"))
+    else:
+        (tree / ".venv").symlink_to(checkout / ".venv", target_is_directory=True)
+    assert tc.stale_dependency(checkout) == checkout / "uv.lock"
+    assert tc.stale_dependency(tree) is None
+
+
+def test_resync_if_stale_syncs_only_a_stale_venv_and_says_whether_it_did(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    run = FakeRun(root)
+    assert not tc.resync_if_stale(root, run=run), "no venv: provisioning is not a re-sync"
+    _venv(root, age=60)
+    assert tc.resync_if_stale(root, run=run)
+    assert not tc.resync_if_stale(root, run=run), "stamped: nothing left to sync"
+    assert len(run.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("step", "creates"),
+    [
+        pytest.param((sys.executable, "-m", "venv", ".venv"), True, id="python-m-venv"),
+        pytest.param(tc.venv_argv("3.12"), True, id="uv-venv"),
+        pytest.param(("uv", "sync", "--all-extras"), False, id="sync"),
+        pytest.param(("uv", "pip", "install", "-e", ".[dev]"), False, id="install"),
+    ],
+)
+def test_creates_venv_names_the_step_a_resync_skips(step, creates):
+    assert tc.creates_venv(step) is creates
+
+
+def test_runs_tree_venv_compares_the_interpreter_prefix(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    (root / ".venv").mkdir()
+    assert tc.runs_tree_venv(root, prefix=str(root / ".venv"))
+    assert not tc.runs_tree_venv(root, prefix=str(tmp_path))
+
+
+def test_a_fresh_provision_stamps_the_venv(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    assert tc.provision_python(root, run=FakeRun(root))
+    assert (root / ".venv" / tc.SYNC_STAMP).is_file()
+
+
+def test_the_tree_venv_running_behind_its_lock_is_resynced_then_carries_on(
+    tmp_path, monkeypatch, capsys
+):
+    """The filed friction: `.venv/Scripts/python.exe scripts/run-tests.py` after a merge
+    that added pytz to `uv.lock` -- pytest present, so the venv was used as-is and the
+    run died on `No module named 'pytz'`."""
+    root = _checkout(tmp_path, LOCKED)
+    _venv(root, age=60)
+    monkeypatch.setattr(tc, "runs_tree_venv", lambda r: r == root)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=run) is None
+    assert [cmd for cmd, _ in run.calls] == [["uv", "sync", "--all-extras", "--all-groups"]]
+    assert ".venv predates uv.lock; re-syncing it" in capsys.readouterr().err
+    assert (root / ".venv" / tc.SYNC_STAMP).is_file()
+    assert tc.stale_dependency(root) is None
+    again = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=again) is None
+    assert again.calls == [], "synced once, not on every run"
+
+
+def test_another_interpreter_that_has_the_module_leaves_a_stale_venv_alone(tmp_path):
+    root = _checkout(tmp_path, LOCKED)
+    _venv(root, age=60)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=run) is None
+    assert run.calls == [], "the tree venv is not what runs, so it is not this run's to sync"
+
+
+def test_a_stale_venv_is_resynced_before_the_rerun_and_never_recreated(tmp_path):
+    root = _checkout(tmp_path, {"pyproject.toml": PYPROJECT})
+    _venv(root, age=60)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, ABSENT, env={}, run=run) == tc.venv_python(root)
+    assert [cmd for cmd, _ in run.calls] == [["uv", "pip", "install", "-e", ".[dev]"]]
+
+
+@pytest.mark.parametrize(
+    "env", [{"CI": "true"}, {tc.RERUN_ENV: "1"}], ids=["ci-builds-its-own", "already-a-rerun"]
+)
+def test_ci_and_a_rerun_never_resync(tmp_path, monkeypatch, env):
+    root = _checkout(tmp_path, LOCKED)
+    _venv(root, age=60)
+    monkeypatch.setattr(tc, "runs_tree_venv", lambda r: True)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env=env, run=run) is None
+    assert run.calls == []
+
+
+def test_a_failed_resync_is_reported_and_the_run_carries_on_unstamped(tmp_path, capsys):
+    root = _checkout(tmp_path, LOCKED)
+    _venv(root, age=60)
+    run = FakeRun(root, returncode=1)
+    assert tc.rerun_target(root, ABSENT, env={}, run=run) == tc.venv_python(root)
+    assert "exited 1" in capsys.readouterr().err
+    assert not (root / ".venv" / tc.SYNC_STAMP).exists()
+    assert tc.stale_dependency(root) == root / "uv.lock", "still stale, so the next run retries"
