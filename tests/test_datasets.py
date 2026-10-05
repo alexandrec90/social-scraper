@@ -66,6 +66,31 @@ def test_to_lake_row_maps_posts_and_normalises_time():
     assert out["body"] is None
 
 
+def test_sports_datasets_are_separate_and_shaped_like_the_stock_ones():
+    assert set(datasets.SPORTS).isdisjoint(datasets.STOCK)
+    assert datasets.ALL == (*datasets.STOCK, *datasets.SPORTS)
+    assert datasets.TEXT == (POSTS, datasets.SPORTS_POSTS)
+    row = {"platform": "reddit", "created_at": NOW, "observed_at": NOW}
+    assert datasets.SPORTS_POSTS.partition_of(row) == (
+        "social_scraper/sports_posts/platform=reddit/dt=2026-09-28"
+    )
+    assert datasets.SPORTS_ENGAGEMENT.partition_of(row).startswith("social_scraper/sports_eng")
+    assert datasets.SPORTS_ENTITIES.partition_of({}) == "social_scraper/sports_entities"
+    assert {"entities", "leagues"} <= set(datasets.SPORTS_POSTS.schema.names)
+    assert "symbols" not in datasets.SPORTS_POSTS.schema.names
+
+
+def test_sports_entities_never_carry_a_handle_or_subreddit():
+    db_row = {"entity_id": "Q1", "name": "Some Athlete", "x_handle": "someone", "subreddit": "s"}
+    out = to_lake_row(datasets.SPORTS_ENTITIES, db_row)
+    assert "x_handle" not in out and "subreddit" not in out and out["name"] == "Some Athlete"
+
+
+def test_sports_posts_map_like_posts():
+    out = to_lake_row(datasets.SPORTS_POSTS, {"last_seen_at": NOW, "raw": {"permalink": "/r/x"}})
+    assert out["fetched_at"] == NOW and json.loads(out["extra"]) == {"permalink": "/r/x"}
+
+
 def test_to_lake_row_other_datasets_are_projections():
     out = to_lake_row(MENTIONS, {"platform": "x", "symbol": "NVDA", "updated_at": NOW})
     assert set(out) == set(MENTIONS.schema.names) and out["symbol"] == "NVDA"

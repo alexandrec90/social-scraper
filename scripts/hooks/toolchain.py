@@ -30,10 +30,12 @@ to fail without it: a test or lint runner started by an interpreter that lacks p
 or ruff. A `claude --worktree` tree arrives with no `.venv`, and nothing can provision
 it at creation -- Claude Code runs its git with hooks off, and no agent hook is wired --
 so every session in one used to hit `No module named pytest`, provision by hand, and
-file the same friction. Building the tree's own `.venv` at that first run, instead of
-borrowing the checkout's, is deliberate: a project installed editable points its venv
-at the checkout's `src/`, so a borrowed one would test the checkout's code, not the
-branch's.
+file the same friction. A tree that *has* a `.venv` is re-synced on the same path once
+its lock is newer than the venv's last install (`resync_if_stale`), since a merge that
+adds a package is the same `No module named` one step later. Building the tree's own
+`.venv` at that first run, instead of borrowing the checkout's, is deliberate: a project
+installed editable points its venv at the checkout's `src/`, so a borrowed one would
+test the checkout's code, not the branch's.
 
 Detection, not configuration: the manifest's `[python] install_command` wins, then the
 lockfile on disk decides, in the order `session-start.sh` and `worktree.provision_steps`
@@ -66,6 +68,10 @@ PYTHON_MARKERS = ("uv.lock", "requirements-dev.txt", "pyproject.toml")
 # Set in the environment of a runner re-run under the tree's `.venv`: a venv that still
 # lacks the module must fail there, not send the run round again.
 RERUN_ENV = "DEVKIT_TOOLCHAIN_RERUN"
+
+# Touched inside `.venv` by every clean install, so a lock that changed after it -- a
+# merge that added a dependency, a checkout -- reads as newer than what the venv holds.
+SYNC_STAMP = ".devkit-synced"
 
 # Lines of a failed install's output shown with the command, enough for uv's resolver
 # error and not the whole download log above it.
@@ -128,6 +134,55 @@ def python_steps(root: Path, python_version: str = "") -> tuple[tuple[str, ...],
     if (root / "pyproject.toml").is_file():
         return (venv_argv(python_version), ("uv", "pip", "install", "-e", ".[dev]"))
     return ()
+
+
+def dependency_files(root: Path) -> tuple[Path, ...]:
+    """The files `python_steps` installs from: a change to one is a change to `.venv`'s due."""
+    if (root / "uv.lock").is_file():
+        return (root / "uv.lock",)
+    if (root / "requirements-dev.txt").is_file():
+        names = ("requirements.txt", "requirements-dev.txt")
+        return tuple(root / name for name in names if (root / name).is_file())
+    if (root / "pyproject.toml").is_file():
+        return (root / "pyproject.toml",)
+    return ()
+
+
+def stale_dependency(root: Path) -> Path | None:
+    """The dependency file changed since `.venv` was last installed from, or None.
+
+    A tree that already has a `.venv` used to be trusted as-is, so a merge that added a
+    package to `uv.lock` left every run in it failing on `No module named ...` until
+    someone synced by hand. The venv is dated by `SYNC_STAMP`, else by its `pyvenv.cfg`,
+    which a venv provisioned by something else still has; a directory carrying neither
+    cannot be dated and is not judged. Nor is a borrowed one -- a link to the checkout's
+    (`worktree.symlinkDirectories`): it is the checkout's to sync, against its own lock.
+    """
+    venv = root / ".venv"
+    try:
+        # `is_junction` is 3.12's; a consumer's runner may be started by an older one.
+        if venv.is_symlink() or getattr(venv, "is_junction", lambda: False)():
+            return None
+        marks = [
+            mark.stat().st_mtime
+            for mark in (venv / SYNC_STAMP, venv / "pyvenv.cfg")
+            if mark.is_file()
+        ]
+        if not marks:
+            return None
+        synced = max(marks)
+        return next((f for f in dependency_files(root) if f.stat().st_mtime > synced), None)
+    except OSError:
+        return None
+
+
+def creates_venv(step: Sequence[str]) -> bool:
+    """Whether `step` is `venv_argv`'s -- the step a re-sync of an existing venv skips.
+
+    `uv venv` over an existing `.venv` replaces it, and on Windows that fails outright
+    while the runner asking for the sync is that venv's own interpreter.
+    """
+    return tuple(step[1:]) == ("-m", "venv", ".venv") or tuple(step[:2]) == ("uv", "venv")
 
 
 def python_fix(root: Path, install_command: str = "", python_version: str = "") -> str:
@@ -245,15 +300,20 @@ def has_module(module: str) -> bool:
 
 
 def provision_python(
-    root: Path, cfg: harness_config.Config | None = None, run: Runner = subprocess.run
+    root: Path,
+    cfg: harness_config.Config | None = None,
+    run: Runner = subprocess.run,
+    stale: Path | None = None,
 ) -> bool:
     """Install `root`'s Python toolchain with the command `missing_toolchain` names.
 
-    True when every step ran clean and left an interpreter in `.venv`. Says what it is
-    doing on stderr, because a run that goes quiet for a minute reads as a hang. Not
-    attempted, with the reason printed, when a path dependency the tree cannot see would
-    fail `uv sync` with a message naming the path and not the reason, or when the
-    manifest's `install_command` needs a shell (`install_argvs`).
+    True when every step ran clean and left an interpreter in `.venv`, which is then
+    stamped (`SYNC_STAMP`). Says what it is doing on stderr, because a run that goes
+    quiet for a minute reads as a hang. Not attempted, with the reason printed, when a
+    path dependency the tree cannot see would fail `uv sync` with a message naming the
+    path and not the reason, or when the manifest's `install_command` needs a shell
+    (`install_argvs`). With `stale` -- the dependency file newer than an existing venv --
+    it re-syncs that venv, skipping the step that would create it.
     """
     config = harness_config.load(root) if cfg is None else cfg
     blockers = missing_path_sources(root)
@@ -263,32 +323,70 @@ def provision_python(
     steps = install_argvs(root, config.python.install_command, config.python.version)
     if fix and not steps:
         print(f"toolchain: {fix} needs a shell; run it yourself", file=sys.stderr)
+    if stale is not None:
+        steps = tuple(step for step in steps if not creates_venv(step))
     if blockers or not steps:
         return False
-    print(f"toolchain: no .venv here; provisioning it: {fix}", file=sys.stderr)
-    for step in steps:
-        try:
-            done = run(
-                list(step),
-                cwd=root,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-        except OSError as exc:
-            print(f"toolchain: could not run {step[0]} ({type(exc).__name__})", file=sys.stderr)
-            return False
-        if done.returncode != 0:
-            tail = "\n".join(
-                ((done.stdout or "") + (done.stderr or "")).splitlines()[-INSTALL_TAIL_LINES:]
-            )
-            print(
-                f"toolchain: {shlex.join(step)} exited {done.returncode}:\n{tail}", file=sys.stderr
-            )
-            return False
-    return venv_python(root).is_file()
+    if stale is None:
+        print(f"toolchain: no .venv here; provisioning it: {fix}", file=sys.stderr)
+    else:
+        line = " && ".join(shlex.join(step) for step in steps)
+        print(f"toolchain: .venv predates {stale.name}; re-syncing it: {line}", file=sys.stderr)
+    if not all(_install_step(root, step, run) for step in steps):
+        return False
+    if not venv_python(root).is_file():
+        return False
+    (root / ".venv" / SYNC_STAMP).touch()
+    return True
+
+
+def _install_step(root: Path, step: Sequence[str], run: Runner) -> bool:
+    """Run one install step in `root`; on a failure, print why and answer False."""
+    try:
+        done = run(
+            list(step),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        print(f"toolchain: could not run {step[0]} ({type(exc).__name__})", file=sys.stderr)
+        return False
+    if done.returncode != 0:
+        tail = "\n".join(
+            ((done.stdout or "") + (done.stderr or "")).splitlines()[-INSTALL_TAIL_LINES:]
+        )
+        print(f"toolchain: {shlex.join(step)} exited {done.returncode}:\n{tail}", file=sys.stderr)
+        return False
+    return True
+
+
+def runs_tree_venv(root: Path, prefix: str | None = None) -> bool:
+    """Whether this interpreter is `root`'s own `.venv` -- `.venv/Scripts/python.exe x.py`."""
+    try:
+        return (
+            Path(sys.prefix if prefix is None else prefix).resolve() == (root / ".venv").resolve()
+        )
+    except OSError:
+        return False
+
+
+def resync_if_stale(root: Path, run: Runner = subprocess.run) -> bool:
+    """Re-sync `root`'s existing `.venv` when a dependency file changed since its install.
+
+    True when a sync ran clean. A failed one is printed and the runner carries on, to
+    fail as it would have; the import caches are dropped so a package the sync just
+    added is importable by the interpreter that asked for it.
+    """
+    stale = stale_dependency(root)
+    if stale is None or not venv_python(root).is_file():
+        return False
+    synced = provision_python(root, run=run, stale=stale)
+    importlib.invalidate_caches()
+    return synced
 
 
 def rerun_target(
@@ -303,9 +401,19 @@ def rerun_target(
     changes nothing about it -- and inside a re-run. Otherwise the tree's `.venv`,
     provisioned first when it is missing. CI never provisions: its environment is the
     workflow's to build, and an install there would hide a broken setup step.
+
+    Whichever way the run goes, a tree `.venv` it is about to use -- this interpreter, or
+    the re-run's -- is re-synced first when its lock moved on since (`stale_dependency`):
+    `.venv/Scripts/python.exe scripts/run-tests.py` after a merge that added a package
+    used to fail on the import until someone ran `uv sync` by hand.
     """
     environ = os.environ if env is None else env
-    if environ.get(RERUN_ENV) or has_module(module):
+    if environ.get(RERUN_ENV):
+        return None
+    lacking = not has_module(module)
+    if (lacking or runs_tree_venv(root)) and not environ.get("CI"):
+        resync_if_stale(root, run)
+    if not lacking:
         return None
     target = venv_python(root)
     if not target.is_file() and (environ.get("CI") or not provision_python(root, run=run)):

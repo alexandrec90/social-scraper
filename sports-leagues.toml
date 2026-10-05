@@ -1,0 +1,273 @@
+# Leagues the sports domain covers: what Mise-o-jeu+ offers, maintained by hand.
+#
+# Field reference: `social_scraper/sports/leagues.py`. In short, each league names where
+# its chatter lives (`subreddits`, `x_queries`) and where its teams and athletes come
+# from (`wikidata` for a team league, `athletes` for an individual sport, `extra` for
+# QIDs Wikidata's league data misses).
+#
+# Started from the Mise-o-jeu+ sport tree recorded on 2026-10-02 (sports_betting,
+# docs/data-sources.md, "Scope collection to what Mise-o-jeu+ offers"). The `mise_o_jeu`
+# labels are empty until `python scripts/check-leagues.py` has a coverage file to
+# compare against -- it lists every Mise-o-jeu+ league with no entry here, in the
+# `SPORT|League` form to paste.
+#
+# Wikidata ids were looked up live on 2026-10-04. Subreddit names have not been checked
+# against Reddit: a wrong one costs a request per visit and shows up in
+# logs/scrape-run.json as "not found".
+
+# --- hockey ---------------------------------------------------------------------------
+
+[[league]]
+key = "nhl"
+name = "NHL"
+sport = "hockey"
+wikidata = "Q1215892"
+subreddits = ["nhl", "hockey"]
+team_subreddits = true
+x_queries = [
+  '(NHL OR LNH) (injury OR lineup OR scratched OR "game-time decision") min_faves:20',
+  '(LNH OR Canadien) (blessure OR alignement) lang:fr min_faves:10',
+]
+
+[[league]]
+key = "khl"
+name = "KHL"
+sport = "hockey"
+wikidata = "Q190001"
+subreddits = ["KHL"]
+
+[[league]]
+key = "shl"
+name = "SHL"
+sport = "hockey"
+wikidata = "Q392130"
+subreddits = ["hockey"]
+
+[[league]]
+key = "liiga"
+name = "Liiga"
+sport = "hockey"
+wikidata = "Q456107"
+subreddits = ["Liiga"]
+
+# --- football -------------------------------------------------------------------------
+
+[[league]]
+key = "nfl"
+name = "NFL"
+sport = "american football"
+wikidata = "Q1215884"
+subreddits = ["nfl"]
+team_subreddits = true
+x_queries = ['NFL (injury OR inactive OR "ruled out" OR questionable) min_faves:50']
+
+[[league]]
+key = "cfl"
+name = "CFL"
+sport = "canadian football"
+wikidata = "Q1032175"
+subreddits = ["CFL"]
+team_subreddits = true
+x_queries = ['(CFL OR LCF) (injury OR roster OR "ruled out") min_faves:10']
+
+[[league]]
+key = "ncaaf"
+name = "NCAA Football (FBS)"
+sport = "american football"
+wikidata = "Q19673326"
+subreddits = ["CFB"]
+players = 2
+
+# --- basketball -----------------------------------------------------------------------
+
+[[league]]
+key = "nba"
+name = "NBA"
+sport = "basketball"
+wikidata = "Q155223"
+subreddits = ["nba"]
+team_subreddits = true
+x_queries = ['NBA (injury OR "ruled out" OR questionable OR "load management") min_faves:50']
+
+[[league]]
+key = "wnba"
+name = "WNBA"
+sport = "basketball"
+wikidata = "Q2593221"
+subreddits = ["wnba"]
+
+[[league]]
+key = "euroleague"
+name = "EuroLeague"
+sport = "basketball"
+wikidata = "Q185982"
+subreddits = ["Euroleague"]
+
+# --- baseball -------------------------------------------------------------------------
+
+[[league]]
+key = "mlb"
+name = "MLB"
+sport = "baseball"
+wikidata = "Q1163715"
+subreddits = ["baseball", "mlb"]
+team_subreddits = true
+x_queries = ['MLB ("starting pitcher" OR lineup OR scratched OR "injured list") min_faves:30']
+
+# --- soccer ---------------------------------------------------------------------------
+
+[[league]]
+key = "epl"
+name = "Premier League"
+sport = "soccer"
+wikidata = "Q9448"
+subreddits = ["soccer", "PremierLeague"]
+team_subreddits = true
+x_queries = ['"Premier League" (injury OR "team news" OR lineup) min_faves:50']
+
+[[league]]
+key = "laliga"
+name = "La Liga"
+sport = "soccer"
+wikidata = "Q324867"
+subreddits = ["soccer", "LaLiga"]
+
+[[league]]
+key = "seriea"
+name = "Serie A"
+sport = "soccer"
+wikidata = "Q15804"
+subreddits = ["soccer", "seriea"]
+
+[[league]]
+key = "bundesliga"
+name = "Bundesliga"
+sport = "soccer"
+wikidata = "Q82595"
+subreddits = ["soccer", "Bundesliga"]
+
+[[league]]
+key = "ligue1"
+name = "Ligue 1"
+sport = "soccer"
+wikidata = "Q13394"
+subreddits = ["soccer", "Ligue1"]
+
+[[league]]
+key = "eredivisie"
+name = "Eredivisie"
+sport = "soccer"
+wikidata = "Q167541"
+subreddits = ["soccer", "Eredivisie"]
+players = 3
+
+[[league]]
+key = "primeira"
+name = "Primeira Liga"
+sport = "soccer"
+wikidata = "Q182994"
+subreddits = ["soccer", "PrimeiraLiga"]
+players = 3
+
+[[league]]
+key = "mls"
+name = "MLS"
+sport = "soccer"
+wikidata = "Q18543"
+subreddits = ["MLS"]
+team_subreddits = true
+
+[[league]]
+key = "ligamx"
+name = "Liga MX"
+sport = "soccer"
+wikidata = "Q764690"
+subreddits = ["LigaMX"]
+players = 3
+
+# The European cups have no teams of their own on Wikidata: their clubs are the
+# domestic leagues', which `covers` brings into a cup post's context.
+[[league]]
+key = "ucl"
+name = "UEFA Champions League"
+sport = "soccer"
+subreddits = ["championsleague"]
+covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
+x_queries = ['"Champions League" (lineup OR "team news" OR injury) min_faves:50']
+
+[[league]]
+key = "uel"
+name = "UEFA Europa League"
+sport = "soccer"
+subreddits = ["soccer"]
+covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
+
+# --- individual sports ----------------------------------------------------------------
+# Top athletes of the sport by Wikipedia coverage, born in the last 40 years.
+
+[[league]]
+key = "atp"
+name = "ATP Tour (incl. Challenger)"
+sport = "tennis"
+athletes = { sport = "Q847", sex = "Q6581097", limit = 200 }
+subreddits = ["tennis"]
+x_queries = ['ATP (withdraws OR retired OR injury OR "walkover") min_faves:30']
+
+[[league]]
+key = "wta"
+name = "WTA Tour"
+sport = "tennis"
+athletes = { sport = "Q847", sex = "Q6581072", limit = 200 }
+subreddits = ["tennis", "WTA"]
+
+[[league]]
+key = "golf"
+name = "Golf (PGA Tour, DP World, LIV)"
+sport = "golf"
+athletes = { sport = "Q5377", limit = 150 }
+subreddits = ["golf", "PGATour"]
+
+[[league]]
+key = "mma"
+name = "MMA (UFC)"
+sport = "mma"
+athletes = { sport = "Q114466", limit = 200 }
+subreddits = ["MMA", "ufc"]
+x_queries = ['UFC (weigh-in OR "missed weight" OR "pulls out" OR replacement) min_faves:50']
+
+[[league]]
+key = "boxing"
+name = "Boxing"
+sport = "boxing"
+athletes = { sport = "Q32112", limit = 150 }
+subreddits = ["Boxing"]
+
+[[league]]
+key = "f1"
+name = "Formula 1"
+sport = "motorsport"
+athletes = { sport = "Q1968", limit = 60 }
+subreddits = ["formula1"]
+x_queries = ['F1 (grid penalty OR qualifying OR "power unit") min_faves:100']
+
+[[league]]
+key = "nascar"
+name = "NASCAR Cup Series"
+sport = "motorsport"
+subreddits = ["NASCAR"]
+
+# --- esports --------------------------------------------------------------------------
+# No entity source: Wikidata's esports rosters are thin. Crawled for their subreddits
+# only; posts there are stored as about the league, with no entities named.
+
+[[league]]
+key = "lol"
+name = "League of Legends esports"
+sport = "esports"
+subreddits = ["leagueoflegends", "lolesports"]
+
+[[league]]
+key = "cs2"
+name = "Counter-Strike 2 esports"
+sport = "esports"
+subreddits = ["GlobalOffensive"]

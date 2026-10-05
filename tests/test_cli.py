@@ -17,6 +17,7 @@ from social_scraper.cli import (
     cmd_reddit_import,
     cmd_run,
     cmd_scrape,
+    cmd_sports_sync,
     cmd_status,
     cmd_universe,
     main,
@@ -295,6 +296,76 @@ def test_export_status_and_lake(settings, engine, universe, capsys):
     assert "NVDA" in out.splitlines()[-1]
 
 
+SPORTS_LEAGUES = (
+    '[[league]]\nkey = "nhl"\nname = "NHL"\nsport = "hockey"\nwikidata = "Q1215892"\n'
+    '[[league]]\nkey = "lol"\nname = "LoL"\nsport = "esports"\n'
+)
+
+
+class FakeWikidata:
+    """One team for any league; `fail` makes every query a 504."""
+
+    fail = False
+
+    def sparql(self, query):
+        if FakeWikidata.fail:
+            from social_scraper.sports.wikidata import WikidataError
+
+            raise WikidataError("HTTP 504")
+        if "ps:P118" in query:
+            return [{"team": "http://www.wikidata.org/entity/Q1", "en": "Montreal Canadiens"}]
+        return []
+
+
+@pytest.fixture
+def sports_settings(settings, tmp_path, monkeypatch):
+    leagues = tmp_path / "sports-leagues.toml"
+    leagues.write_text(SPORTS_LEAGUES, encoding="utf-8")
+    settings.sports_leagues_file = leagues
+    FakeWikidata.fail = False
+    monkeypatch.setattr(cli, "WikidataClient", FakeWikidata)
+    return settings
+
+
+def sync_artifact(settings):
+    return json.loads((settings.logs_dir / cli.SPORTS_SYNC_FILE).read_text(encoding="utf-8"))
+
+
+def test_sports_sync_refreshes_the_named_leagues_now(sports_settings, engine, capsys):
+    args = argparse.Namespace(leagues=["nhl"])
+    assert cmd_sports_sync(sports_settings, engine, args) == 0
+    assert "nhl: 1 entities" in capsys.readouterr().out
+    assert sync_artifact(sports_settings)["synced"] == {"nhl": 1}
+    # Fresh or not, a forced sync re-reads every league.
+    assert cmd_sports_sync(sports_settings, engine, argparse.Namespace(leagues=[])) == 0
+    assert sync_artifact(sports_settings)["synced"] == {"nhl": 1, "lol": 0}
+
+
+def test_sports_sync_failures_exit_1_with_the_artifact(sports_settings, engine, capsys):
+    FakeWikidata.fail = True
+    assert cmd_sports_sync(sports_settings, engine, argparse.Namespace(leagues=["nhl"])) == 1
+    assert sync_artifact(sports_settings)["errors"] == {"nhl": "HTTP 504"}
+    assert cmd_sports_sync(sports_settings, engine, argparse.Namespace(leagues=["nope"])) == 1
+    assert "no such league: nope" in sync_artifact(sports_settings)["error"]
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_status_shows_the_sports_domain_when_enabled(sports_settings, engine, capsys):
+    cmd_sports_sync(sports_settings, engine, argparse.Namespace(leagues=["nhl"]))
+    capsys.readouterr()
+    assert cmd_status(sports_settings, engine, argparse.Namespace()) == 0
+    assert "sports:" not in capsys.readouterr().out
+    sports_settings.domains = "stocks,sports"
+    assert cmd_status(sports_settings, engine, argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "sports_entities: 1" in out and "trending (24h): " in out
+
+
+def test_parser_accepts_sports_sync():
+    assert build_parser().parse_args(["sports-sync"]).leagues == []
+    assert build_parser().parse_args(["sports-sync", "nhl", "epl"]).leagues == ["nhl", "epl"]
+
+
 def test_universe_forces_a_refresh(settings, engine, monkeypatch, capsys):
     seen = {}
 
@@ -332,6 +403,8 @@ def test_main_scrape_is_headless_unless_headed(tmp_path, monkeypatch, argv, head
         return RunReport("t")
 
     monkeypatch.setattr(cli, "run_cycle", fake_cycle)
+    # A bare `scrape` first waits a random 0-20% of a cycle -- up to six real minutes.
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     assert main(argv) == 0
     # --headed is for watching the window, so it is neither headless nor minimized.
     assert seen == {"headless": headless, "minimized": minimized}

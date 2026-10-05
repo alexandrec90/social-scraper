@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.engine import Engine
 
@@ -39,6 +39,12 @@ class IngestStats:
         self.stored += other.stored
         self.new_mentions += other.new_mentions
         self.snapshots += other.snapshots
+
+
+class PostIngestor(Protocol):
+    """What a crawler hands its posts to: the stock `Ingestor` or the sports one."""
+
+    def ingest(self, posts: Iterable[Post]) -> IngestStats: ...
 
 
 def build_row(post: Post, universe: Universe) -> tuple[dict[str, Any], list[Mention]]:

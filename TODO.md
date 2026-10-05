@@ -24,6 +24,26 @@
       Arctic Shift for 2026, run `reddit-import <folder> --dry-run` to size it, check the
       R2 bucket has room, then run it for real
 
+## Sports domain (needs you)
+
+- [ ] Map Mise-o-jeu+ onto the league list: browse Mise-o-jeu+ with sports_betting's
+      overlay on, then `uv run python scripts/check-leagues.py`; paste each unmapped
+      `SPORT|League` label into the right league's `mise_o_jeu` in `sports-leagues.toml`
+      (or add the league). Until then every label shows as unmapped
+- [ ] Decide the budgets before `DOMAINS=stocks,sports`: stocks alone already uses
+      ~900 of `REDDIT_DAILY_BUDGET=1000`, and X's 90/day fits 3 pages a cycle. Sports
+      adds ~10 Reddit loads and `SPORTS_X_PAGES_PER_CYCLE` X pages a cycle
+- [ ] `uv run social-scraper sports-sync` once (about ten minutes), so the first cycles
+      do not trickle the leagues in two at a time
+- [ ] Put a few known-good sports accounts (beat reporters, insiders) in
+      `SPORTS_X_SEED_ACCOUNTS`
+- [ ] Review `sports-leagues.toml`'s subreddit names: they were not checked against
+      Reddit, and a wrong one shows as "not found" in `logs/scrape-run.json`
+- [ ] Add QIDs to a league's `extra` where Wikidata's league data lags (the Premier
+      League query missed promoted clubs on 2026-10-04; FBS returned 106 of ~134 teams)
+- [ ] sports_betting: read `social_scraper_sports_*` from the lake if its models want
+      the chatter (restore-then-use, per `.claude/rules/data-lake.md`)
+
 ## Hand-off to the consumers (other repos -- not changed from here)
 
 - [ ] data-lake: a restore step that reads `_catalog/social_scraper_posts.json` and

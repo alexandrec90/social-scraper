@@ -29,6 +29,11 @@ DEFAULT_X_QUERIES = (
 )
 
 
+STOCKS = "stocks"
+SPORTS = "sports"
+DOMAINS = (STOCKS, SPORTS)
+
+
 def csv_list(value: str, sep: str = ",") -> tuple[str, ...]:
     """Split a separated setting into trimmed, non-empty items."""
     return tuple(item.strip() for item in value.split(sep) if item.strip())
@@ -119,6 +124,31 @@ class Settings(BaseSettings):
     x_min_followers: int = 500
     x_search_share: float = 0.4
 
+    # --- domains -------------------------------------------------------------------------
+    # What a cycle collects: `stocks`, `sports`, or both (comma-separated). Both domains
+    # draw on the same per-platform budgets above -- raise those when adding one.
+    domains: str = "stocks"
+
+    # --- sports (`social_scraper/sports/`) -------------------------------------------------
+    sports_leagues_file: Path = Path("sports-leagues.toml")
+    # How old a league's Wikidata teams and rosters may get before a cycle re-reads them.
+    sports_refresh_hours: float = 24 * 7
+    # Leagues a cycle re-reads at most (35-110 s each live); `sports-sync` does them all.
+    sports_sync_leagues_per_cycle: int = 2
+    # Best-known athletes kept per team (a league's `players` overrides it).
+    sports_players_per_team: int = 6
+    # Subreddits a cycle visits, chosen by priority (`sports/targets.py`), and pages per
+    # listing: a rarely visited team subreddit would otherwise page back three deep.
+    sports_reddit_subs_per_cycle: int = 4
+    sports_reddit_max_pages: int = 1
+    sports_x_pages_per_cycle: int = 2
+    # Accounts always followed for sports, on top of the leagues' own (from Wikidata).
+    sports_x_seed_accounts: str = ""
+    sports_x_max_tracked_accounts: int = 150
+    sports_x_min_followers: int = 1000
+    # Wikidata lookups a cycle spends confirming names that keep coming up.
+    sports_lookups_per_cycle: int = 5
+
     # --- shared throttle behaviour ------------------------------------------------------
     backoff_base_minutes: float = 30.0
     backoff_max_minutes: float = 720.0
@@ -148,6 +178,19 @@ class Settings(BaseSettings):
     @property
     def x_seeds(self) -> tuple[str, ...]:
         return tuple(h.lstrip("@") for h in csv_list(self.x_seed_accounts))
+
+    @property
+    def enabled_domains(self) -> tuple[str, ...]:
+        """`DOMAINS` as a tuple; an unknown name is a configuration error, not a skip."""
+        names = tuple(d.lower() for d in csv_list(self.domains))
+        unknown = sorted(set(names) - set(DOMAINS))
+        if unknown:
+            raise ValueError(f"DOMAINS: unknown {', '.join(unknown)} (known: {', '.join(DOMAINS)})")
+        return names
+
+    @property
+    def sports_x_seeds(self) -> tuple[str, ...]:
+        return tuple(h.lstrip("@") for h in csv_list(self.sports_x_seed_accounts))
 
     @property
     def extra_symbol_files(self) -> tuple[Path, ...]:

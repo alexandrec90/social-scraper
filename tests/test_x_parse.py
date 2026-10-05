@@ -60,6 +60,21 @@ def test_2026_web_app_shape():
     assert post.engagement.likes == 27 and post.engagement.views == 36978
     assert post.lang == "en"
     assert post.tagged_symbols == ("NDAQ", "QQQ")
+    assert post.author.affiliated is True  # verified_type "Business": an organisation
+
+
+def test_affiliation_from_the_label_or_an_organisation_check():
+    plain = x_user_classic("1", "fan")
+    assert parse_author(x_tweet_classic("1", "t", plain)).affiliated is False
+    labelled = {
+        **plain,
+        "affiliates_highlighted_label": {"label": {"description": "The Athletic"}},
+    }
+    assert parse_author(x_tweet_classic("2", "t", labelled)).affiliated is True
+    government = {**plain, "legacy": {"verified_type": "Government"}}
+    assert parse_author(x_tweet_classic("3", "t", government)).affiliated is True
+    personal = {**plain, "verification": {"is_blue_verified": True, "verified_type": None}}
+    assert parse_author(x_tweet_classic("4", "t", personal)).affiliated is False
 
 
 def test_note_tweet_full_text_wins():
