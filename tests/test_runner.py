@@ -186,6 +186,106 @@ def test_run_cycle_exports_to_the_bucket_when_configured(settings, engine, s3_cl
     assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
 
 
+# --- the sports domain ------------------------------------------------------------------
+# A league with no Wikidata id: the cycle's sync asks the network nothing.
+SPORTS_LEAGUES = '[[league]]\nkey = "nhl"\nname = "NHL"\nsport = "hockey"\nsubreddits = ["nhl"]\n'
+
+
+def both_browser():
+    """r/wallstreetbets for stocks and r/nhl for sports, in one fake."""
+    browser = reddit_browser()
+    now = datetime.now(UTC).timestamp()
+    listing = PageResult(
+        200, "u", data=reddit_listing([reddit_submission("h", now, subreddit="nhl")])
+    )
+    base = "https://www.reddit.com/r/nhl/"
+    browser.pages |= {base: PageResult(200, base)}
+    browser.pages |= {base + f"{n}.json": listing for n in ("new", "comments", "top")}
+    return browser
+
+
+@pytest.fixture
+def sports_settings(settings, tmp_path):
+    leagues = tmp_path / "sports-leagues.toml"
+    leagues.write_text(SPORTS_LEAGUES, encoding="utf-8")
+    settings.symbol_universe_max_age_hours = 1e9
+    settings.sports_leagues_file = leagues
+    settings.domains = "stocks,sports"
+    return settings
+
+
+def test_run_cycle_runs_both_domains_into_their_own_datasets(sports_settings, engine):
+    report = run_cycle(sports_settings, engine, (REDDIT,), factory=lambda p: both_browser())
+    assert report.ok, report.errors
+    assert report.platforms[REDDIT]["ingest"]["stored"] >= 1
+    assert report.platforms["reddit:sports"]["ingest"]["stored"] >= 1
+    assert report.sports["leagues"] == 1 and report.sports["sync"]["synced"] == {"nhl": 0}
+    assert report.sports["discovery"]["looked_up"] == 0
+    catalog = sports_settings.archive_root / "_catalog"
+    assert (catalog / "social_scraper_posts.json").exists()
+    assert (catalog / "social_scraper_sports_posts.json").exists()
+
+
+def test_run_cycle_sports_only_never_loads_the_symbol_universe(
+    sports_settings, engine, monkeypatch
+):
+    sports_settings.domains = "sports"
+
+    def no_universe(settings):
+        raise AssertionError("stocks is off")
+
+    monkeypatch.setattr(runner, "universe_for", no_universe)
+    report = run_cycle(sports_settings, engine, (REDDIT,), factory=lambda p: both_browser())
+    assert report.ok, report.errors
+    assert list(report.platforms) == ["reddit:sports"]
+
+
+def test_a_bad_league_list_fails_sports_but_not_stocks(sports_settings, engine):
+    sports_settings.sports_leagues_file.write_text("[[league]]\nkey = 1\n", encoding="utf-8")
+    report = run_cycle(
+        sports_settings, engine, (REDDIT,), factory=lambda p: both_browser(), export=False
+    )
+    assert not report.ok
+    assert any(e.startswith("sports:") for e in report.errors)
+    assert report.platforms[REDDIT]["ingest"]["stored"] >= 1
+    assert "reddit:sports" not in report.platforms
+
+
+def test_a_wikidata_outage_is_a_notice_not_an_error(sports_settings, engine, monkeypatch):
+    from social_scraper.sports import cycle as sports_cycle
+    from social_scraper.sports.sync import SyncStats
+
+    real = sports_cycle.sync_leagues
+
+    def failing(*args, **kwargs):
+        real(*args, **kwargs)
+        return SyncStats(errors={"nhl": "HTTP 504"})
+
+    monkeypatch.setattr(sports_cycle, "sync_leagues", failing)
+    report = run_cycle(
+        sports_settings, engine, (REDDIT,), factory=lambda p: both_browser(), export=False
+    )
+    assert report.ok, report.errors
+    assert "wikidata" in report.sports["notice"]
+
+
+def test_prepare_sports_records_its_summary_or_its_error(sports_settings, engine):
+    report = RunReport("t")
+    ctx = runner.prepare_sports(sports_settings, engine, report)
+    assert ctx is not None and report.errors == []
+    assert report.sports["leagues"] == 1 and report.sports["entities"] == 0
+    sports_settings.sports_leagues_file.unlink()
+    report = RunReport("t")
+    assert runner.prepare_sports(sports_settings, engine, report) is None
+    assert report.errors[0].startswith("sports: cannot read")
+
+
+def test_unknown_domain_is_a_configuration_error(settings, engine):
+    settings.domains = "stocks,crypto"
+    with pytest.raises(ValueError, match="crypto"):
+        run_cycle(settings, engine, (REDDIT,), factory=lambda p: reddit_browser())
+
+
 def test_write_report_overwrites_and_is_parseable(settings):
     path = write_report(RunReport(started_at="t0", errors=["boom"]), settings.logs_dir)
     write_report(RunReport(started_at="t1"), settings.logs_dir)

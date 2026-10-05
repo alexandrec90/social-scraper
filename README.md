@@ -35,6 +35,40 @@ healthy, and publishes it to the pooled data lake for ibkr_trader.
   (`stance` in [-1, 1] from "calls/puts/moon/drilling/🚀"...). The model sentiment score
   is deliberately left to ibkr_trader, which scores rows where `sentiment` is NULL.
 
+## The sports domain (`DOMAINS=stocks,sports`)
+
+A second domain, off by default, collects chatter about what Mise-o-jeu+ lets you bet
+on. It shares the crawlers and the per-platform throttles with stocks, and has its own
+tables (`sports_*`) and lake datasets (`social_scraper_sports_*`), so no sports row ever
+reaches what ibkr_trader reads. No LLM is involved.
+
+- **Scope is a hand-kept league list**, `sports-leagues.toml`: per league, its
+  subreddits, its generic X searches, and where its teams and athletes come from.
+  Mise-o-jeu+ itself is never contacted (its terms forbid storing its data; see
+  sports_betting's `docs/data-sources.md`). `scripts/check-leagues.py` compares the
+  list's `mise_o_jeu` labels with sports_betting's overlay coverage file -- the leagues
+  you have actually seen on Mise-o-jeu+ -- and fails on any league the list lacks.
+- **Entities come from Wikidata**, weekly per league: each team's English and French
+  names and aliases ("Habs", "Glorieux"), its subreddit and X handle, and the
+  best-known athletes of each roster; top athletes by sport for tennis, golf, MMA,
+  boxing and F1. Names that keep appearing in a league's posts are looked up on Wikidata
+  and become entities when Wikidata says they play that sport or in that league.
+- **Matching** -- a full name counts anywhere; a one-word name ("Habs", "Panthers",
+  "McDavid") only when the post is already about a league that one entity plays in
+  (its subreddit, its X search, or another name in the post).
+- **Reddit** -- league subreddits plus each team's (for leagues with
+  `team_subreddits`), `SPORTS_REDDIT_SUBS_PER_CYCLE` a cycle, the busiest and stalest
+  first.
+- **X** -- searches for the most-mentioned teams and athletes of the day, plus the
+  leagues' generic queries. Accounts are scored as for stocks, plus: an organisation's
+  account (X's affiliate label or a Business/Government check) scores higher, and one
+  whose own tweets keep selling picks is dropped. The leagues' own accounts are seeds.
+
+Both domains draw on the same Reddit and X budgets: the defaults are sized for stocks
+alone, so raise `REDDIT_DAILY_BUDGET` / `X_DAILY_BUDGET` (or lower the per-cycle pages)
+when turning sports on. `sports-sync` refreshes every league from Wikidata at once
+instead of the cycle's two at a time.
+
 ## Staying unbanned
 
 Every page load goes through one throttle per platform (`social_scraper/throttle.py`):
@@ -85,6 +119,7 @@ your personal one.
 | `export [--full]` | copy new rows to the lake; `--full` resends every row |
 | `lake [--days N]` | per-symbol daily mentions/authors/stance from the lake |
 | `universe` | refresh the symbol directory |
+| `sports-sync [KEY...]` | re-read leagues from Wikidata now; outcome in `logs/sports-sync.json` |
 
 Every run overwrites `logs/scrape-run.json` with what each platform did, every error,
 and every notice -- on success too. The terminal gets a status line and that path.
@@ -118,6 +153,14 @@ The catalog is verified against data-lake's own `DatasetManifest.from_dict`.
 | `social_scraper_mentions` | (post, symbol) | platform, external_id, symbol | `.../mentions/platform=*/dt=<created>/` |
 | `social_scraper_engagement` | post at one observation | platform, external_id, observed_at | `.../engagement/platform=*/dt=<observed>/` |
 | `social_scraper_symbols` | every symbol ever mentioned | symbol | `.../symbols/` |
+| `social_scraper_sports_posts` | sports post, with `entities` and `leagues` | platform, external_id | `.../sports_posts/platform=*/dt=<created>/` |
+| `social_scraper_sports_mentions` | (post, entity) | platform, external_id, entity_id | `.../sports_mentions/platform=*/dt=<created>/` |
+| `social_scraper_sports_engagement` | sports post at one observation | platform, external_id, observed_at | `.../sports_engagement/platform=*/dt=<observed>/` |
+| `social_scraper_sports_entities` | team or athlete (Wikidata QID) | entity_id | `.../sports_entities/` |
+| `social_scraper_sports_entity_leagues` | (entity, league) | entity_id, league | `.../sports_entity_leagues/` |
+
+Sports entities ship without their subreddit or X handle: an athlete's handle
+identifies a person, and the lake takes no identifier unhashed.
 
 `social_scraper_posts` uses data-lake's `social_posts` column names (`platform`,
 `channel`, `external_id`, `created_at`, `author_hash`, `title`, `body`, `score`,
@@ -163,6 +206,7 @@ social_scraper/
   reddit/                 listing parser + incremental subreddit crawler
   x/                      GraphQL/SSR tweet parser, account discovery, crawler
   symbols/                NASDAQ symbol universe + mention extraction
+  sports/                 the sports domain: league list, Wikidata sync, matcher, crawl plans
   pipeline.py             scrub, extract, score, upsert
   stance.py, privacy.py   trading-slang stance; PII scrubbing and secret filter
   db/                     operational tables (Postgres; SQLite in tests)

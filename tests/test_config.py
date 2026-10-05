@@ -52,6 +52,21 @@ def test_list_properties_parse_their_strings():
     assert s.reddit_hours is None
 
 
+def test_domains_default_to_stocks_and_reject_unknown_names():
+    assert settings().enabled_domains == ("stocks",)
+    assert settings(domains="Stocks, sports").enabled_domains == ("stocks", "sports")
+    with pytest.raises(ValueError, match="crypto"):
+        _ = settings(domains="sports,crypto").enabled_domains
+
+
+def test_sports_settings():
+    s = settings(sports_x_seed_accounts="@NHL, CFL")
+    assert s.sports_x_seeds == ("NHL", "CFL")
+    assert s.sports_leagues_file == Path("sports-leagues.toml")
+    # A rarely visited team subreddit would otherwise page back three deep.
+    assert s.sports_reddit_max_pages == 1
+
+
 def test_defaults_are_conservative():
     # Sized for a machine that runs `social-scraper run` around the clock.
     s = settings()

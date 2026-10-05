@@ -44,6 +44,11 @@ SOURCES: dict[str, tuple[Table, str]] = {
     datasets.MENTIONS.name: (schema.mentions, "updated_at"),
     datasets.ENGAGEMENT.name: (schema.engagement, "observed_at"),
     datasets.SYMBOLS.name: (schema.symbols, "updated_at"),
+    datasets.SPORTS_POSTS.name: (schema.sports_posts, "updated_at"),
+    datasets.SPORTS_MENTIONS.name: (schema.sports_mentions, "updated_at"),
+    datasets.SPORTS_ENGAGEMENT.name: (schema.sports_engagement, "observed_at"),
+    datasets.SPORTS_ENTITIES.name: (schema.sports_entities, "updated_at"),
+    datasets.SPORTS_ENTITY_LEAGUES.name: (schema.sports_entity_leagues, "refreshed_at"),
 }
 
 
@@ -89,7 +94,7 @@ def fetch_batch(
 def lake_rows(spec: DatasetSpec, rows: list[dict[str, Any]]) -> tuple[list[dict], int]:
     """Rows projected onto `spec`, with secret-bearing posts removed. `(rows, dropped)`."""
     out, dropped = [], 0
-    check = spec is datasets.POSTS
+    check = spec in datasets.TEXT
     for row in rows:
         if check and contains_secret(row.get("title"), row.get("body"), row.get("url")):
             dropped += 1

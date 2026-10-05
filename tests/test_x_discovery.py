@@ -9,11 +9,13 @@ from social_scraper.x.discovery import (
     SEED,
     TRACKED,
     AccountRow,
-    finance_ratio,
+    is_tout,
+    relevance_ratio,
     pick_symbols,
     pick_timelines,
     reconcile,
     score_account,
+    should_drop,
     split_budget,
 )
 
@@ -22,10 +24,10 @@ def row(uid, status=CANDIDATE, **kw):
     return AccountRow(user_id=uid, handle=f"h{uid}", status=status, **kw)
 
 
-def test_finance_ratio_uses_prior_until_sampled():
-    assert finance_ratio(row("a", timeline_tweets=3, timeline_finance_tweets=3)) == 0.5
-    sampled = row("a", timeline_tweets=18, timeline_finance_tweets=18)
-    assert finance_ratio(sampled) == 19 / 20
+def test_relevance_ratio_uses_prior_until_sampled():
+    assert relevance_ratio(row("a", timeline_tweets=3, timeline_relevant_tweets=3)) == 0.5
+    sampled = row("a", timeline_tweets=18, timeline_relevant_tweets=18)
+    assert relevance_ratio(sampled) == 19 / 20
 
 
 def test_score_rewards_activity_reach_and_engagement():
@@ -35,8 +37,8 @@ def test_score_rewards_activity_reach_and_engagement():
 
 
 def test_score_penalises_off_topic_timelines():
-    on = row("a", followers=1000, search_hits=5, timeline_tweets=20, timeline_finance_tweets=18)
-    off = row("b", followers=1000, search_hits=5, timeline_tweets=20, timeline_finance_tweets=1)
+    on = row("a", followers=1000, search_hits=5, timeline_tweets=20, timeline_relevant_tweets=18)
+    off = row("b", followers=1000, search_hits=5, timeline_tweets=20, timeline_relevant_tweets=1)
     assert score_account(on) > score_account(off)
 
 
@@ -56,7 +58,7 @@ def test_reconcile_promotes_best_eligible_candidates_up_to_cap():
 
 def test_reconcile_counts_seeds_against_the_cap_and_never_drops_them():
     rows = [
-        row("seed", status=SEED, timeline_tweets=50, timeline_finance_tweets=0),
+        row("seed", status=SEED, timeline_tweets=50, timeline_relevant_tweets=0),
         row("c1", followers=5_000, search_hits=4),
     ]
     out = reconcile(rows, max_tracked=1, min_followers=500)
@@ -69,9 +71,40 @@ def test_reconcile_drops_tracked_accounts_that_are_off_topic():
         "off",
         status=TRACKED,
         timeline_tweets=MIN_TIMELINE_SAMPLE + 10,
-        timeline_finance_tweets=0,
+        timeline_relevant_tweets=0,
     )
     assert reconcile([off], 10, 500)["off"][0] == DROPPED
+
+
+def test_reconcile_drops_tracked_touts_even_when_on_topic():
+    n = MIN_TIMELINE_SAMPLE + 2
+    tout = row("t", status=TRACKED, timeline_tweets=n, timeline_relevant_tweets=n, tout_tweets=3)
+    reporter = row(
+        "r", status=TRACKED, timeline_tweets=n, timeline_relevant_tweets=n, tout_tweets=1
+    )
+    out = reconcile([tout, reporter], 10, 0)
+    assert out["t"][0] == DROPPED
+    assert out["r"][0] == TRACKED  # one promo in ten is a sponsor read
+
+
+def test_should_drop_only_tracked_accounts():
+    n = MIN_TIMELINE_SAMPLE
+    assert should_drop(row("off", status=TRACKED, timeline_tweets=n))
+    assert not should_drop(row("seed", status=SEED, timeline_tweets=n))
+    assert not should_drop(row("cand", timeline_tweets=n, tout_tweets=n))
+    assert should_drop(
+        row("t", status=TRACKED, timeline_tweets=n, timeline_relevant_tweets=n, tout_tweets=n)
+    )
+
+
+def test_is_tout_waits_for_a_timeline_sample():
+    assert not is_tout(row("t", timeline_tweets=MIN_TIMELINE_SAMPLE - 1, tout_tweets=5))
+    assert is_tout(row("t", timeline_tweets=MIN_TIMELINE_SAMPLE, tout_tweets=2))
+
+
+def test_affiliated_accounts_score_higher():
+    base = {"followers": 5_000, "search_hits": 3, "search_engagement": 90}
+    assert score_account(row("org", affiliated=True, **base)) > score_account(row("p", **base))
 
 
 def test_reconcile_keeps_dropped_dropped():

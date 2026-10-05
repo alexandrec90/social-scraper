@@ -119,6 +119,15 @@ def test_run_warms_up_crawls_and_refreshes(engine, universe):
     assert stats.requests == 4 and not stats.errors
 
 
+def test_run_skips_the_warm_up_for_an_already_warm_browser(engine, universe):
+    listing = ok(reddit_listing([reddit_submission("a", T0)]))
+    browser = FakeBrowser({BASE + "new.json": listing, BASE + "comments.json": listing})
+    browser.pages[BASE + "top.json"] = listing
+    s, _ = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert BASE not in browser.calls and stats.requests == 3
+
+
 def test_refresh_is_not_repeated_within_the_interval(engine, universe):
     listing = ok(reddit_listing([]))
     browser = FakeBrowser({BASE: listing})

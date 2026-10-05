@@ -1,12 +1,14 @@
 """One scrape cycle across platforms, and the loop that repeats it.
 
-A cycle: load the symbol universe, crawl each platform in its own browser profile,
-export to the lake, and write `logs/scrape-run.json` -- on failure as on success,
-overwritten each run -- with everything needed to diagnose it. The terminal gets a
-status line and that path (CLAUDE.md, "Failure artifacts").
+A cycle: prepare each enabled domain (`DOMAINS`: the stock symbol universe; the sports
+league list, Wikidata refresh and matcher), crawl each platform in its own browser
+profile -- the stock domain, then sports, under one per-platform throttle -- export to
+the lake, and write `logs/scrape-run.json` -- on failure as on success, overwritten
+each run -- with everything needed to diagnose it. The terminal gets a status line and
+that path (CLAUDE.md, "Failure artifacts").
 
-One platform failing never stops the other, and a failed export never fails the
-cycle: the lake degrades, it does not block.
+One platform or domain failing never stops another, and a failed export never fails
+the cycle: the lake degrades, it does not block.
 """
 
 from __future__ import annotations
@@ -27,13 +29,16 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from social_scraper.browser import PlaywrightBrowser
-from social_scraper.config import Settings
+from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
 from social_scraper.export import export_to_lake
 from social_scraper.fetch import Browser
 from social_scraper.models import REDDIT, X
 from social_scraper.pipeline import Ingestor
 from social_scraper.reddit.scraper import RedditOptions, RedditScraper
+from social_scraper.sports import cycle as sports_cycle
+from social_scraper.sports.cycle import SportsContext
+from social_scraper.sports.leagues import LeagueConfigError
 from social_scraper.symbols.universe import Universe, load_universe
 from social_scraper.throttle import Policy, Throttle, ThrottleStop
 from social_scraper.x import accounts
@@ -51,7 +56,10 @@ BrowserFactory = Callable[[str], AbstractContextManager[Browser]]
 class RunReport:
     started_at: str
     finished_at: str | None = None
+    # Keyed by platform for stocks (`reddit`, `x`), `<platform>:sports` for sports.
     platforms: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Sports only: league and entity counts, the Wikidata sync, discovery.
+    sports: dict[str, Any] = field(default_factory=dict)
     export: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -146,6 +154,22 @@ def run_platform(
     return out
 
 
+def prepare_sports(settings: Settings, engine: Engine, report: RunReport) -> SportsContext | None:
+    """The sports context, or None with the reason in `report` -- never raises."""
+    try:
+        ctx = sports_cycle.prepare(settings, engine, datetime.now(UTC))
+    except LeagueConfigError as exc:
+        report.errors.append(f"sports: {exc}")
+        return None
+    report.sports["leagues"] = len(ctx.leagues)
+    report.sports["entities"] = len(ctx.matcher)
+    report.sports["sync"] = asdict(ctx.sync)
+    if ctx.sync.errors:
+        # Wikidata down degrades freshness, not the crawl: a notice, not a failed cycle.
+        report.sports["notice"] = "wikidata sync failed for some leagues; previous entities kept"
+    return ctx
+
+
 def run_cycle(
     settings: Settings,
     engine: Engine,
@@ -154,14 +178,26 @@ def run_cycle(
     export: bool = True,
 ) -> RunReport:
     report = RunReport(started_at=datetime.now(UTC).isoformat())
-    ingestor = Ingestor(engine, universe_for(settings))
+    domains = settings.enabled_domains
+    factory = factory or default_browser_factory(settings)
+    ingestor = Ingestor(engine, universe_for(settings)) if STOCKS in domains else None
+    sports = prepare_sports(settings, engine, report) if SPORTS in domains else None
     for platform in platforms:
-        result = run_platform(
-            settings, platform, engine, ingestor, factory or default_browser_factory(settings)
+        results: dict[str, dict[str, Any]] = {}
+        if ingestor is not None:
+            results[platform] = run_platform(settings, platform, engine, ingestor, factory)
+        if sports is not None:
+            results[f"{platform}:{SPORTS}"] = sports_cycle.run_platform(
+                settings, platform, engine, sports, factory, policy_for
+            )
+        for label, result in results.items():
+            report.platforms[label] = result
+            if "error" in result:
+                report.errors.append(f"{label}: {result['error']}")
+    if sports is not None:
+        report.sports["discovery"] = sports_cycle.discover_names(
+            settings, engine, datetime.now(UTC)
         )
-        report.platforms[platform] = result
-        if "error" in result:
-            report.errors.append(f"{platform}: {result['error']}")
     DbThrottleStore(engine).prune(datetime.now(UTC) - timedelta(days=REQUEST_LOG_RETENTION_DAYS))
     if export:
         exported = export_to_lake(engine, settings, datetime.now(UTC))

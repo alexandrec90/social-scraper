@@ -93,8 +93,45 @@ def test_export_writes_every_dataset_and_never_the_secret(engine, universe, tmp_
     assert by_name["social_scraper_symbols"].rows == 1
     for f in tmp_path.rglob("*.parquet"):
         assert AWS_KEY.encode() not in f.read_bytes()
-    for spec in datasets.ALL:
+    for spec in datasets.STOCK:
         assert manifest.load(LocalStore(tmp_path), spec.name) is not None
+    # No sports rows, so no sports dataset: an empty table writes nothing.
+    for spec in datasets.SPORTS:
+        assert manifest.load(LocalStore(tmp_path), spec.name) is None
+        assert by_name[spec.name].rows == 0
+
+
+def test_sports_rows_export_to_their_own_datasets_and_never_the_secret(engine, tmp_path):
+    from social_scraper.sports import registry
+    from social_scraper.sports.ingest import SportsIngestor
+    from social_scraper.sports.matcher import Matcher
+    from social_scraper.sports.wikidata import TEAM, EntityRecord
+
+    with engine.begin() as conn:
+        registry.replace_league(conn, "nhl", [EntityRecord("Q1", TEAM, "Montreal Canadiens")], NOW)
+        matcher = Matcher(registry.load_entities(conn), {"nhl": frozenset({"nhl"})})
+    posts = [post("s", "Montreal Canadiens win"), post("leak", f"Habs {AWS_KEY}")]
+    posts = [Post(**{**p.__dict__, "channel": "nhl", "title": None}) for p in posts]
+    SportsIngestor(engine, matcher, Clock()).ingest(posts)
+    result = export_all(engine, [LocalStore(tmp_path)], NOW)
+    by_name = {d.dataset: d for d in result.datasets}
+    assert result.ok
+    assert by_name["social_scraper_sports_posts"].rows == 1
+    assert by_name["social_scraper_sports_posts"].dropped_secrets == 1
+    assert by_name["social_scraper_sports_mentions"].rows == 1
+    assert by_name["social_scraper_sports_entities"].rows == 1
+    assert by_name["social_scraper_sports_entity_leagues"].rows == 1
+    assert by_name["social_scraper_posts"].rows == 0  # nothing leaks into the stock datasets
+    for f in tmp_path.rglob("*.parquet"):
+        assert AWS_KEY.encode() not in f.read_bytes()
+    for spec in datasets.SPORTS:
+        assert manifest.load(LocalStore(tmp_path), spec.name) is not None
+
+
+def test_lake_rows_scans_sports_posts_for_secrets():
+    rows = [{"platform": "x", "external_id": "bad", "body": f"key {AWS_KEY}"}]
+    assert lake_rows(datasets.SPORTS_POSTS, rows)[1] == 1
+    assert lake_rows(datasets.SPORTS_MENTIONS, rows)[1] == 0
 
 
 def test_export_is_incremental_and_merges_updates(engine, universe, tmp_path):
@@ -179,7 +216,7 @@ def test_settings_unset_export_to_the_local_tree_only(engine, universe, tmp_path
     seed(engine, universe, Clock(), post("a", "calls"))
     settings = IsolatedSettings(archive_root=tmp_path / "lake")
     assert export_to_lake(engine, settings, NOW).ok
-    for spec in datasets.ALL:
+    for spec in datasets.STOCK:
         assert manifest.load(LocalStore(settings.archive_root), spec.name) is not None
 
 
@@ -191,11 +228,11 @@ def test_bucket_gets_the_same_keys_as_the_local_tree(engine, universe, tmp_path,
     # Root-relative and identical to the local layout, so data-lake's load_catalog reads
     # the bucket unchanged; no staged `.tmp` object is left behind in either.
     assert keys == local_keys(settings.archive_root)
-    assert {f"_catalog/{spec.name}.json" for spec in datasets.ALL} <= keys
+    assert {f"_catalog/{spec.name}.json" for spec in datasets.STOCK} <= keys
     assert "social_scraper/posts/platform=reddit/dt=2026-09-28/part.parquet" in keys
     assert not any(k.endswith(".tmp") for k in keys)
     bucket = S3Store(s3_client, LAKE_BUCKET)
-    for spec in datasets.ALL:
+    for spec in datasets.STOCK:
         catalog = manifest.load(bucket, spec.name)
         manifest.validate(catalog)
         assert set(catalog["partitions"]) <= keys

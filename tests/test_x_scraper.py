@@ -137,7 +137,7 @@ def test_accounts_seen_repeatedly_get_promoted(engine, universe):
         assert {r.user_id: r.status for r in accounts.load(conn)}["100"] == TRACKED
 
 
-def test_timeline_visit_keeps_finance_tweets_and_learns_amplified(engine, universe):
+def test_timeline_visit_keeps_on_topic_tweets_and_learns_amplified(engine, universe):
     with engine.begin() as conn:
         accounts.add_seeds(conn, ["alice"], NOW)
     rt_original = x_tweet_classic("9", "$TSLA squeeze incoming", BOB, ("TSLA",))
@@ -156,7 +156,7 @@ def test_timeline_visit_keeps_finance_tweets_and_learns_amplified(engine, univer
         rows = {r.user_id: r for r in accounts.load(conn)}
     assert stored == {"2", "9"}  # coffee is not stored
     assert rows["100"].status == SEED  # placeholder resolved to the real id
-    assert (rows["100"].timeline_tweets, rows["100"].timeline_finance_tweets) == (2, 1)
+    assert (rows["100"].timeline_tweets, rows["100"].timeline_relevant_tweets) == (2, 1)
     assert rows["200"].mentioned_by_tracked == 1
 
 
@@ -226,6 +226,18 @@ def test_reconcile_persists_statuses(engine, universe):
     with engine.begin() as conn:
         accounts.observe(conn, [], accounts.SEARCH, NOW)
     scraper(engine, universe, FakeBrowser()).reconcile()
+
+
+def test_the_base_crawler_needs_a_domain(engine, universe):
+    """`XCrawler` is the loop; a domain says what to search and what is on-topic."""
+    base = scraper_mod.XCrawler.__new__(scraper_mod.XCrawler)
+    with pytest.raises(NotImplementedError):
+        base.queries(1)
+    with pytest.raises(NotImplementedError):
+        base.is_relevant(None)
+    assert base.is_tout(None) is False
+    stock = scraper(engine, universe, FakeBrowser())
+    assert isinstance(stock, scraper_mod.XCrawler)
 
 
 def test_run_stats_start_empty():
