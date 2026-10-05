@@ -45,6 +45,26 @@ def test_merge_new_rows_win():
     assert merge(None, new, ("id",)) is new
 
 
+def test_merge_keep_existing_only_adds_new_keys():
+    old = pa.Table.from_pylist(rows(("a", 1), ("b", 1)), schema=SPEC.schema)
+    new = pa.Table.from_pylist(rows(("b", 9), ("c", 9)), schema=SPEC.schema)
+    merged = merge(old, new, ("id",), keep_existing=True)
+    assert {r["id"]: r["score"] for r in merged.to_pylist()} == {"a": 1, "b": 1, "c": 9}
+    assert merge(None, new, ("id",), keep_existing=True) is new
+
+
+def test_write_partition_takes_a_table_and_can_keep_stored_rows(tmp_path):
+    store = LocalStore(tmp_path)
+    write_partition(store, SPEC, "demo/dt=x", rows(("a", 1)), NOW)
+    # Columns out of order, as a spool hands them back: selected into the spec's order.
+    table = pa.Table.from_pylist(rows(("a", 7), ("b", 7)), schema=SPEC.schema)
+    table = table.select(["score", "id", "created_at"])
+    result = write_partition(store, SPEC, "demo/dt=x", table, NOW, keep_existing=True)
+    assert result.rows == 2
+    got = {r["id"]: r["score"] for r in pq.read_table(tmp_path / result.key).to_pylist()}
+    assert got == {"a": 1, "b": 7}
+
+
 class CorruptReadBack(LocalStore):
     """A store whose staged objects read back empty: the write did not land as meant."""
 

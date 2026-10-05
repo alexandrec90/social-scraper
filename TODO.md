@@ -19,6 +19,10 @@
       `social-scraper export --full` once so the bucket gets the history the local
       tree already holds. Until then the export reaches only `ARCHIVE_ROOT`, which
       ibkr_trader does not read
+- [ ] Backfill Reddit history (README, "Backfilling Reddit history"): download the
+      `REDDIT_SUBREDDITS` files from the subreddit torrent (needs a torrent client) and
+      Arctic Shift for 2026, run `reddit-import <folder> --dry-run` to size it, check the
+      R2 bucket has room, then run it for real
 
 ## Sports domain (needs you)
 

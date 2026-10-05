@@ -93,6 +93,18 @@ def python_targets(paths: list[str]) -> list[str]:
     return [n for n in paths if n.endswith(".py")]
 
 
+def mypy_targets(paths: list[str]) -> list[str]:
+    """The .py files among `paths` that lie inside MYPY_SCOPE.
+
+    A narrowed run names its files, and mypy applies `[tool.mypy] exclude` only to what
+    it discovers, never to a file named on the command line. Unfiltered, a diff touching
+    the vendored harness put `scripts/hooks/tests/test_toolchain.py` on the same command
+    line as `tests/`, and the two `conftest` modules collided -- a finding in code this
+    repo may not edit.
+    """
+    return [n for n in python_targets(paths) if n.startswith(tuple(MYPY_SCOPE))]
+
+
 def changed_python_files() -> list[str]:
     """Tracked-but-modified plus untracked .py files, relative to the repo root."""
     return python_targets(changed_paths())
@@ -172,7 +184,7 @@ def run_tool(name: str, cmd: list[str], fix_hint: str) -> str:
     return f"# {name}\n# fix: {fix_hint}\n{body}\n\n"
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed", action="store_true", help="lint only the working-tree diff")
     # `/ship` passes the branch's diff here. It is part of the same contract as
@@ -200,7 +212,44 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def python_sections(scope: list[str], typed: list[str]) -> str:
+    """Run the ruff fix passes over `scope`, then report ruff and mypy (over `typed`)."""
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other, and both skip the vendored
+    # harness — see NO_FIX_SCOPE.
+    no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+
+    sections = run_tool(
+        "ruff",
+        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+        "ruff check . --fix --unsafe-fixes",
+    )
+    # Scoped with nothing inside MYPY_SCOPE, mypy has nothing to check: falling back
+    # to the whole scope would widen a per-turn pass.
+    if typed:
+        sections += run_tool(
+            "mypy",
+            [sys.executable, "-m", "mypy", *typed, "--show-error-codes"],
+            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+        )
+    return sections
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     # `--paths` and `--changed` are the same narrowing, differing only in who names the
     # files; everything downstream treats them identically.
@@ -226,31 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     # `scope` then falls back to `["."]` — which would silently widen a per-turn
     # check into a whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
-        # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-        # must stay sequential relative to each other, and both skip the vendored
-        # harness — see NO_FIX_SCOPE.
-        no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", *no_fix],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "format", *scope, *no_fix],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-
-        sections += run_tool(
-            "ruff",
-            [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
-            "ruff check . --fix --unsafe-fixes",
-        )
-        sections += run_tool(
-            "mypy",
-            [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
-            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-        )
+        sections += python_sections(scope, mypy_targets(selected) if scoped else MYPY_SCOPE)
 
     # `.claude/hooks/session-start.sh` installs both of these into every session, so
     # a provisioned checkout has them. They are real executables rather than `-m`

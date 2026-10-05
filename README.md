@@ -119,6 +119,7 @@ your personal one.
 | `export [--full]` | copy new rows to the lake; `--full` resends every row |
 | `lake [--days N]` | per-symbol daily mentions/authors/stance from the lake |
 | `universe` | refresh the symbol directory |
+| `reddit-import PATH... [--since D] [--until D] [--all-posts] [--local-only] [--dry-run]` | backfill Reddit history from archive dumps; report in `logs/reddit-import.json` |
 | `sports-sync [KEY...]` | re-read leagues from Wikidata now; outcome in `logs/sports-sync.json` |
 
 Every run overwrites `logs/scrape-run.json` with what each platform did, every error,
@@ -130,6 +131,45 @@ failed export -- and 0 when a platform was deliberately left alone (outside X ac
 hours, budget spent, circuit breaker open). It first waits a random 0-20% of
 `CYCLE_MINUTES`, so a fixed scheduler grid does not become a fixed request interval;
 `--now` skips the wait for a run by hand.
+
+## Backfilling Reddit history
+
+The crawler only sees what a listing still shows, so on its own the lake starts the day
+the scraper did. `reddit-import` loads the years before that from the community
+archives, which are free to download and need no account:
+
+- **Up to the end of 2025:** Watchful1's
+  [subreddit torrents](https://academictorrents.com/details/3e3f64dee22dc304cdd2546254ca1f8e8ae542b4)
+  (built from Pushshift). In the torrent client, select only
+  `<sub>_submissions.zst` and `<sub>_comments.zst` for the subreddits in
+  `REDDIT_SUBREDDITS` -- the full torrent is terabytes.
+- **2026 onwards:** [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift)'s
+  per-subreddit [download tool](https://arctic-shift.photon-reddit.com/download-tool),
+  which publishes each month a few weeks after it ends.
+
+Put the files in one folder and import it (a folder, because PowerShell hands a native
+command its `*.zst` unexpanded):
+
+```bash
+uv run social-scraper reddit-import D:/reddit-dumps --dry-run   # counts per year, writes nothing
+uv run social-scraper reddit-import D:/reddit-dumps             # writes the lake
+```
+
+Each line goes through the crawler's own parser and pipeline -- the same ids, author
+hash, scrubbing, symbol extraction and stance -- and lands in `social_scraper_posts` and
+`social_scraper_mentions`, written straight to the lake (`ARCHIVE_ROOT`, plus the
+bucket unless `--local-only`), not through the database. By default it keeps posts in
+`REDDIT_SUBREDDITS`, created since 2015-01-01, that mention at least one symbol; a
+cashtag outside today's symbol directory counts, so a ticker delisted since keeps its
+history. `--all-posts` keeps the rest.
+
+A backfill never overwrites a row the live crawler exported, and re-running it changes
+nothing. What it does not carry: engagement snapshots (an archive kept one observation
+per post -- Arctic Shift's about 36 hours after posting -- which stays on the row with
+`fetched_at` set to its time; `extra.backfill` names the dump a row came from) and the
+symbol registry, which the live export rewrites from the database. The spool goes under `DATA_DIR` and can reach gigabytes for
+r/wallstreetbets; `--dry-run` first says how much is coming. Use of the archives is
+governed by Reddit's terms, which the archives do not restate -- check them before use.
 
 ## Data contract (data-lake / ibkr_trader)
 
@@ -172,8 +212,10 @@ dedupe and join. X authors hash their stable numeric id. Handles, e-mail address
 phone numbers are scrubbed from text; a post matching a credential pattern is dropped,
 never exported.
 
-Partitions are rewritten by merge (new rows win), verified by read-back, then
-catalogued -- a late comment or refreshed score lands in the right day's file. Each
+Partitions are rewritten by merge (new rows win; for `reddit-import`, stored rows win),
+verified by read-back, then catalogued -- a late comment or refreshed score lands in the
+right day's file. A backfilled post's `fetched_at` is when the archive captured it, so a
+restore that refreshes only from a later `fetched_at` keeps the live observation. Each
 store does this against its own copy: the bucket's merge reads the partition back from
 the bucket. A store that fails (a refused or unreachable bucket included) fails the
 export, which leaves the watermark where it was so the next run resends the same rows.
@@ -203,7 +245,8 @@ social_scraper/
   browser.py              Playwright transport (the only code that touches Chrome)
   fetch.py                the Browser protocol scrapers are written (and tested) against
   throttle.py             pacing, budgets, active hours, circuit breaker
-  reddit/                 listing parser + incremental subreddit crawler
+  reddit/                 listing parser + incremental subreddit crawler; dumps.py
+                          backfills history from Pushshift / Arctic Shift dumps
   x/                      GraphQL/SSR tweet parser, account discovery, crawler
   symbols/                NASDAQ symbol universe + mention extraction
   sports/                 the sports domain: league list, Wikidata sync, matcher, crawl plans

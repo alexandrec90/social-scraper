@@ -16,6 +16,10 @@ dependencies = [
   # Drives a real, logged-in Chrome profile. Reddit answers a plain HTTP client with 403
   # and X has no read API we can use, so a browser is the only transport that works.
   "playwright>=1.50",
+  # Reads the Pushshift / Arctic Shift Reddit dumps (`reddit_import.py`). They are
+  # compressed with a 2 GiB window, which needs `max_window_size`; pyarrow's codec
+  # exposes no such knob.
+  "zstandard>=0.23",
 ]
 
 [project.scripts]

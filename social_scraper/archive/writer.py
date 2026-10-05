@@ -6,7 +6,9 @@ local tree or the bucket, `archive/store.py`):
 
 1. Read the partition's existing object **from that store**, if any, and merge the new
    rows in on the natural key -- **the new row wins**, because a re-observed post
-   carries fresher engagement than the copy already archived.
+   carries fresher engagement than the copy already archived. A backfill
+   (`reddit/dumps.py`) is the exception: its rows were observed earlier than anything
+   already stored, so it passes `keep_existing`.
 2. Write the result to `part.parquet.tmp`.
 3. **Verify**: read the staged object back and check its row count and exact key set.
 4. Replace `part.parquet` with it, then update `_catalog/<dataset>.json` in the same
@@ -48,10 +50,24 @@ def _keys(table: pa.Table, columns: tuple[str, ...]) -> list[tuple]:
     return list(zip(*cols, strict=True))
 
 
-def merge(existing: pa.Table | None, new: pa.Table, key_columns: tuple[str, ...]) -> pa.Table:
-    """`existing` minus rows whose key is in `new`, plus `new`. New rows win."""
+def merge(
+    existing: pa.Table | None,
+    new: pa.Table,
+    key_columns: tuple[str, ...],
+    keep_existing: bool = False,
+) -> pa.Table:
+    """`existing` minus rows whose key is in `new`, plus `new`. New rows win.
+
+    `keep_existing` reverses that: a key already stored keeps its stored row. A backfill
+    passes it, because the copy a live scrape exported was observed later than an
+    archive's.
+    """
     if existing is None or existing.num_rows == 0:
         return new
+    if keep_existing:
+        stored = set(_keys(existing, key_columns))
+        fresh = pa.array([k not in stored for k in _keys(new, key_columns)], type=pa.bool_())
+        return pa.concat_tables([existing, new.filter(fresh)])
     incoming = set(_keys(new, key_columns))
     keep = pa.array([k not in incoming for k in _keys(existing, key_columns)], type=pa.bool_())
     return pa.concat_tables([existing.filter(keep), new])
@@ -84,15 +100,22 @@ def write_partition(
     store: ObjectStore,
     spec: DatasetSpec,
     partition_dir: str,
-    rows: list[dict[str, Any]],
+    rows: list[dict[str, Any]] | pa.Table,
     now: datetime,
+    keep_existing: bool = False,
 ) -> PartitionResult:
-    """Merge `rows` into one partition of `store` and record it in that store's catalog."""
+    """Merge `rows` into one partition of `store` and record it in that store's catalog.
+
+    `rows` may already be a table in `spec.schema` -- a backfill's partition can be large
+    enough that a list of dicts is the expensive part. `keep_existing`: see `merge`.
+    """
     rel = f"{partition_dir}/{PART_FILE}"
+    new = rows if isinstance(rows, pa.Table) else pa.Table.from_pylist(rows, schema=spec.schema)
     merged = merge(
         _read_existing(store, rel, spec.schema),
-        pa.Table.from_pylist(rows, schema=spec.schema),
+        new.select(spec.schema.names).cast(spec.schema),
         spec.key_columns,
+        keep_existing,
     )
     expected = set(_keys(merged, spec.key_columns))
     if len(expected) != merged.num_rows:
