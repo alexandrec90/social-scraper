@@ -46,3 +46,28 @@ def test_symbol_daily_over_exported_data(engine, universe, tmp_path):
     top = rows[0]
     assert top[0] == "NVDA" and top[2] == 3 and top[3] == 2
     assert top[4] is not None  # mean stance over the three NVDA posts
+
+
+def test_a_timestamp_column_reads_back_through_the_lens(engine, universe, tmp_path):
+    """DuckDB hands a TIMESTAMPTZ to Python through pytz, which it does not declare.
+
+    Without it, any verification query that selects ``created_at`` raises "Required module
+    'pytz' failed to import" -- a session reading back its own import hit exactly that.
+    """
+    post = Post(
+        platform="reddit",
+        external_id="p1",
+        kind="submission",
+        channel="stocks",
+        created_at=NOW - timedelta(hours=1),
+        author=AuthorInfo(name="user"),
+        body="$NVDA calls",
+    )
+    Ingestor(engine, universe, Clock()).ingest([post])
+    export_all(engine, [LocalStore(tmp_path)], NOW)
+    con = connect(tmp_path)
+    try:
+        (created_at,) = con.execute("SELECT created_at FROM social_posts").fetchone()
+    finally:
+        con.close()
+    assert created_at == NOW - timedelta(hours=1)
