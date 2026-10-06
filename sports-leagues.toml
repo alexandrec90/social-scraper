@@ -22,6 +22,7 @@ key = "nhl"
 name = "NHL"
 sport = "hockey"
 wikidata = "Q1215892"
+mise_o_jeu = ["ICE_HOCKEY|Etats-Unis / NHL"]
 subreddits = ["nhl", "hockey"]
 team_subreddits = true
 x_queries = [
@@ -57,6 +58,7 @@ key = "nfl"
 name = "NFL"
 sport = "american football"
 wikidata = "Q1215884"
+mise_o_jeu = ["AMERICAN_FOOTBAL|Etats-Unis / NFL"]
 subreddits = ["nfl"]
 team_subreddits = true
 x_queries = ['NFL (injury OR inactive OR "ruled out" OR questionable) min_faves:50']
@@ -110,6 +112,7 @@ key = "mlb"
 name = "MLB"
 sport = "baseball"
 wikidata = "Q1163715"
+mise_o_jeu = ["BASEBALL|Etats-Unis / MLB"]
 subreddits = ["baseball", "mlb"]
 team_subreddits = true
 x_queries = ['MLB ("starting pitcher" OR lineup OR scratched OR "injured list") min_faves:30']
@@ -174,6 +177,7 @@ key = "mls"
 name = "MLS"
 sport = "soccer"
 wikidata = "Q18543"
+mise_o_jeu = ["FOOTBALL|États-Unis / US Major League Soccer"]
 subreddits = ["MLS"]
 team_subreddits = true
 
@@ -201,6 +205,25 @@ name = "UEFA Europa League"
 sport = "soccer"
 subreddits = ["soccer"]
 covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
+
+# National-team soccer. National teams carry no "league" claim on Wikidata, so these
+# have no team list: their posts are crawled and stored, players resolve through the
+# club leagues they `cover`, and country names ("France") are not matched.
+[[league]]
+key = "nations_league"
+name = "UEFA Nations League"
+sport = "soccer"
+mise_o_jeu = ["FOOTBALL|Européen / Ligue des nations de l'UEFA"]
+subreddits = ["soccer"]
+covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
+
+[[league]]
+key = "intl_friendlies"
+name = "International friendlies"
+sport = "soccer"
+mise_o_jeu = ["FOOTBALL|Monde / Amicaux internationaux"]
+subreddits = ["soccer"]
+covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira", "mls", "ligamx"]
 
 # --- individual sports ----------------------------------------------------------------
 # Top athletes of the sport by Wikipedia coverage, born in the last 40 years.
