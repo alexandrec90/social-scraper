@@ -13,6 +13,8 @@ well. The local copy is the staging buffer `.claude/rules/data-lake.md` names an
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -24,6 +26,35 @@ from social_scraper.config import Settings
 # S3 error codes that mean "no such object" (R2 and AWS answer GET with NoSuchKey,
 # HEAD with a bare 404).
 _MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+# Pauses between attempts at a local rename the OS refused, about 8 s in all. On Windows
+# a rename onto a file another process has open -- data-lake reading the catalog, the
+# virus scanner on a part it just saw written -- fails with WinError 32 until that
+# handle closes, which is a moment, not a fault. Failing the dataset on it failed the
+# whole scheduled scrape (2026-10-06, `_catalog/social_scraper_posts.json`).
+REPLACE_RETRY_DELAYS_S: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+
+
+def replace_with_retry(
+    source: Path,
+    target: Path,
+    *,
+    delays: tuple[float, ...] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """`source.replace(target)`, retried while the OS refuses it as in use.
+
+    Only `PermissionError` is retried -- what a sharing violation raises. A refusal that
+    outlasts every pause is a real one and propagates, so the dataset still fails.
+    `delays` defaults to `REPLACE_RETRY_DELAYS_S`, read at call time.
+    """
+    for delay in REPLACE_RETRY_DELAYS_S if delays is None else delays:
+        try:
+            source.replace(target)
+            return
+        except PermissionError:
+            sleep(delay)
+    source.replace(target)
 
 
 class StoreError(OSError):
@@ -77,10 +108,10 @@ class LocalStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_bytes(data)
-        tmp.replace(path)
+        replace_with_retry(tmp, path)
 
     def promote(self, staged: str, key: str) -> None:
-        self.path(staged).replace(self.path(key))
+        replace_with_retry(self.path(staged), self.path(key))
 
     def delete(self, key: str) -> None:
         self.path(key).unlink(missing_ok=True)
