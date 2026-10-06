@@ -228,6 +228,21 @@ def test_both_stores_are_object_stores(tmp_path, s3_client):
     assert not isinstance(object(), ObjectStore)
 
 
+def test_a_local_lock_sits_beside_its_object(tmp_path):
+    key = "_catalog/social_scraper_posts.json"
+    assert (
+        LocalStore(tmp_path).lock_path(key) == tmp_path / "_catalog/social_scraper_posts.json.lock"
+    )
+
+
+def test_a_bucket_lock_is_machine_local_and_named_for_the_object(s3_client):
+    same = S3Store(s3_client, LAKE_BUCKET, "p").lock_path("_catalog/a.json")
+    assert same == S3Store(s3_client, LAKE_BUCKET, "p").lock_path("_catalog/a.json")
+    assert same.parent.name == "social-scraper-locks" and same.suffix == ".lock"
+    assert same != S3Store(s3_client, LAKE_BUCKET, "q").lock_path("_catalog/a.json")
+    assert same != S3Store(s3_client, LAKE_BUCKET, "p").lock_path("_catalog/b.json")
+
+
 def test_stores_for_s3_without_a_bucket_is_a_store_error(tmp_path, s3_client):
     with pytest.raises(StoreError, match="ARCHIVE_S3_BUCKET"):
         stores_for(IsolatedSettings(archive_backend="s3"), client=s3_client)

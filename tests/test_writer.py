@@ -1,3 +1,5 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pyarrow as pa
@@ -129,6 +131,31 @@ def test_older_file_without_a_new_column_still_merges(tmp_path):
     table = pq.read_table(path).to_pylist()
     assert result.rows == 2
     assert {r["id"]: r["score"] for r in table} == {"old": None, "new": 1}
+
+
+def test_concurrent_writers_never_drop_each_others_catalog_entries(tmp_path, monkeypatch):
+    """Regression: the live export and a backfill each loaded the catalog, added their
+    partition and wrote it back; whichever wrote second erased the other's entry
+    (2026-10-06: two of 4,018 backfilled days went missing from the posts catalog)."""
+    real_write = manifest.write
+
+    def slow_write(*args, **kwargs):
+        time.sleep(0.3)  # widen the load -> write window so both writers are inside it
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(manifest, "write", slow_write)
+
+    def write(part):
+        return write_partition(LocalStore(tmp_path), SPEC, part, rows((part, 1)), NOW)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(write, f"demo/dt={d}") for d in "ab"]
+        for future in futures:
+            future.result()  # re-raises a writer's error here
+    listed = manifest.load(LocalStore(tmp_path), SPEC.name)["partitions"]
+    assert set(listed) == {f"demo/dt=a/{PART_FILE}", f"demo/dt=b/{PART_FILE}"}
+    # The locks are released, not left behind for the next writer to wait on.
+    assert not list(tmp_path.rglob("*.lock"))
 
 
 def test_parquet_bytes_round_trip():

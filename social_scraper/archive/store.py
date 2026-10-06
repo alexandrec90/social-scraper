@@ -13,6 +13,8 @@ well. The local copy is the staging buffer `.claude/rules/data-lake.md` names an
 
 from __future__ import annotations
 
+import hashlib
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from social_scraper.archive.lock import LOCK_SUFFIX
 from social_scraper.config import Settings
 
 # S3 error codes that mean "no such object" (R2 and AWS answer GET with NoSuchKey,
@@ -85,6 +88,10 @@ class ObjectStore(Protocol):
         """Remove `key`; absent is not an error."""
         ...
 
+    def lock_path(self, key: str) -> Path:
+        """The local file `archive.lock.file_lock` takes to update `key` alone."""
+        ...
+
 
 class LocalStore:
     """The archive as a plain directory tree."""
@@ -115,6 +122,11 @@ class LocalStore:
 
     def delete(self, key: str) -> None:
         self.path(key).unlink(missing_ok=True)
+
+    def lock_path(self, key: str) -> Path:
+        # Beside the object, so any process writing this tree -- whatever its user, temp
+        # dir or checkout -- finds the same lock. No reader globs `*.lock`.
+        return self.path(key + LOCK_SUFFIX)
 
 
 def _is_missing(exc: ClientError) -> bool:
@@ -171,6 +183,13 @@ class S3Store:
             self.client.delete_object(Bucket=self.bucket, Key=self.object_key(key))
         except (ClientError, BotoCoreError) as exc:
             raise self._fail("delete", key, exc) from exc
+
+    def lock_path(self, key: str) -> Path:
+        # S3 has no lock primitive, so the lock is a machine-local file named for the
+        # bucket object: every writer on this machine -- the one data PC -- takes turns.
+        # Writers on two machines would not; nothing runs that way today.
+        digest = hashlib.sha256(f"{self.name}/{key}".encode()).hexdigest()[:32]
+        return Path(tempfile.gettempdir()) / "social-scraper-locks" / (digest + LOCK_SUFFIX)
 
 
 def make_s3_client(settings: Settings) -> Any:
