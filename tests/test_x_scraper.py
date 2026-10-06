@@ -9,7 +9,6 @@ from social_scraper.fetch import FetchFailed, PageResult, Payload
 from social_scraper.pipeline import Ingestor
 from social_scraper.throttle import (
     CHALLENGED,
-    ERROR,
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
@@ -19,11 +18,13 @@ from social_scraper.throttle import (
 )
 from social_scraper.x import accounts
 from social_scraper.x import scraper as scraper_mod
-from social_scraper.x.discovery import SEED, TRACKED
+from social_scraper.x.discovery import DROPPED, SEED, TRACKED
 from social_scraper.x.scraper import (
+    EMPTY,
     QUERY_INDEX_KEY,
     SEARCHED_PREFIX,
     TIMELINE_OPS,
+    UNAVAILABLE,
     XPlan,
     XScraper,
     classify,
@@ -36,6 +37,8 @@ GQL = "https://x.com/i/api/graphql/abc/SearchTimeline?variables=1"
 TIMELINE_GQL = (
     "https://x.com/i/api/graphql/qtvmQffnepvr0oPe4A8MqQ/UserOriginalsTimeline?variables=1"
 )
+# The apostrophe X prints on a missing profile.
+CURLY = chr(0x2019)
 ALICE = x_user_classic("100", "alice", followers=20_000)
 BOB = x_user_classic("200", "bob", followers=3_000)
 
@@ -101,12 +104,134 @@ def test_timeline_filter_takes_the_profile_posts_op():
             PageResult(200, "https://x.com/s", text="Something went wrong. Try reloading."),
             RATE_LIMITED,
         ),
-        (PageResult(200, "https://x.com/s"), ERROR),
+        (PageResult(200, "https://x.com/s"), EMPTY),
+        (
+            PageResult(200, "https://x.com/gone", text=f"This account doesn{CURLY}t exist"),
+            UNAVAILABLE,
+        ),
+        (PageResult(200, "https://x.com/gone", text="Account suspended"), UNAVAILABLE),
+        (PageResult(200, "https://x.com/shy", text="These posts are protected"), UNAVAILABLE),
         (PageResult(200, "https://x.com/s", payloads=[Payload(GQL, 200, {})]), OK),
     ],
 )
 def test_classify(result, outcome):
     assert classify(result)[0] == outcome
+
+
+def tracked(engine, *handles):
+    """Tracked accounts, never visited: each cycle's timelines go to them first."""
+    with engine.begin() as conn:
+        accounts.add_seeds(conn, handles, NOW)
+        accounts.apply(conn, {f"seed:{h}": (TRACKED, 1.0) for h in handles})
+
+
+def rows_by_handle(engine):
+    with engine.connect() as conn:
+        return {r.handle: r for r in accounts.load(conn)}
+
+
+def two_timelines(engine, universe, browser, clock=None):
+    """A cycle of two profile visits and no search (nothing to search for)."""
+    return scraper(engine, universe, browser, clock, pages=3, search_share=0.3, queries=())
+
+
+def test_one_empty_profile_among_loaded_ones_is_the_account_not_a_failure(engine, universe):
+    """2026-10-06: one tracked profile came back empty, the other read fine, and the
+    whole scrape failed -- and, the visit unrecorded, it was first in line again."""
+    tracked(engine, "alice", "dead")
+    browser = FakeBrowser(
+        {
+            "https://x.com/alice": timeline_page(x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",))),
+            "https://x.com/dead": PageResult(200, "https://x.com/dead"),
+        }
+    )
+    clock = Clock()
+    stats = two_timelines(engine, universe, browser, clock).run()
+    assert stats.errors == []
+    assert any(n.startswith("@dead: no timeline data captured") for n in stats.notices)
+    dead = rows_by_handle(engine)["dead"]
+    assert dead.last_timeline_at is not None and dead.status == TRACKED
+
+    clock.now = NOW + timedelta(days=2)
+    stats = two_timelines(engine, universe, browser, clock).run()
+    assert stats.errors == []
+    assert any(n.startswith("@dead:") and n.endswith("-- dropped") for n in stats.notices)
+    assert rows_by_handle(engine)["dead"].status == DROPPED
+
+
+def test_a_profile_that_reads_resets_the_accounts_misses(engine, universe):
+    tracked(engine, "alice", "flaky")
+    flaky = PageResult(200, "https://x.com/flaky")
+    alice = timeline_page(x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",)))
+    browser = FakeBrowser({"https://x.com/alice": alice, "https://x.com/flaky": flaky})
+    clock = Clock()
+    two_timelines(engine, universe, browser, clock).run()
+    browser.pages["https://x.com/flaky"] = timeline_page(url="https://x.com/flaky")
+    clock.now = NOW + timedelta(days=2)
+    two_timelines(engine, universe, browser, clock).run()
+    browser.pages["https://x.com/flaky"] = flaky
+    clock.now = NOW + timedelta(days=4)
+    stats = two_timelines(engine, universe, browser, clock).run()
+    assert stats.errors == []
+    assert rows_by_handle(engine)["flaky"].status == TRACKED  # one miss since it last read
+
+
+def test_empty_profiles_in_a_row_are_x_layout_and_fail_the_cycle(engine, universe):
+    """2026-10-03: a renamed op emptied every profile. That must still fail, and must
+    not be held against the accounts."""
+    tracked(engine, "carol", "dave")
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/someone")
+    stats = two_timelines(engine, universe, browser).run()
+    assert len(stats.notices) == 1
+    assert len(stats.errors) == 1 and "X's layout" in stats.errors[0]
+    rows = rows_by_handle(engine)
+    assert all(r.status == TRACKED for r in rows.values())
+    # The second account's visit is not recorded: it is revisited once X is read again.
+    assert sum(r.last_timeline_at is None for r in rows.values()) == 1
+
+
+def test_the_layout_streak_spans_cycles(engine, universe):
+    tracked(engine, "erin")
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/erin")
+    clock = Clock()
+
+    def one_visit():
+        return scraper(engine, universe, browser, clock, pages=2, search_share=0.3, queries=())
+
+    assert one_visit().run().errors == []
+    clock.now = NOW + timedelta(hours=1)
+    assert "X's layout" in one_visit().run().errors[0]
+
+
+def test_an_unavailable_account_is_dropped_at_once_and_is_no_strike(engine, universe):
+    tracked(engine, "alice", "gone")
+    browser = FakeBrowser(
+        {
+            "https://x.com/alice": timeline_page(x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",))),
+            "https://x.com/gone": PageResult(
+                200, "https://x.com/gone", text=f"This account doesn{CURLY}t exist\nTry searching"
+            ),
+        }
+    )
+    s = two_timelines(engine, universe, browser)
+    stats = s.run()
+    assert stats.errors == []
+    assert any("account unavailable" in n and n.endswith("-- dropped") for n in stats.notices)
+    assert rows_by_handle(engine)["gone"].status == DROPPED
+    assert s.throttle.store.get_block("x").consecutive_failures == 0
+
+
+def test_an_unavailable_seed_is_kept_and_named(engine, universe):
+    with engine.begin() as conn:
+        accounts.add_seeds(conn, ["gone"], NOW)
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/gone", text="Account suspended")
+    stats = scraper(engine, universe, browser, pages=2, search_share=0.3, queries=()).run()
+    assert stats.errors == []
+    assert any("take it out of the seed list" in n for n in stats.notices)
+    assert rows_by_handle(engine)["gone"].status == SEED
 
 
 def test_first_cycle_is_all_discovery(engine, universe):

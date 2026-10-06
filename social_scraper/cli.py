@@ -131,8 +131,21 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         print(f"FAILED -- details in {write_report(report, settings.logs_dir)}")
         raise
     path = write_report(report, settings.logs_dir)
-    print(f"{'ok' if report.ok else 'FAILED'} -- details in {path}")
+    print(outcome_line(report, path))
     return 0 if report.ok else 1
+
+
+def outcome_line(report: RunReport, path: Path) -> str:
+    """The scrape's last word, which devkit's scheduler files as a failure's cause.
+
+    A failure leads with its first error, minus the URL: a bare `FAILED` made a renamed
+    X op and one dead account one ledger group, read as a fix that did not hold
+    (2026-10-06). The URL, and every other error, are in the report.
+    """
+    if report.ok:
+        return f"ok -- details in {path}"
+    first = report.errors[0].split(" <- ")[0]
+    return f"FAILED -- {first[:160]} -- details in {path}"
 
 
 def cmd_run(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:

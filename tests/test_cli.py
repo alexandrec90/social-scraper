@@ -172,9 +172,26 @@ def report_body(settings):
 def test_scrape_writes_the_report_and_sets_exit_code(settings, engine, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", errors=["x: boom"]))
     assert cmd_scrape(settings, engine, scrape_args()) == 1
-    assert "FAILED" in capsys.readouterr().out
+    assert "FAILED -- x: boom -- details in" in capsys.readouterr().out
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
     assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert "ok -- details in" in capsys.readouterr().out
+
+
+def test_a_failed_scrape_names_its_first_error_without_the_url(tmp_path):
+    """devkit files this line as the failure's cause: a bare `FAILED` made two
+    unrelated X failures one ledger group (2026-10-06)."""
+    report = RunReport(
+        "t",
+        errors=[
+            "x: error: no timeline data captured (layout change or empty page) <- https://x.com/a",
+            "reddit: later",
+        ],
+    )
+    line = cli.outcome_line(report, tmp_path / "scrape-run.json")
+    assert line.startswith("FAILED -- x: error: no timeline data captured (layout change")
+    assert "x.com/a" not in line and "reddit" not in line
+    assert line.endswith("scrape-run.json")
 
 
 def test_scrape_with_the_database_down_raises_and_overwrites_the_report(settings, tmp_path):

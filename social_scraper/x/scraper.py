@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from sqlalchemy import Table
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from social_scraper.db import repository, schema
 from social_scraper.fetch import Browser, FetchFailed, PageResult
@@ -37,7 +37,6 @@ from social_scraper.pipeline import Ingestor, IngestStats, PostIngestor
 from social_scraper.symbols.extract import extract_mentions
 from social_scraper.throttle import (
     CHALLENGED,
-    ERROR,
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
@@ -63,9 +62,32 @@ _LOGIN_PATHS = (
 )
 _LOCKED_PATHS = ("/account/access", "/account/suspended")
 _RATE_TEXT = ("rate limit exceeded", "something went wrong. try reloading")
+# What X's profile page says in place of a timeline when the account itself is why there
+# is none: deleted or renamed, suspended, protected. X prints a curly apostrophe, which
+# `classify` folds to a straight one.
+_CURLY_APOSTROPHE = chr(0x2019)
+_UNAVAILABLE_TEXT = (
+    "this account doesn't exist",
+    "account suspended",
+    "these posts are protected",
+    "these tweets are protected",
+)
 SEARCHED_PREFIX = "x:searched:"
 QUERY_INDEX_KEY = "x:generic_query_index"
 TRENDING_WINDOW = timedelta(hours=24)
+
+# A page load that captured no timeline (or search) data at all.
+EMPTY = "empty"
+# A profile X served normally, saying the account is gone or protected.
+UNAVAILABLE = "unavailable"
+# Empty profile loads in a row, across accounts, at which X's layout -- not the accounts
+# -- is the cause: on 2026-10-03 a renamed op emptied every profile. One empty profile
+# among loaded ones is that account (2026-10-06: one of two, the other read fine).
+LAYOUT_STREAK = 2
+# Empty visits in a row after which a tracked account is dropped.
+MAX_EMPTY_VISITS = 2
+EMPTY_STREAK_PREFIX = "x:empty_timeline_streak:"
+EMPTY_VISITS_PREFIX = "x:empty_visits:"
 
 
 def graphql_filter(ops: tuple[str, ...]) -> Callable[[str], bool]:
@@ -78,7 +100,7 @@ def search_url(query: str, latest: bool) -> str:
 
 def classify(result: PageResult) -> tuple[str, str]:
     """What an X page load means for the throttle: `(outcome, detail)`."""
-    url, text = result.final_url, result.text.lower()
+    url, text = result.final_url, result.text.lower().replace(_CURLY_APOSTROPHE, "'")
     if any(p in url for p in _LOGIN_PATHS):
         return LOGIN_REQUIRED, "not logged in -- run `uv run social-scraper login x`"
     if any(p in url for p in _LOCKED_PATHS):
@@ -88,7 +110,9 @@ def classify(result: PageResult) -> tuple[str, str]:
     if not result.payloads:
         if any(marker in text for marker in _RATE_TEXT):
             return RATE_LIMITED, "rate-limit page"
-        return ERROR, "no timeline data captured (layout change or empty page)"
+        if any(marker in text for marker in _UNAVAILABLE_TEXT):
+            return UNAVAILABLE, "account unavailable (deleted, suspended or protected)"
+        return EMPTY, "no timeline data captured (layout change or empty page)"
     return OK, ""
 
 
@@ -204,7 +228,17 @@ class XCrawler:
             )
 
     def timeline(self, account: discovery.AccountRow) -> None:
-        result = self.fetch(f"{X_BASE}/{quote(account.handle)}", TIMELINE_OPS, "timeline")
+        try:
+            result = self.fetch(f"{X_BASE}/{quote(account.handle)}", TIMELINE_OPS, "timeline")
+        except FetchFailed as exc:
+            if exc.outcome not in (EMPTY, UNAVAILABLE):
+                raise
+            self.empty_timeline(account, exc)
+            return
+        self.read_timeline(account, result)
+
+    def read_timeline(self, account: discovery.AccountRow, result: PageResult) -> None:
+        """Store a loaded profile's on-topic tweets and add the visit to its evidence."""
         posts = parse_payloads([p.data for p in result.payloads], channel="timeline")
         handle = account.handle.lower()
         own = [p for p in posts if (p.author.name or "").lower() == handle]
@@ -214,6 +248,7 @@ class XCrawler:
         self.stats.ingest.add(self.ingestor.ingest(relevant))
         table = self.accounts_table
         with self.engine.begin() as conn:
+            self._clear_empty(conn, account)
             user_id = account.user_id
             if own and own[0].author.user_id:
                 user_id = accounts.resolve_seed(conn, user_id, own[0].author.user_id, table)
@@ -227,6 +262,52 @@ class XCrawler:
             self.stats.new_accounts += accounts.observe(
                 conn, amplified, accounts.AMPLIFIED, self.clock(), table
             )
+
+    def empty_timeline(self, account: discovery.AccountRow, exc: FetchFailed) -> None:
+        """A profile that showed no timeline: the account's problem, unless it keeps happening.
+
+        One dead account must not fail the cycle, nor be picked first again next cycle
+        (an unrecorded visit leaves it the most overdue). So the visit is recorded, and a
+        tracked account is dropped once X says it is gone or it comes back empty
+        `MAX_EMPTY_VISITS` times. `LAYOUT_STREAK` empty profiles in a row, whoever they
+        belong to, are X's layout: an error, held against no account.
+        """
+        now, table = self.clock(), self.accounts_table
+        streak_key = EMPTY_STREAK_PREFIX + table.name
+        misses_key = f"{EMPTY_VISITS_PREFIX}{table.name}:{account.user_id}"
+        with self.engine.begin() as conn:
+            if exc.outcome == EMPTY:
+                streak = int(repository.get_state(conn, streak_key) or 0) + 1
+                repository.set_state(conn, streak_key, str(streak), now)
+                if streak >= LAYOUT_STREAK:
+                    self.stats.errors.append(
+                        f"error: {streak} profile loads in a row captured no timeline "
+                        f"(X's layout, not the accounts) <- {X_BASE}/{account.handle}"
+                    )
+                    return
+                misses = int(repository.get_state(conn, misses_key) or 0) + 1
+                repository.set_state(conn, misses_key, str(misses), now)
+                gone = misses >= MAX_EMPTY_VISITS
+            else:
+                gone = True
+            accounts.record_visit(conn, account.user_id, accounts.TimelineSample(0, 0), now, table)
+            note = f"@{account.handle}: {exc.detail}"
+            if gone and account.status == discovery.TRACKED:
+                score = discovery.score_account(account)
+                accounts.apply(conn, {account.user_id: (discovery.DROPPED, score)}, table)
+                note += " -- dropped"
+            elif gone:
+                note += " -- a seed: take it out of the seed list"
+        self.stats.notices.append(note)
+
+    def _clear_empty(self, conn: Connection, account: discovery.AccountRow) -> None:
+        """A profile read fine: the empty-profile streak and this account's misses end."""
+        for key in (
+            EMPTY_STREAK_PREFIX + self.accounts_table.name,
+            f"{EMPTY_VISITS_PREFIX}{self.accounts_table.name}:{account.user_id}",
+        ):
+            if repository.get_state(conn, key) not in (None, "0"):
+                repository.set_state(conn, key, "0", self.clock())
 
     def reconcile(self) -> None:
         with self.engine.begin() as conn:
@@ -245,7 +326,8 @@ class XCrawler:
         )
         self.stats.requests += 1
         outcome, detail = classify(result)
-        self.throttle.record(outcome, kind, result.status, detail)
+        # X answering "this account is gone" is X working: no strike against the platform.
+        self.throttle.record(OK if outcome == UNAVAILABLE else outcome, kind, result.status, detail)
         if outcome != OK:
             raise FetchFailed(outcome, f"{detail} <- {url}")
         return result
