@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.48",
+  "devkit_tag": "v0.11.49",
   "files": {
     ".claude/engineering-evidence.md": "c1f5a57dc081b8c09014f80fdafb7c73bda3cdf689bfa3c4e08639bf600b7ebe",
     ".claude/fixer.md": "aea4596d9e27ad0004e4853252b8bdd054a264b4c60409a74fe3ecf6fd3015c0",
@@ -50,7 +50,7 @@
     "scripts/hooks/tests/test_report_workflow_failure.py": "6455b008a1039ef7111c8d98cb222305bb40f8ffbbdd3257701b2b8c372c5db3",
     "scripts/hooks/tests/test_session_start.py": "92e5354054cd8470f12209d640b457e8898723f732b7541359a0bc9792b96438",
     "scripts/hooks/tests/test_session_sync.py": "6cd9195b308cfc3b75ebcbf6e8088078584931eb4f7b71da8534c409eb971ea2",
-    "scripts/hooks/tests/test_ship.py": "cc88c384389756142e22b2520047d06c41bc824321c43457cc55ca778c80faa5",
+    "scripts/hooks/tests/test_ship.py": "68cd08afe1514168cc2ef92202e9469d36d307e0e4d9d733e0ee0ba1ef461b2a",
     "scripts/hooks/tests/test_stop.py": "b1dcabdd203c2e048357d12792f47891c3c8d069417cceeee584d6c27bb6eefa",
     "scripts/hooks/tests/test_stop_session.py": "adf05353d474dd977941f6372efc6b4395538e0312ff27033e43b440522aeb0f",
     "scripts/hooks/tests/test_structure_baseline.py": "df2b3f10392f799d230ae0f6ab4496f2e904db54eb370727bbb61fde5f4154db",
@@ -74,7 +74,7 @@
     "scripts/project_settings.py": "ddbd549b25ce4f44adb22ebdb5c0c29d6384801f18bd7e642e67ca97b6705549",
     "scripts/pytest-plugins/devkit_temproot.py": "5e293d8ca461ef40e94c8f4f957667967574798b3393bc6cd68ace45767e713d",
     "scripts/report-workflow-failure.py": "ff3a73eb4e4a7df12ee7ff0080df4c4286b4b86620ea4a72ff5d47295c84b0ed",
-    "scripts/ship.py": "f54e6a63745353a6817d9199cdc0918b7d5da499cea88a4086581070ee8c0cf0",
+    "scripts/ship.py": "49db8d82daf549fe81e24ac82d5479f9b1a68a1870775e9c9e9747954bfc063d",
     "scripts/sync-codex-context.py": "1c71032db6058751ef56514b831cda9bd5faa72a470256b3b7ac84cb9208ff00",
     "scripts/sync-codex-hooks.py": "376c84d6c2e046e8d2a8b0db94c2efa05797326e95e555d8242d671401d61ed1",
     "scripts/sync-devkit.py": "5e4709be265a799810bfee9c442d30edb2e99a0ce7ee7eac55704ad3fe685714",

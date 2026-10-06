@@ -273,6 +273,39 @@ def test_the_runner_is_asked_for_paths_only_when_it_understands_them():
     assert legacy[-1] == "--changed"
 
 
+def test_the_lint_runner_is_run_under_the_interpreter_it_is_handed():
+    argv = ship._lint_argv(["a.py"], "--paths FILE", "/tree/.venv/bin/python")
+    assert argv[0] == "/tree/.venv/bin/python"
+    assert ship._lint_argv([], "", "/tree/.venv/bin/python")[0] == "/tree/.venv/bin/python"
+
+
+def test_the_lint_gate_uses_the_tree_venv_when_this_interpreter_has_no_ruff(tmp_path, monkeypatch):
+    """db3e57f7: roguelike's own lint-all.py, run without ruff, skipped it and said clean."""
+    venv = ship.toolchain.venv_python(tmp_path)
+    venv.parent.mkdir(parents=True)
+    venv.write_text("", encoding="utf-8")
+    monkeypatch.setattr(ship.toolchain, "has_module", lambda module: False)
+    assert ship.lint_python(tmp_path, env={}) == str(venv)
+
+
+def test_the_lint_gate_keeps_an_interpreter_that_has_ruff(tmp_path, monkeypatch):
+    monkeypatch.setattr(ship.toolchain, "has_module", lambda module: True)
+    assert ship.lint_python(tmp_path, env={"CI": "1"}) == sys.executable
+
+
+def test_the_lint_gate_inside_a_rerun_stays_where_it_is(tmp_path, monkeypatch):
+    """A re-run's own gate must not hop again, or a venv without ruff would loop."""
+    monkeypatch.setattr(ship.toolchain, "has_module", lambda module: False)
+    rerun = {ship.toolchain.RERUN_ENV: "1"}
+    assert ship.lint_python(tmp_path, env=rerun) == sys.executable
+
+
+def test_the_lint_gate_without_a_venv_on_ci_stays_where_it_is(tmp_path, monkeypatch):
+    """CI never provisions, so with no `.venv` the gate runs as it always did."""
+    monkeypatch.setattr(ship.toolchain, "has_module", lambda module: False)
+    assert ship.lint_python(tmp_path, env={"CI": "1"}) == sys.executable
+
+
 def test_an_empty_branch_diff_keeps_the_old_behaviour():
     assert (
         ship._lint_argv([], "usage: lint-all.py [--changed] [--paths FILE ...]")[-1] == "--changed"
