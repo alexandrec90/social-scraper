@@ -98,6 +98,32 @@ _PY_SUPPRESSION = re.compile(
     r"#\s*(noqa|type:\s*ignore|nosec|pragma:\s*no\s*cover|pyright:\s*ignore|"
     r"ruff:\s*noqa|mypy:\s*ignore|fmt:\s*(off|skip))"
 )
+# What explains a suppression, written after it: a dash, `because`, `;` or a second
+# comment marker, then a word. Only an unexplained one counts, because the remedy the
+# gate prints is to name the reason, and a named one still counting cost a session a
+# check cycle (7d307f16); `engineering.md`'s lint policy asks for exactly that form.
+_DASHES = "-\N{EN DASH}\N{EM DASH}"
+_REASON = re.compile(rf"(?:\s[{_DASHES}]{{1,2}}|#|//|;|\bbecause\b)\s*[A-Za-z]")
+
+
+def unexplained(pattern: re.Pattern[str], comments: str) -> int:
+    """How many of `pattern`'s matches in `comments` carry no reason on their own line
+    before the next match, so one comment's reason never explains another's."""
+    hits = list(pattern.finditer(comments))
+    if not hits:
+        return 0
+    ends = [m.start() for m in hits[1:]] + [len(comments)]
+    return sum(
+        not _REASON.search(comments, m.end(), min(end, _line_end(comments, m.end())))
+        for m, end in zip(hits, ends, strict=True)
+    )
+
+
+def _line_end(text: str, at: int) -> int:
+    newline = text.find("\n", at)
+    return len(text) if newline < 0 else newline
+
+
 _TODO = re.compile(r"\b(TODO|FIXME|XXX|HACK)\b")
 _PY_SKIP = re.compile(
     r"\bpytest\.mark\.(skip|skipif|xfail)\b|\bpytest\.(skip|xfail)\s*\("
@@ -263,7 +289,7 @@ def scan_python(text: str) -> FileMetrics | None:
             swallowed += 1
     comments = python_comments(text)
     counts = {
-        "suppressions": sum(bool(_PY_SUPPRESSION.search(c)) for c in comments),
+        "suppressions": sum(bool(unexplained(_PY_SUPPRESSION, c)) for c in comments),
         "any_types": 0,
         "todos": sum(bool(_TODO.search(c)) for c in comments),
         "skipped_tests": len(_PY_SKIP.findall(_without_comments(text, comments))),
@@ -650,7 +676,7 @@ def scan_js(text: str, react: bool = False) -> FileMetrics:
             modules.append(spec)
     comment_text = "\n".join(comments)
     counts = {
-        "suppressions": len(_JS_SUPPRESSION.findall(comment_text)),
+        "suppressions": unexplained(_JS_SUPPRESSION, comment_text),
         "any_types": len(_JS_ANY.findall(masked)),
         "todos": len(_TODO.findall(comment_text)),
         "skipped_tests": len(_JS_SKIP.findall(masked)),

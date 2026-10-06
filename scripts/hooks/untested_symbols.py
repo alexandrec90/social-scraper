@@ -420,6 +420,13 @@ def module_pattern(module: Path) -> re.Pattern[str]:
     vendors, where `load_script` may not exist. One assertion form left admitting is a
     far smaller surface than every mention in the file, and narrowing it further wants
     the call's *callee*, which means parsing rather than matching.
+
+    **An import by name** -- `pytest.importorskip("pkg.sub.mod")`,
+    `importlib.import_module(...)`, `__import__(...)` -- is the fifth way, and the one a
+    test of a module behind an optional dependency is written in. Missing it, every
+    public symbol of such a module read as untested while its test called each one
+    (1effb775). Here the callee *is* named, because these are the import machinery's own
+    spellings rather than one repo's test idiom; the dotted name must end on the stem.
     """
     filename = re.escape(module.name)
     snake = re.escape(module.stem.replace("-", "_"))
@@ -427,6 +434,8 @@ def module_pattern(module: Path) -> re.Pattern[str]:
         # path spelling, in the position that reaches a module rather than names one:
         # load_module('scripts/sync-devkit.py'), REPO_ROOT / 'scripts/sync-devkit.py'
         rf"""[(/]\s*["'][^"']*{filename}["']"""
+        # an import by name: pytest.importorskip('pkg.sync_devkit'), import_module(...)
+        rf"""|\b(?:importorskip|import_module|__import__)\(\s*["'](?:[\w.]+\.)?{snake}["']"""
         rf"|^\s*(?:import|from)\s+.*\b{snake}\b"  # import sync_devkit / from x import ...
         rf"|\b{snake}\s*\."  # sync_devkit.main
         rf"|\b{snake}\b\s*=",  # sync_devkit = load(...)

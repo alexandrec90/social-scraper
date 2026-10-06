@@ -106,7 +106,8 @@ REMEDIES: dict[str, str] = {
     "component_lines": "extract child components and hooks",
     "react_state": "fold related useState calls into a reducer or a custom hook",
     "react_effects": "move effects into custom hooks, or derive the value instead",
-    "suppressions": "fix what the tool found, or name the reason on the suppression",
+    "suppressions": "fix what the tool found, or name the reason after the suppression "
+    "(`noqa: E402 - why`, `eslint-disable-line x -- why`)",
     "any_types": "give it a type; `unknown` if the shape is truly open",
     "todos": "do it, or file it and delete the comment",
     "skipped_tests": "un-skip it, or delete it with the reason in the commit",

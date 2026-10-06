@@ -12,6 +12,7 @@ requires an empty-on-success artifact to prevent.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -114,6 +115,20 @@ def test_the_child_writes_the_utf8_this_wrapper_reads(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     code, output = lw.stream([sys.executable, "-c", "print('\\u2713 done')"])
     assert (code, output.strip()) == (0, "✓ done")
+
+
+def test_the_child_s_two_streams_arrive_in_the_order_it_wrote_them(monkeypatch):
+    """A Python child block-buffers stdout into a pipe and flushes it at exit, while
+    stderr goes out at once, so the merged output put every stdout line *after* every
+    stderr line. The cause is read from the last line: the 2026-10-06 Upgrade Projects
+    run warned on stderr that a release was owed, pointed at `logs/upgrade.log`, and was
+    filed as "social-scraper is already on devkit vN.N" -- its last stdout line (583d8e80)."""
+    assert lw.child_env({})["PYTHONUNBUFFERED"] == "1"
+    assert lw.child_env({"PYTHONUNBUFFERED": ""})["PYTHONUNBUFFERED"] == ""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    script = "import sys; print('first'); print('second', file=sys.stderr); print('third')"
+    code, output = lw.stream([sys.executable, "-c", script])
+    assert (code, output.split()) == (0, ["first", "second", "third"])
 
 
 # --- capping ------------------------------------------------------------------
@@ -504,6 +519,20 @@ def test_an_unattended_failure_records_its_cause_so_two_causes_are_two_defects(
         # pytest's first failed test, not the count line after it.
         ("FAILED tests/test_a.py::test_b - assert 1\n=== 1 failed, 9 passed in 3.2s ===\n", None),
         ("ok\nerror: pathspec 'x' did not match\n", "error: pathspec 'x' did not match"),
+        # 6ba2230e: a summary pointing at an artifact names no cause, so every failure
+        # of a collector was one group; the logged record that failed is the cause,
+        # read from its level on so the timestamp is not part of it.
+        (
+            "2026-10-05 23:44:23,102 WARNING social_scraper.export: export of posts failed: "
+            "[WinError 32] in use\nwaiting 124 s\nFAILED -- details in logs\\scrape-run.json\n",
+            "WARNING social_scraper.export: export of posts failed: [WinError N] in use",
+        ),
+        (
+            "WARNING a: slow\nERROR:root:db gone\nFAILED -- details in x.json\n",
+            "ERROR:root:db gone",
+        ),
+        # With nothing else said, the pointer is still where to look.
+        ("FAILED -- details in logs/run.json\n", "FAILED -- details in logs/run.json"),
         # Nothing error-shaped: the last line said is the best there is.
         ("step 1\nstep 2\n\n", "step N"),
         ("", ""),
@@ -546,6 +575,86 @@ def test_a_failure_files_the_line_as_said_beside_its_folded_cause(tmp_path, monk
     assert "error: 403" in pushed["said"] and "github.com/someone" in pushed["said"]
     assert pushed["cause"] == lw.failure_cause(PUSH_403)
     assert "said" not in keyed, "nothing folded, so nothing said twice"
+
+
+SCRAPE_SAID = "FAILED -- details in logs\\scrape-run.json\n"
+
+
+def _scrape_report(tmp_path, errors):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    report = {"ok": False, "counts": {"x": 0}, "errors": errors}
+    (tmp_path / "logs" / "scrape-run.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_a_status_line_pointing_at_an_artifact_is_followed_into_it(tmp_path, monkeypatch):
+    """6d11553e: a job keeping its terminal to a status line plus the path -- the
+    failure-artifact rule's own shape -- printed `FAILED -- details in <file>` for every
+    failure, so a renamed X op and one dead profile were one cause, and the second read
+    as a fix that had not held. The cause is in the file the line names."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    for first in (
+        "x: error: no timeline data captured (layout change?) <- https://x.com/a",
+        "x: error: profile unavailable <- https://x.com/b",
+    ):
+        _scrape_report(tmp_path, [first, "reddit: later"])
+        lw.main(["--always", "Scrape", "--", "x"], run=lambda _c: (1, SCRAPE_SAID), root=tmp_path)
+
+    renamed, dead = (row["cause"] for row in _fields(ledger))
+    assert renamed != dead
+    assert renamed.startswith("x: error: no timeline data captured")
+    assert "reddit" not in renamed, "the first error, not the last"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "said"),
+    [
+        # A text artifact is read like output: its traceback's exception.
+        ("Traceback:\n  f()\nKeyError: 'k'\n", "KeyError: 'k'"),
+        # Nothing in it names a failure: the status line is still the best there is.
+        ('{"ok": false, "counts": {"x": 0}}', SCRAPE_SAID.strip()),
+        ("", SCRAPE_SAID.strip()),
+    ],
+)
+def test_the_artifact_is_read_by_its_own_shape(tmp_path, artifact, said):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "scrape-run.json").write_text(artifact, encoding="utf-8")
+    assert lw.cause_said(lw.cause_source(SCRAPE_SAID, tmp_path)) == said
+
+
+def test_a_python_job_s_closing_pointer_is_still_last_when_it_reaches_the_ledger(
+    tmp_path, monkeypatch
+):
+    """583d8e80, end to end through a real child: upgrade-project.py prints its per-project
+    lines on stdout and closes on stderr with the pointer to its artifact. Buffered, the
+    stdout lines came out after the pointer, so the ledger filed a bystander's "already
+    on devkit" line instead of the owed release the artifact names."""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    ledger = _ledger(tmp_path, monkeypatch)
+    (tmp_path / "logs").mkdir()
+    owed = "upgrade: devkit main carries 2 vendored change(s) v0.5.3 does not"
+    (tmp_path / "logs" / "upgrade.log").write_text(f"=== (release) ===\n{owed}\n", "utf-8")
+    script = (
+        "import sys; print('upgrade: carameli is already on devkit v0.5.3.'); "
+        "print('upgrade: details in logs/upgrade.log', file=sys.stderr); sys.exit(1)"
+    )
+
+    lw.main(["--always", "Up", "--", sys.executable, "-c", script], root=tmp_path)
+
+    [fields] = _fields(ledger)
+    assert fields["cause"] == lw.failure_cause(owed)
+
+
+def test_a_pointer_to_no_file_keeps_the_line_it_was_said_in(tmp_path):
+    assert lw.cause_source(SCRAPE_SAID, tmp_path) == SCRAPE_SAID
+    assert lw.cause_source("KeyError: k\n", tmp_path) == "KeyError: k\n", "no pointer, no read"
+
+
+def test_a_line_naming_its_cause_is_not_traded_for_the_artifact(tmp_path):
+    """social-scraper's fixed line leads with the error; the pointer after it is not
+    a reason to go elsewhere for what the line already says."""
+    _scrape_report(tmp_path, ["x: error: something else"])
+    said = "FAILED -- x: error: profile unavailable -- details in logs/scrape-run.json\n"
+    assert lw.cause_source(said, tmp_path) == said
 
 
 def test_a_ledger_that_cannot_be_written_does_not_fail_the_job(tmp_path, monkeypatch):
