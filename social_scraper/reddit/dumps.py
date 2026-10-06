@@ -47,6 +47,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -78,6 +79,7 @@ MAX_WINDOW = 2**31
 BACKFILL_KEY = "backfill"
 SPOOL_BATCH = 50_000
 READ_BATCH = 100_000
+READ_BUFFER = 1 << 20  # decompressed bytes per read from a `.zst`
 # DuckDB takes 80% of RAM by default; a full backfill's spool got the run killed for low
 # memory on a 16 GB desktop (2026-10-05). Capped, it spills to `temp_directory` instead,
 # and fewer threads keep fewer per-thread buffers alive.
@@ -303,14 +305,33 @@ def expand_inputs(paths: Iterable[Path]) -> list[Path]:
     return out
 
 
-def read_lines(path: Path) -> Iterator[str]:
-    """Lines of a dump file, decompressing `.zst`. Undecodable bytes become U+FFFD."""
+def read_lines(path: Path) -> Iterator[bytes]:
+    """Raw lines of a dump file, decompressing `.zst`.
+
+    Bytes, not text: `line_filter` rejects most lines of a full monthly dump before they
+    are worth decoding, and decoding ~400 GB a month to throw it away was most of the cost.
+    """
     with path.open("rb") as raw:
         if path.suffix.lower() == ".zst":
             reader = zstandard.ZstdDecompressor(max_window_size=MAX_WINDOW).stream_reader(raw)
-            yield from io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
+            yield from io.BufferedReader(reader, buffer_size=READ_BUFFER)
         else:
-            yield from io.TextIOWrapper(raw, encoding="utf-8", errors="replace")
+            yield from raw
+
+
+def line_filter(subreddits: frozenset[str]) -> re.Pattern[bytes] | None:
+    """A pattern every raw line of a wanted subreddit matches; None when all are wanted.
+
+    Arctic Shift's monthly dumps are all of Reddit, so nearly every line is another
+    subreddit's. Searching the raw bytes for `"subreddit":"<name>"` skips those without
+    decoding or parsing them. It may pass a line it should not (the full check in
+    `precheck` still runs), but never drops one it should keep: names are ASCII
+    `[A-Za-z0-9_]`, which JSON never escapes, and case and spacing are allowed for.
+    """
+    if not subreddits:
+        return None
+    names = b"|".join(re.escape(s.encode("ascii")) for s in sorted(subreddits))
+    return re.compile(rb'"subreddit"\s*:\s*"(?:' + names + rb')"', re.IGNORECASE)
 
 
 class Spool:
@@ -406,13 +427,18 @@ def spool_file(
     stats = FileStats(str(path))
     posts: list[dict[str, Any]] = []
     mentions: list[dict[str, Any]] = []
+    wanted = line_filter(flt.subreddits)
     try:
         for line in read_lines(path):
             stats.lines += 1
             if stats.lines % log_every == 0:
                 log.info("%s: %d lines read, %d kept", path.name, stats.lines, stats.kept)
+            if wanted is not None and not wanted.search(line):
+                stats.skipped[OTHER_SUBREDDIT] = stats.skipped.get(OTHER_SUBREDDIT, 0) + 1
+                continue
             try:
-                obj = json.loads(line)
+                # Undecodable bytes become U+FFFD rather than costing the post.
+                obj = json.loads(line.decode("utf-8", errors="replace"))
             except ValueError:
                 stats.bad_lines += 1
                 continue

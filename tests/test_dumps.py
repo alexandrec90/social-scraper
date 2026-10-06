@@ -237,6 +237,45 @@ def test_spool_file_fills_the_spool_and_its_file_stats(tmp_path, universe):
         assert spool.summary()[:2] == (1, 1)
 
 
+def test_line_filter_passes_every_spelling_of_a_wanted_subreddit():
+    pattern = dumps.line_filter(frozenset({"wallstreetbets", "stockmarket"}))
+    assert pattern.search(b'{"id":"a","subreddit":"wallstreetbets","body":"x"}')
+    assert pattern.search(b'{"subreddit": "StockMarket"}')  # spaced, display case
+    assert not pattern.search(b'{"subreddit":"pics","body":"wallstreetbets is wild"}')
+    assert not pattern.search(b'{"subreddit":"wallstreetbetsELITE"}')  # a prefix is not it
+    assert not pattern.search(b'{"subreddit_name_prefixed":"r/wallstreetbets"}')
+    assert dumps.line_filter(frozenset()) is None  # every subreddit wanted: no filter
+
+
+def test_spool_file_skips_other_subreddits_without_parsing_them(tmp_path, universe, monkeypatch):
+    """A monthly dump is all of Reddit: ~600M lines, nearly all of them unwanted. Parsing
+    each before looking at its subreddit ran at 7,500 lines/s -- weeks for eight months."""
+    objs = [sub(), sub("x", subreddit="pics"), sub("y", subreddit="aww")]
+    path = write_jsonl(tmp_path / "RS_2026-01.zst", objs, compress=True)
+    real_loads = json.loads
+    parsed = []
+
+    def counting_loads(text, *args, **kwargs):
+        parsed.append(text)
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(dumps.json, "loads", counting_loads)
+    with dumps.Spool(tmp_path) as spool:
+        stats = dumps.spool_file(path, spool, universe, FLT)
+    assert (stats.lines, stats.kept) == (3, 1)
+    assert stats.skipped == {OTHER_SUBREDDIT: 2}
+    assert len(parsed) == 1  # only the wallstreetbets line was ever parsed
+
+
+def test_spool_file_keeps_a_post_with_invalid_bytes(tmp_path, universe):
+    line = json.dumps(sub()).encode().replace(b"to the moon", b"to the \xff moon")
+    path = tmp_path / "s.jsonl"
+    path.write_bytes(line + b"\n")
+    with dumps.Spool(tmp_path) as spool:
+        stats = dumps.spool_file(path, spool, universe, FLT)
+    assert (stats.kept, stats.bad_lines) == (1, 0)
+
+
 def test_spool_file_flushes_in_batches(tmp_path, universe, monkeypatch):
     monkeypatch.setattr(dumps, "SPOOL_BATCH", 2)
     objs = [sub(f"p{i}") for i in range(5)]
@@ -291,7 +330,7 @@ def test_import_writes_posts_and_mentions_partitions_with_their_catalog(tmp_path
     coms = tmp_path / "wsb_comments.jsonl"
     write_jsonl(coms, [com(), com("c2", body="nothing to see")])
     with coms.open("a", encoding="utf-8") as fh:
-        fh.write("{not json\n")
+        fh.write('{"subreddit":"wallstreetbets","body":"cut off mid-li\n')  # truncated
     report = run(tmp_path, universe, [subs, coms])
     assert report.ok, report.errors
     assert (report.posts, report.mentions) == (3, 3)
