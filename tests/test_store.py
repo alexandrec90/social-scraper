@@ -45,6 +45,79 @@ def test_local_store_promote_and_delete(tmp_path):
     assert not s.path("k").exists()
 
 
+def _refuse_replace(monkeypatch, times):
+    """Make `Path.replace` raise WinError 32's `PermissionError` `times` times, then work."""
+    real = store.Path.replace
+    calls = []
+
+    def flaky(self, target):
+        calls.append(self.name)
+        if len(calls) <= times:
+            raise PermissionError(13, "being used by another process", str(self))
+        return real(self, target)
+
+    monkeypatch.setattr(store.Path, "replace", flaky)
+    return calls
+
+
+def test_replace_with_retry_outlasts_a_target_held_open(tmp_path, monkeypatch):
+    # 2026-10-06: a reader holding `_catalog/social_scraper_posts.json` open failed the
+    # rename once, which failed the dataset and the whole scheduled scrape.
+    source, target = tmp_path / "t.tmp", tmp_path / "t"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+    calls = _refuse_replace(monkeypatch, times=2)
+    slept = []
+    store.replace_with_retry(source, target, delays=(0.1, 0.2, 0.3), sleep=slept.append)
+    assert target.read_bytes() == b"new"
+    assert not source.exists()
+    assert len(calls) == 3
+    assert slept == [0.1, 0.2]
+
+
+def test_replace_with_retry_gives_up_and_raises(tmp_path, monkeypatch):
+    source, target = tmp_path / "t.tmp", tmp_path / "t"
+    source.write_bytes(b"new")
+    calls = _refuse_replace(monkeypatch, times=99)
+    slept = []
+    with pytest.raises(PermissionError):
+        store.replace_with_retry(source, target, delays=(0.1, 0.2), sleep=slept.append)
+    assert len(calls) == 3  # one per pause, then the last word
+    assert slept == [0.1, 0.2]
+    assert source.read_bytes() == b"new"  # staged bytes kept for the next run
+
+
+def test_replace_with_retry_does_not_retry_other_errors(tmp_path):
+    slept = []
+    with pytest.raises(FileNotFoundError):
+        store.replace_with_retry(
+            tmp_path / "absent", tmp_path / "t", delays=(0.1,), sleep=slept.append
+        )
+    assert slept == []
+
+
+def test_replace_with_retry_default_delays_are_read_at_call_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "REPLACE_RETRY_DELAYS_S", (0.0,))
+    calls = _refuse_replace(monkeypatch, times=99)
+    (tmp_path / "s").write_bytes(b"x")
+    with pytest.raises(PermissionError):
+        store.replace_with_retry(tmp_path / "s", tmp_path / "t")
+    assert len(calls) == 2
+
+
+def test_local_store_writes_and_promotes_through_a_held_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "REPLACE_RETRY_DELAYS_S", (0.0, 0.0))
+    s = LocalStore(tmp_path)
+    _refuse_replace(monkeypatch, times=1)
+    s.put_bytes("_catalog/d.json", b"{}")
+    assert s.get_bytes("_catalog/d.json") == b"{}"
+    assert not s.path("_catalog/d.json.tmp").exists()
+    s.put_bytes("k.tmp", b"new")
+    _refuse_replace(monkeypatch, times=1)
+    s.promote("k.tmp", "k")
+    assert s.get_bytes("k") == b"new"
+
+
 # --- S3Store --------------------------------------------------------------------------
 
 
