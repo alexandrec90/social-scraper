@@ -177,17 +177,34 @@ def runner_supports_paths(help_text: str) -> bool:
     return "--paths" in help_text
 
 
-def _lint_argv(paths: list[str], help_text: str) -> list[str]:
+def lint_python(
+    root: Path = REPO_ROOT,
+    env: dict[str, str] | None = None,
+    run: toolchain.Runner = subprocess.run,
+) -> str:
+    """The interpreter to run the lint runner under: the tree's `.venv` when this one lacks ruff.
+
+    `lint-all.py` is project-owned, so a project's copy can predate the template's own
+    re-run under the venv -- and that copy, handed an interpreter without ruff or mypy,
+    skips both and prints `clean`, the gate passing on a check that never ran (db3e57f7,
+    roguelike). Choosing the interpreter here reaches every such copy from the vendored
+    side; `toolchain.rerun_target` is the same ladder the template's runner climbs.
+    """
+    target = toolchain.rerun_target(root, "ruff", env, run)
+    return sys.executable if target is None else str(target)
+
+
+def _lint_argv(paths: list[str], help_text: str, python: str = sys.executable) -> list[str]:
     """The lint command to run, given the branch's files and the runner's capabilities."""
     if paths and runner_supports_paths(help_text):
-        return [sys.executable, str(LINT_ALL), "--paths", *paths]
-    return [sys.executable, str(LINT_ALL), "--changed"]
+        return [python, str(LINT_ALL), "--paths", *paths]
+    return [python, str(LINT_ALL), "--changed"]
 
 
-def _lint_help() -> str:
+def _lint_help(python: str = sys.executable) -> str:
     try:
         probe = subprocess.run(
-            [sys.executable, str(LINT_ALL), "--help"],
+            [python, str(LINT_ALL), "--help"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -203,7 +220,8 @@ def _run_lint(base: str = "") -> bool:
         print(f"ship: required lint runner is missing: {LINT_ALL}", file=sys.stderr)
         return False
     paths = branch_diff_files(base) if base else []
-    argv = _lint_argv(paths, _lint_help())
+    python = lint_python()
+    argv = _lint_argv(paths, _lint_help(python), python)
     if paths and "--paths" not in argv:
         # Say it rather than quietly linting the empty working tree: the gate is about
         # to run, pass, and mean nothing, and only this line explains why.
