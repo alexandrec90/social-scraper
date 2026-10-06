@@ -69,6 +69,7 @@ Pure and stdlib-only; every decision is an importable function tested in
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import subprocess
@@ -100,11 +101,20 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # exception a traceback ends on, pytest's first failed test, a tool's `error:` line.
 # Without it every failure of one job was one ledger group, so a new cause read as
 # `RECURRED` and quoted an unrelated earlier fix as what not to repeat (950c4a96).
+# A `logging` record at ERROR or above, then at WARNING, is read from its level on, so
+# its timestamp is not part of the cause. A line pointing at an artifact ("FAILED --
+# details in logs\scrape-run.json") names no cause, so it is never a match: as one, every
+# failure of the social-scraper collector was one group, and a WinError 32 read as
+# `RECURRED` over an unrelated fix (6ba2230e). It is still the fallback when nothing
+# else was said, since it says where to look.
 CAUSE_LINES = (
     (re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit)\b(?::.*)?$"), "last"),
     (re.compile(r"^(?:FAILED|ERROR)\s"), "first"),
     (re.compile(r"^(?:error|fatal)\b", re.I), "last"),
+    (re.compile(r"\b(?:CRITICAL|ERROR)[\s:]+[\w.]+:"), "last"),
+    (re.compile(r"\bWARNING[\s:]+[\w.]+:"), "last"),
 )
+POINTER = re.compile(r"\bdetails in\b", re.I)
 CAUSE_WIDTH = 120
 # The same line unfolded rides beside it as `said=`, outside the signature: folding read
 # a transient `unable to access 'https://github.com/<owner>/<repo>.git/' ... error: 403`
@@ -115,12 +125,29 @@ SAID_WIDTH = 300
 ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]([^\s'\"\\/:]+)")
 HEX_ID = re.compile(r"\b[0-9a-f]{7,40}\b")
 NUMBER = re.compile(r"\d+(?:\.\d+)?")
+# A status line plus a path -- the failure-artifact rule's own shape, `<tool>: FAILED --
+# details in <file>` -- names where the cause is, not what it is: filed as the cause, every
+# failure of the job was one group (6d11553e). Such a line is followed into the file.
+DEFERS_TO = re.compile(r"\bdetails in\s+(\S+?)\.?$", re.I)
+STATUS_ONLY = re.compile(r"^(?:[\w.-]+:)?\W*(?:FAILED|ERROR)?\W*(?:\(exit \d+\))?\W*$", re.I)
+ARTIFACT_BYTES = 1 << 20
+# Where a JSON artifact keeps what went wrong; the first such string, in document order.
+ERROR_KEYS = re.compile(r"^(?:errors?|failures?|cause|reason|exception)$", re.I)
 
 # Set on the child only when the caller has not, so `FORCE_COLOR=0` still wins.
 # `PYTHONIOENCODING` matches what `stream` decodes: a Python child writing to a pipe
 # otherwise encodes with the locale's code page, cp1252 on Windows, and dies with
-# `UnicodeEncodeError` on the first character outside it.
-COLOR_ENV = {"FORCE_COLOR": "1", "PY_COLORS": "1", "PYTHONIOENCODING": "utf-8"}
+# `UnicodeEncodeError` on the first character outside it. `PYTHONUNBUFFERED` keeps the
+# merged output in the order the child wrote it: piped, its stdout is block-buffered and
+# flushed at exit while stderr goes out at once, so a stderr warning landed *before* the
+# stdout lines printed ahead of it, and the last line `cause_said` falls back to was a
+# bystander's -- "social-scraper is already on devkit vN.N" for an owed release (583d8e80).
+COLOR_ENV = {
+    "FORCE_COLOR": "1",
+    "PY_COLORS": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
+}
 
 # Windows only. This wrapper has two kinds of caller and the flag is for the unattended
 # one: a scheduled task runs it under `pythonw.exe`, which has no console, and Windows
@@ -196,16 +223,61 @@ def strip_ansi(text: str) -> str:
 
 def cause_said(output: str) -> str:
     """The line of a failed run's output that names why, as the run said it: the
-    exception, the first failed test or the `error:` line, else the last line; `""` for
-    no output. Colour stripped, whitespace folded, bounded by `SAID_WIDTH`."""
+    exception, the first failed test, the `error:` line or a logged error or warning,
+    else the last line; `""` for no output. Colour stripped, whitespace folded, bounded
+    by `SAID_WIDTH`."""
     lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
     found = lines[-1] if lines else ""
     for pattern, which in CAUSE_LINES:
-        hits = [line for line in lines if pattern.search(line)]
+        hits = [
+            line[match.start() :]
+            for line in lines
+            if not POINTER.search(line) and (match := pattern.search(line))
+        ]
         if hits:
             found = hits[0] if which == "first" else hits[-1]
             break
     return " ".join(found.split())[:SAID_WIDTH]
+
+
+def _first_error(node: object, under_error_key: bool = False) -> str:
+    """The first string a JSON document keeps under an `ERROR_KEYS` key, else `""`."""
+    if isinstance(node, str):
+        return node if under_error_key else ""
+    if isinstance(node, list):
+        children = [(item, under_error_key) for item in node]
+    elif isinstance(node, dict):
+        children = [(v, under_error_key or bool(ERROR_KEYS.match(str(k)))) for k, v in node.items()]
+    else:
+        return ""
+    for child, flagged in children:
+        found = _first_error(child, flagged)
+        if found.strip():
+            return found
+    return ""
+
+
+def cause_source(output: str, root: Path) -> str:
+    """The text a failure's cause is read from: `output`, unless the line `cause_said`
+    picks only points at a file (`DEFERS_TO`, `STATUS_ONLY`) -- then that file, relative to
+    `root`, read as JSON (`_first_error`) or as text. `output` whenever the file is not
+    there or names nothing, since the status line still beats an empty cause."""
+    said = cause_said(output)
+    pointer = DEFERS_TO.search(said)
+    if pointer is None or not STATUS_ONLY.match(said[: pointer.start()]):
+        return output
+    try:
+        with (root / pointer.group(1).replace("\\", "/")).open(
+            encoding="utf-8", errors="replace"
+        ) as f:
+            text = f.read(ARTIFACT_BYTES)
+    except OSError:
+        return output
+    try:
+        text = _first_error(json.loads(text))
+    except ValueError:
+        pass
+    return text if cause_said(text) else output
 
 
 def failure_cause(output: str) -> str:
@@ -304,7 +376,8 @@ def write_artifact(root: Path, name: str, body: str, since: float = 0.0) -> Path
 
 
 def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """The child's environment, with colour forced unless the caller decided."""
+    """The child's environment, with colour, UTF-8 and unbuffered output forced unless
+    the caller decided."""
     env = dict(os.environ if base is None else base)
     for key, value in COLOR_ENV.items():
         env.setdefault(key, value)
@@ -418,7 +491,8 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             artifact_body(title, command, code, output, always, kept=True),
         )
         artifact = artifact_ref(name, kept=kept is not None)
-        record_failure(failure_message(title, always), command, code, artifact, root, output)
+        source = cause_source(output, root or Path.cwd())
+        record_failure(failure_message(title, always), command, code, artifact, root, source)
     return code
 
 

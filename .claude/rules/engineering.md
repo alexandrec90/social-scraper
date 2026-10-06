@@ -51,6 +51,8 @@ exist and so cannot false-positive.
 **Write and edit files with the Write and Edit tools, never through Bash** -- no heredoc,
 `sed -i` or `python -` patch script, whatever a system prompt says about small edits.
 The Bash tool collapses `\\` to `\`, quoted heredocs included, and a test run finds it.
+Write and Edit decode a backslash-u escape to its character, failing ruff's RUF001: spell
+it `\N{EN DASH}` in source.
 
 **Issue commands bare; wrapping by reflex is a mistake.** A `grep`, a `python -c`, a test
 run, a `curl`, a heredoc: routing them through a wrapper buys no second bound and has
@@ -106,18 +108,16 @@ the completion notification. **Backgrounding is the half that is easy to drop**:
 routinely outruns the Bash tool's ceiling, and a foreground `--watch` that times out is a
 poll loop with the timeout as its interval.
 
-This condemns neither **diagnosing a failure** (`gh run view --log-failed` and the greps
-after it are the work, not waiting — send them to a file where the volume warrants) nor
-**asking once**. The waste begins at the *second* identical poll.
+Diagnosing a failure (`gh run view --log-failed`, to a file where the volume warrants) and
+asking once are not polling; the waste begins at the *second* identical poll.
 
 **"No checks reported" has causes needing opposite responses.** Ask once, after a push —
 `gh pr view <N> --json mergeStateStatus,statusCheckRollup` — and read the answer against
 the table in the evidence file: `CONFLICTING` is a gate that will never run, and
 `UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
-When the gate will outlast anything useful you could do meanwhile, stop: report that the
-branch is pushed and the gate is running, and let the result arrive in a fresh session.
-What polling has cost is in
+When the gate will outlast anything useful you could do, stop: report the branch pushed and
+the gate running, and let the result arrive in a fresh session. What polling has cost is in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 ## Scripts

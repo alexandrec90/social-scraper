@@ -212,6 +212,8 @@ def test_the_corpus_is_only_the_tests_that_name_the_module():
         "assert out == 'ran scripts/acme-tool.py'",  # a log line quoting it
         "ARTIFACTS = {'scripts/acme-tool.py': 'logs/acme.log'}",  # a mapping key
         "assert 'scripts/acme-tool.py' in manifest",  # a membership check
+        # An import by name reaches only the module it names, not a longer one.
+        "pytest.importorskip('pkg.acme_tool_helpers')",
     ],
 )
 def test_a_module_named_only_in_passing_does_not_join_its_corpus(text):
@@ -261,6 +263,10 @@ def test_corpus_files_names_the_files_the_corpus_is_made_of():
         "import acme_tool",  # an import
         "acme_tool.alpha()",  # an attribute off it
         "acme_tool = load_module('x')",  # a binding
+        # 1effb775: an import by name, bound to anything. Every public symbol of a
+        # module reached this way read as untested while the test called each one.
+        "rpt = pytest.importorskip('pkg.sub.acme_tool')",
+        'mod = importlib.import_module("acme_tool")',
     ],
 )
 def test_the_prefilter_cannot_skip_a_real_mention(text):

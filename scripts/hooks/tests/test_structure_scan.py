@@ -9,6 +9,9 @@ holding a quote.
 
 from __future__ import annotations
 
+import re
+
+import pytest
 from conftest import load_module
 
 ss = load_module("scripts/hooks/structure_scan.py")
@@ -136,6 +139,49 @@ def test_scan_python_counters():
     assert m.counts["skipped_tests"] == 0
     assert m.counts["any_types"] == 0
     assert set(m.counts) == set(ss.COUNTERS)
+
+
+@pytest.mark.parametrize(
+    ("line", "counted"),
+    [
+        # 7d307f16: the remedy says to name the reason, and a named one still counted.
+        ("import x  # noqa: E402 - the path is set above\n", 0),
+        ("x = f()  # type: ignore[attr-defined]  # stub lacks it\n", 0),
+        ("x = 1  # pragma: no cover -- unreachable on Windows\n", 0),
+        ("x = 1  # nosec because the input is ours\n", 0),
+        ("import x  # noqa: E402\n", 1),
+        ("import x  # noqa: E402,F401\n", 1),
+        ("x = f()  # type: ignore\n", 1),
+        # The reason has to follow the suppression it explains, not the one before it.
+        ("x = f()  # noqa: E501  # type: ignore\n", 1),
+    ],
+)
+def test_scan_python_counts_only_an_unexplained_suppression(line, counted):
+    assert ss.scan_python(line).counts["suppressions"] == counted
+
+
+@pytest.mark.parametrize(
+    ("comment", "counted"),
+    [
+        ("// eslint-disable-next-line no-console -- a CLI prints\n", 0),
+        ("// @ts-expect-error - the typings predate the option\n", 0),
+        ("// eslint-disable-next-line no-console\n", 1),
+        ("/* eslint-disable */\n", 1),
+        ("// @ts-ignore\n", 1),
+        # The next comment's words are not this suppression's reason.
+        ("// eslint-disable-next-line no-console\n// later -- tidy up\n", 1),
+    ],
+)
+def test_scan_js_counts_only_an_unexplained_suppression(comment, counted):
+    assert ss.scan_js(comment + "const a = 1;\n").counts["suppressions"] == counted
+
+
+def test_unexplained_counts_each_suppression_without_its_own_reason():
+    pattern = re.compile(r"noqa")
+    assert ss.unexplained(pattern, "") == 0
+    assert ss.unexplained(pattern, "# noqa: A1 - why  # noqa: B2") == 1
+    assert ss.unexplained(pattern, "# noqa: A1\n# so -- this explains nothing above") == 1
+    assert ss.unexplained(pattern, "# noqa: A1 because the stub lies") == 0
 
 
 def test_scan_python_counts_skipped_and_xfailed_tests():
