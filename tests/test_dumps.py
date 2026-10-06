@@ -213,6 +213,20 @@ def test_mentions_of_partitions_each_mention_by_its_post_day(universe):
     assert dumps.mentions_of(row, []) == ()
 
 
+UNITS = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}
+
+
+def test_the_spool_caps_duckdb_memory(tmp_path):
+    """DuckDB defaults to 80% of RAM; a full backfill's spool got the run killed for low
+    memory on a 16 GB desktop (2026-10-05). The cap makes it spill to disk instead."""
+    with dumps.Spool(tmp_path) as spool:
+        [(value,)] = spool.con.execute("SELECT current_setting('memory_limit')").fetchall()
+        settings = dict(spool.con.execute("SELECT name, value FROM duckdb_settings()").fetchall())
+    number, unit = value.split()
+    assert float(number) * UNITS[unit] <= 2 * 10**9
+    assert int(settings["threads"]) <= dumps.SPOOL_THREADS
+
+
 def test_spool_file_fills_the_spool_and_its_file_stats(tmp_path, universe):
     path = write_jsonl(tmp_path / "s.zst", [sub(), sub("x", subreddit="pics")], compress=True)
     with dumps.Spool(tmp_path) as spool:

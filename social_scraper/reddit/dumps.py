@@ -78,6 +78,11 @@ MAX_WINDOW = 2**31
 BACKFILL_KEY = "backfill"
 SPOOL_BATCH = 50_000
 READ_BATCH = 100_000
+# DuckDB takes 80% of RAM by default; a full backfill's spool got the run killed for low
+# memory on a 16 GB desktop (2026-10-05). Capped, it spills to `temp_directory` instead,
+# and fewer threads keep fewer per-thread buffers alive.
+SPOOL_MEMORY = "1.5GB"
+SPOOL_THREADS = 4
 LOG_EVERY = 1_000_000
 
 # Why a line was not kept; the per-file counts in the report are keyed by these.
@@ -320,6 +325,8 @@ class Spool:
         config: dict[str, str | bool | int | float | list[str]] = {
             "temp_directory": str(directory / "tmp"),
             "TimeZone": "UTC",
+            "memory_limit": SPOOL_MEMORY,
+            "threads": SPOOL_THREADS,
         }
         self.con = duckdb.connect(str(directory / "spool.duckdb"), config=config)
         # Replaced, not created: a spool file left by an interrupted run starts empty.
