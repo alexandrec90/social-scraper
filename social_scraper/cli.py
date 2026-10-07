@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import tempfile
 import time
@@ -52,8 +53,10 @@ from social_scraper.export import export_to_lake
 from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
+    FIRED_AT_ENV,
     RunReport,
     cycle_deadline,
+    cycle_start,
     run_cycle,
     run_forever,
     start_jitter_s,
@@ -109,8 +112,10 @@ def platforms_of(choice: str) -> tuple[str, ...]:
 
 
 def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
-    # From before the jitter: the wait is part of the cycle the next fire is due after.
-    deadline = cycle_deadline(datetime.now(UTC), settings.cycle_minutes)
+    # From the scheduler's fire, before the db came up and before the jitter: all of it
+    # is part of the cycle the next fire is due after.
+    started_at = cycle_start(datetime.now(UTC), os.environ.get(FIRED_AT_ENV))
+    deadline = cycle_deadline(started_at, settings.cycle_minutes)
     if not args.now:
         # A scheduler fires on a fixed grid, and a fixed interval is a bot signature. The
         # default, not a flag: devkit's scheduled task runs bare `scrape`, and with the
