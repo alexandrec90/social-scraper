@@ -7,28 +7,32 @@ import pytest
 import zstandard
 from conftest import NOW, reddit_comment, reddit_submission
 
+from social_scraper import backfill
 from social_scraper.archive import datasets, manifest
 from social_scraper.archive.store import LocalStore, StoreError
 from social_scraper.archive.writer import write_partition
-from social_scraper.reddit import dumps
-from social_scraper.reddit.dumps import (
+from social_scraper.backfill import (
     BACKFILL_KEY,
     HAS_CREDENTIAL,
-    IGNORED_AUTHOR,
     NO_SYMBOL,
-    OTHER_SUBREDDIT,
     OUT_OF_RANGE,
     UNPARSABLE,
-    DumpFilter,
     ImportReport,
+    partition_runs,
+)
+from social_scraper.reddit import dumps
+from social_scraper.reddit.dumps import (
+    IGNORED_AUTHOR,
+    OTHER_SUBREDDIT,
+    DumpFilter,
     convert,
     expand_inputs,
     import_dumps,
     observed_at,
-    partition_runs,
     read_lines,
     thing_of,
 )
+from social_scraper.symbols.extract import Mention
 
 AWS_KEY = "AKIAABCDEFGHIJKLMNOP"  # pragma: allowlist secret - fake key the filter must drop
 
@@ -145,7 +149,7 @@ def test_convert_keeps_a_cashtag_outside_the_directory(universe):
     ],
 )
 def test_convert_skips_with_a_reason(universe, obj, reason):
-    assert convert(obj, universe, FLT, "s") == dumps.Converted(reason)
+    assert convert(obj, universe, FLT, "s") == backfill.Converted(reason)
 
 
 def test_filter_window_is_since_inclusive_until_exclusive():
@@ -206,11 +210,11 @@ def test_precheck_rejects_from_raw_fields_alone():
 
 def test_mentions_of_partitions_each_mention_by_its_post_day(universe):
     row = {"platform": "reddit", "external_id": "p", "channel": "stocks", "created_at": CREATED}
-    found = [dumps.Mention("GME", "cashtag", True), dumps.Mention("XYZQ", "cashtag", False)]
-    rows = dumps.mentions_of(row, found)
+    found = [Mention("GME", "cashtag", True), Mention("XYZQ", "cashtag", False)]
+    rows = backfill.mentions_of(row, found)
     assert [(m["symbol"], m["in_universe"]) for m in rows] == [("GME", True), ("XYZQ", False)]
     assert {m["part"] for m in rows} == {"social_scraper/mentions/platform=reddit/dt=2021-01-27"}
-    assert dumps.mentions_of(row, []) == ()
+    assert backfill.mentions_of(row, []) == ()
 
 
 UNITS = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}
@@ -219,19 +223,19 @@ UNITS = {"KiB": 2**10, "MiB": 2**20, "GiB": 2**30, "TiB": 2**40}
 def test_the_spool_caps_duckdb_memory(tmp_path):
     """DuckDB defaults to 80% of RAM; a full backfill's spool got the run killed for low
     memory on a 16 GB desktop (2026-10-05). The cap makes it spill to disk instead."""
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         [(value,)] = spool.con.execute("SELECT current_setting('memory_limit')").fetchall()
         settings = dict(spool.con.execute("SELECT name, value FROM duckdb_settings()").fetchall())
     number, unit = value.split()
     assert float(number) * UNITS[unit] <= 2 * 10**9
-    assert int(settings["threads"]) <= dumps.SPOOL_THREADS
+    assert int(settings["threads"]) <= backfill.SPOOL_THREADS
 
 
 def test_spool_file_fills_the_spool_and_its_file_stats(tmp_path, universe):
     path = write_jsonl(tmp_path / "s.zst", [sub(), sub("x", subreddit="pics")], compress=True)
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         stats = dumps.spool_file(path, spool, universe, FLT, log_every=1)
-        assert isinstance(stats, dumps.FileStats)
+        assert isinstance(stats, backfill.FileStats)
         assert (stats.lines, stats.kept, stats.mentions) == (2, 1, 1)
         assert stats.skipped == {OTHER_SUBREDDIT: 1} and stats.error is None
         assert spool.summary()[:2] == (1, 1)
@@ -260,7 +264,7 @@ def test_spool_file_skips_other_subreddits_without_parsing_them(tmp_path, univer
         return real_loads(text, *args, **kwargs)
 
     monkeypatch.setattr(dumps.json, "loads", counting_loads)
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         stats = dumps.spool_file(path, spool, universe, FLT)
     assert (stats.lines, stats.kept) == (3, 1)
     assert stats.skipped == {OTHER_SUBREDDIT: 2}
@@ -271,16 +275,16 @@ def test_spool_file_keeps_a_post_with_invalid_bytes(tmp_path, universe):
     line = json.dumps(sub()).encode().replace(b"to the moon", b"to the \xff moon")
     path = tmp_path / "s.jsonl"
     path.write_bytes(line + b"\n")
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         stats = dumps.spool_file(path, spool, universe, FLT)
     assert (stats.kept, stats.bad_lines) == (1, 0)
 
 
 def test_spool_file_flushes_in_batches(tmp_path, universe, monkeypatch):
-    monkeypatch.setattr(dumps, "SPOOL_BATCH", 2)
+    monkeypatch.setattr(backfill, "SPOOL_BATCH", 2)
     objs = [sub(f"p{i}") for i in range(5)]
     path = write_jsonl(tmp_path / "s.jsonl", objs)
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         assert dumps.spool_file(path, spool, universe, FLT).kept == 5
         assert spool.summary()[0] == 5
 
@@ -299,9 +303,9 @@ def test_write_spool_writes_each_partition_once_into_every_store(tmp_path, unive
     path = write_jsonl(tmp_path / "s.jsonl", [sub(), sub("gme2"), com()])
     stores = [CountingStore(tmp_path / "a"), CountingStore(tmp_path / "b")]
     report = ImportReport(started_at="t")
-    with dumps.Spool(tmp_path) as spool:
+    with backfill.Spool(tmp_path) as spool:
         dumps.spool_file(path, spool, universe, FLT)
-        dumps.write_spool(spool, stores, NOW, report)
+        backfill.write_spool(spool, stores, NOW, report)
     assert report.partitions == {"social_scraper_posts": 1, "social_scraper_mentions": 1}
     for store in stores:
         staged = [k for k in store.puts if k.endswith(".tmp")]

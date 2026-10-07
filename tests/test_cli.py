@@ -17,14 +17,18 @@ from social_scraper.cli import (
     cmd_reddit_import,
     cmd_run,
     cmd_scrape,
+    cmd_x_import,
     cmd_sports_sync,
     cmd_status,
     cmd_universe,
     main,
     platforms_of,
+    run_backfill,
     utc_date,
 )
+from social_scraper.backfill import ImportReport
 from social_scraper.reddit import dumps
+from social_scraper.x import tweet_dumps
 from social_scraper.db.repository import make_engine
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.models import PLATFORMS, REDDIT, X, AuthorInfo, Post
@@ -82,6 +86,43 @@ def test_parser_accepts_every_command():
         p.parse_args(["reddit-import"])
     with pytest.raises(SystemExit):
         p.parse_args(["reddit-import", "a.zst", "--since", "last tuesday"])
+    x = p.parse_args(["x-import", "cashtag", "--local-only"])
+    assert x.paths == [Path("cashtag")] and x.local_only and x.since is None
+
+
+def test_run_backfill_hands_the_run_its_stores_and_maps_the_report_to_an_exit_code(
+    settings, universe, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    seen = {}
+
+    def run(got_universe, stores, spool, started):
+        seen.update(universe=got_universe, stores=stores, spool_exists=spool.is_dir())
+        return ImportReport(started_at=started.isoformat(), errors=["one file failed"])
+
+    args = import_args(dry_run=True)
+    assert run_backfill(settings, args, run, "demo-import.json") == 1
+    assert seen == {"universe": universe, "stores": None, "spool_exists": True}
+    assert "FAILED -- details in" in capsys.readouterr().out
+    assert json.loads((settings.logs_dir / "demo-import.json").read_text())["ok"] is False
+
+
+def test_x_import_writes_the_lake_and_its_report(
+    settings, engine, universe, monkeypatch, capsys, tmp_path
+):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    folder = tmp_path / "cashtag"
+    folder.mkdir()
+    (folder / "tweets.csv").write_text(
+        '"id","text","user_id","in_reply_to_status_id","retweeted_status_id","lang","created_at"\n'
+        '"5","$NVDA up","9","0","0","en","Thu Jun 01 14:00:00 +0000 2017"\n',
+        encoding="utf-8",
+    )
+    assert cmd_x_import(settings, engine, import_args(folder, since=None)) == 0
+    out = capsys.readouterr().out
+    assert "2017: 1 posts (0 comments), 1 symbols" in out
+    body = json.loads((settings.logs_dir / tweet_dumps.REPORT_FILE).read_text())
+    assert body["ok"] and body["posts"] == 1
 
 
 def test_utc_date_reads_dates_and_aware_timestamps():
