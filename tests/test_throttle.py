@@ -15,6 +15,7 @@ from social_scraper.throttle import (
     BudgetExhausted,
     CircuitOpen,
     MemoryThrottleStore,
+    OutOfTime,
     OutsideActiveHours,
     Policy,
     Throttle,
@@ -107,6 +108,33 @@ def test_outside_active_hours():
         t.check()
     t2, _, _ = make(active_hours=(8, 23), timezone="America/Toronto")
     t2.check()
+
+
+def test_no_page_load_starts_after_the_deadline():
+    clock = Clock()
+    t, _, slept = make(clock, deadline=NOW + timedelta(minutes=1))
+    t.acquire()
+    clock.now = NOW + timedelta(minutes=2)
+    with pytest.raises(OutOfTime, match="before the next is due"):
+        t.check()
+    assert slept == []
+
+
+def test_a_gap_that_would_end_past_the_deadline_is_not_waited():
+    """2026-10-07: a 29-minute scrape on a 30-minute schedule made the scheduler skip
+    the next fire. The last X gap is up to three minutes; it is not slept into the next run."""
+    t, store, slept = make(deadline=NOW + timedelta(seconds=5))
+    store.log_request("x", NOW - timedelta(seconds=1), "search", 200, True)
+    with pytest.raises(OutOfTime):
+        t.acquire()
+    assert slept == []
+
+
+def test_no_deadline_is_no_limit():
+    clock = Clock()
+    t, _, _ = make(clock)
+    clock.now = NOW + timedelta(days=30)
+    t.acquire()
 
 
 def test_rate_limit_backs_off_exponentially_and_caps():
@@ -211,6 +239,7 @@ def test_stop_reasons_share_a_base_the_runner_catches():
         throttle_mod.BudgetExhausted,
         throttle_mod.CircuitOpen,
         throttle_mod.OutsideActiveHours,
+        throttle_mod.OutOfTime,
     )
     for exc in stops:
         assert issubclass(exc, throttle_mod.ThrottleStop)

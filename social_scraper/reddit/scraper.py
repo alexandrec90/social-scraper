@@ -29,7 +29,7 @@ from social_scraper.db import repository
 from social_scraper.fetch import Browser, FetchFailed, PageResult
 from social_scraper.pipeline import IngestStats, PostIngestor
 from social_scraper.reddit.parse import REDDIT_BASE, parse_listing
-from social_scraper.throttle import CHALLENGED, ERROR, OK, RATE_LIMITED, Throttle
+from social_scraper.throttle import CHALLENGED, ERROR, OK, RATE_LIMITED, OutOfTime, Throttle
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +88,7 @@ class RedditRunStats:
     requests: int = 0
     ingest: IngestStats = field(default_factory=IngestStats)
     errors: list[str] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,8 @@ class RedditScraper:
     ) -> RedditRunStats:
         """Crawl every subreddit once, in random order.
 
-        `ThrottleStop` propagates (the platform is paused or out of budget). A wall or
+        `ThrottleStop` propagates (the platform is paused or out of budget), except the
+        cycle's deadline, which ends the run with what it crawled and a notice. A wall or
         rate limit ends the run early; the throttle has already recorded the pause.
         `warm=False` skips the warm-up, for a browser an earlier run already warmed.
         """
@@ -139,6 +141,8 @@ class RedditScraper:
                     self._guarded(sub, listing)
                 if self._refresh_due(sub):
                     self._guarded(sub, "top", extra="t=day", pages=1, incremental=False)
+        except OutOfTime as exc:
+            self.stats.notices.append(str(exc))
         except FetchFailed as exc:
             log.warning("reddit run stopped: %s", exc)
         return self.stats

@@ -142,6 +142,21 @@ def test_refresh_is_not_repeated_within_the_interval(engine, universe):
     assert sum("top.json" in c for c in browser.calls) == 1
 
 
+def test_the_cycle_deadline_ends_the_run_with_what_it_crawled(engine, universe):
+    listing = ok(reddit_listing([reddit_submission("a", T0)]))
+    browser = FakeBrowser({BASE + "new.json": listing, BASE + "comments.json": listing})
+    s, store = scraper(engine, universe, browser)
+    s.throttle = Throttle(
+        Policy("reddit", 30, 30, 1000, 1000, deadline=NOW + timedelta(seconds=10)),
+        store,
+        clock=Clock(),
+        sleep=lambda s: None,
+    )
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert stats.requests == 1 and stats.ingest.stored == 1 and not stats.errors
+    assert len(stats.notices) == 1 and "out of cycle time" in stats.notices[0]
+
+
 def test_run_stops_on_wall_without_raising(engine, universe):
     browser = FakeBrowser()
     browser.default = PageResult(429, "u")

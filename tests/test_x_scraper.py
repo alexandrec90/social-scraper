@@ -317,7 +317,69 @@ def test_plain_error_moves_on_to_the_next_page(engine, universe):
     browser = FakeBrowser()
     browser.default = PageResult(200, "https://x.com/search")  # no payloads
     stats = scraper(engine, universe, browser, pages=3).run()
-    assert len(browser.calls) == 3 and len(stats.errors) == 3
+    # The first empty search is a notice; the two after it are a streak, so X's layout.
+    assert len(browser.calls) == 3 and len(stats.notices) == 1 and len(stats.errors) == 2
+
+
+# `discovery.pick_symbols`' default gap: a symbol searched sooner is not searched again.
+SYMBOL_GAP = timedelta(hours=6)
+
+
+def one_search(engine, universe, browser, clock):
+    """A cycle of one `$MSFT` search and nothing else."""
+    return scraper(engine, universe, browser, clock, pages=1, watchlist=("MSFT",), queries=())
+
+
+def test_one_empty_search_among_loaded_ones_is_a_notice_not_a_failure(engine, universe):
+    """2026-10-07: one `$MSFT` search came back empty among some seventy that read, and
+    failed the scheduled scrape."""
+    clock = Clock()
+    browser = FakeBrowser()
+    browser.default = page(x_tweet_classic("1", "$MSFT", ALICE, ("MSFT",)))
+    assert one_search(engine, universe, browser, clock).run().errors == []
+    browser.default = PageResult(200, "https://x.com/search")
+    clock.now = NOW + SYMBOL_GAP
+    stats = one_search(engine, universe, browser, clock).run()
+    assert stats.errors == []
+    assert any(n.startswith("search: no timeline data captured") for n in stats.notices)
+
+
+def test_empty_searches_in_a_row_are_x_layout_across_cycles(engine, universe):
+    clock = Clock()
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/search")
+    assert one_search(engine, universe, browser, clock).run().errors == []
+    clock.now = NOW + SYMBOL_GAP
+    errors = one_search(engine, universe, browser, clock).run().errors
+    assert len(errors) == 1 and errors[0].startswith("empty: 2 searches in a row")
+    assert errors[0].endswith(
+        "<- https://x.com/search?q=%24MSFT%20lang%3Aen&src=typed_query&f=live"
+    )
+
+
+def test_a_search_that_reads_ends_the_empty_streak(engine, universe):
+    clock = Clock()
+    empty = PageResult(200, "https://x.com/search")
+    browser = FakeBrowser()
+    for hour, result in enumerate((empty, page(), empty)):
+        browser.default = result
+        clock.now = NOW + hour * SYMBOL_GAP
+        assert one_search(engine, universe, browser, clock).run().errors == []
+
+
+def test_the_cycle_deadline_ends_the_crawl_with_a_notice(engine, universe):
+    """No page load starts past the deadline, and what came before is still reported."""
+    tracked(engine, "alice")
+    clock = Clock()
+    browser = FakeBrowser({"https://x.com/alice": PageResult(200, "https://x.com/alice")})
+    browser.default = page(x_tweet_classic("1", "$MSFT", ALICE, ("MSFT",)))
+    s = scraper(engine, universe, browser, clock, pages=2, search_share=0.5, watchlist=("MSFT",))
+    gap = Policy("x", 120, 120, 1000, 1000, deadline=NOW + timedelta(seconds=60))
+    s.throttle = Throttle(gap, MemoryThrottleStore(), clock=clock, sleep=lambda s: None)
+    stats = s.run()
+    assert stats.searches == 1 and stats.timelines == 0 and len(browser.calls) == 1
+    assert stats.errors == []
+    assert any("out of cycle time" in n for n in stats.notices)
 
 
 def test_queries_rotate_generic_and_respect_symbol_gap(engine, universe):
