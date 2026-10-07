@@ -177,6 +177,21 @@ def test_cycle_deadline_is_a_share_of_the_cycle():
     assert runner.cycle_deadline(start, 30) == start + timedelta(minutes=22.5)
 
 
+def test_a_cycle_starts_at_the_schedulers_fire_when_it_names_one():
+    now = datetime(2026, 10, 7, 21, 35, 44, tzinfo=UTC)
+    fired = datetime(2026, 10, 7, 21, 30, tzinfo=UTC)
+    assert runner.cycle_start(now, "2026-10-07T21:30:00+00:00") == fired
+    assert runner.cycle_start(now, "2026-10-07T17:30:00-04:00") == fired
+    assert runner.cycle_start(now, "2026-10-07T21:30:00") == fired, "naive reads as UTC"
+
+
+@pytest.mark.parametrize("fired", [None, "", "  ", "not a time", "2026-10-07T21:40:00+00:00"])
+def test_a_cycle_with_no_usable_fire_starts_now(fired):
+    """A run by hand names no fire; a garbled value or one in the future is not a fire."""
+    now = datetime(2026, 10, 7, 21, 35, 44, tzinfo=UTC)
+    assert runner.cycle_start(now, fired) == now
+
+
 def test_a_cycle_past_its_deadline_launches_no_browser_and_still_exports(settings, engine):
     settings.symbol_universe_max_age_hours = 1e9
 

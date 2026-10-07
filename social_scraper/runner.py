@@ -57,6 +57,12 @@ BrowserFactory = Callable[[str], AbstractContextManager[Browser]]
 # jitter, Reddit and X fill 20-25 minutes of a 30-minute cycle, so under load they did
 # not fit: 2026-10-07, a 29-minute run, and the second skipped fire that day.
 CYCLE_DEADLINE_SHARE = 0.75
+# When devkit's scheduler fired this `scrape`, as an ISO timestamp (devkit's
+# `collector_tasks.FIRED_AT`). The scrape's own start is minutes later -- the db coming
+# up, `uv run` starting -- and the next fire is due one cycle after the fire, not after
+# that: 2026-10-07 17:30, the scrape started at 17:35:44 (compose 3m24s, uv 2m20s under
+# load), so a deadline counted from it let the run reach past the 18:00 fire.
+FIRED_AT_ENV = "DEVKIT_FIRED_AT"
 
 
 @dataclass
@@ -78,6 +84,18 @@ class RunReport:
 def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
     """When the last page load of a cycle that started at `started` may start."""
     return started + timedelta(minutes=cycle_minutes * CYCLE_DEADLINE_SHARE)
+
+
+def cycle_start(now: datetime, fired: str | None) -> datetime:
+    """When this cycle started: the scheduler's fire (`FIRED_AT_ENV`'s value) when it
+    names one no later than `now`, else `now` -- a run by hand, or a value that is not a
+    timestamp or is in the future, which is a clock that moved, not a fire."""
+    try:
+        at = datetime.fromisoformat((fired or "").strip())
+    except ValueError:
+        return now
+    at = at.replace(tzinfo=UTC) if at.tzinfo is None else at
+    return at if at <= now else now
 
 
 def policy_for(settings: Settings, platform: str, deadline: datetime | None = None) -> Policy:

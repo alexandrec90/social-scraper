@@ -255,11 +255,26 @@ def test_scrape_ends_its_page_loads_inside_its_own_cycle(settings, engine, monke
     seen = {}
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: seen.update(kw) or RunReport("t"))
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.delenv(runner.FIRED_AT_ENV, raising=False)
     before = datetime.now(UTC)
     cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export"]))
     share = timedelta(minutes=settings.cycle_minutes * runner.CYCLE_DEADLINE_SHARE)
     assert before + share <= seen["deadline"] <= datetime.now(UTC) + share
     assert runner.CYCLE_DEADLINE_SHARE < 1
+
+
+def test_a_scheduled_scrape_counts_its_deadline_from_the_fire(settings, engine, monkeypatch):
+    """2026-10-07: the 17:30 fire reached `scrape` at 17:35:44 -- the db took 3m24s to
+    come up and `uv run` 2m20s under load -- and a deadline counted from there let the
+    run reach past the 18:00 fire. devkit names the fire's moment in the environment."""
+    seen = {}
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: seen.update(kw) or RunReport("t"))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    fired = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=6)
+    monkeypatch.setenv(runner.FIRED_AT_ENV, fired.isoformat())
+    cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export"]))
+    share = timedelta(minutes=settings.cycle_minutes * runner.CYCLE_DEADLINE_SHARE)
+    assert seen["deadline"] == fired + share
 
 
 def test_run_passes_options_through(settings, engine, monkeypatch):

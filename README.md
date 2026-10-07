@@ -130,7 +130,9 @@ when the cycle failed -- database unreachable, browser crash, a platform errorin
 failed export -- and 0 when a platform was deliberately left alone (outside X active
 hours, budget spent, circuit breaker open). It first waits a random 0-20% of
 `CYCLE_MINUTES`, so a fixed scheduler grid does not become a fixed request interval;
-`--now` skips the wait for a run by hand.
+`--now` skips the wait for a run by hand. No page load starts after three quarters of a
+cycle, counted from the scheduler's fire when devkit names it (`DEVKIT_FIRED_AT`) and
+from the command's own start otherwise, so a run ends before the next fire is due.
 
 ## Backfilling Reddit history
 
