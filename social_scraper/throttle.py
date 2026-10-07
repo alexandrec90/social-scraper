@@ -8,6 +8,8 @@ Every page load goes through `Throttle.acquire()` first and reports back through
 - **Budgets** -- at most N requests per rolling hour and per rolling day, counted from
   the persisted request log, so restarting the process does not reset them.
 - **Active hours** -- outside the window the platform is simply skipped.
+- **Deadline** -- an optional time after which no page load starts, so a scheduled
+  cycle ends before the next one is due (`runner.cycle_deadline`).
 - **Circuit breaker** -- a rate-limit response backs off exponentially
   (`backoff_base * 2^failures`, capped); a challenge (captcha, login wall, locked
   account) opens the circuit for `block_cooldown` and needs no further failures to do
@@ -59,6 +61,10 @@ class OutsideActiveHours(ThrottleStop):
     pass
 
 
+class OutOfTime(ThrottleStop):
+    """The cycle's time is spent. A crawler records it as a notice and ends its run."""
+
+
 @dataclass(frozen=True)
 class Policy:
     platform: str
@@ -72,6 +78,8 @@ class Policy:
     block_cooldown_max_hours: float = 96.0
     active_hours: tuple[int, int] | None = None
     timezone: str = "UTC"
+    # No page load starts after this (aware) time; None is no limit.
+    deadline: datetime | None = None
 
 
 @dataclass
@@ -158,16 +166,27 @@ class Throttle:
             raise BudgetExhausted(f"{p.platform}: hourly budget {p.hourly_budget} used")
         if self.store.count_since(p.platform, now - timedelta(days=1)) >= p.daily_budget:
             raise BudgetExhausted(f"{p.platform}: daily budget {p.daily_budget} used")
+        self._check_deadline(now)
+
+    def _check_deadline(self, start: datetime) -> None:
+        """Raise `OutOfTime` if a page load starting at `start` would start too late."""
+        p = self.policy
+        if p.deadline is not None and start > p.deadline:
+            raise OutOfTime(
+                f"{p.platform}: out of cycle time -- no page load starts after "
+                f"{p.deadline:%H:%M:%S}Z, so this run ends before the next is due"
+            )
 
     def acquire(self) -> None:
         """Block until the next request is allowed, or raise `ThrottleStop`."""
         self.check()
         last = self.store.last_request_at(self.policy.platform)
         gap = self.rng.uniform(self.policy.min_delay_s, self.policy.max_delay_s)
-        if last is not None:
-            wait = gap - (self.clock() - last).total_seconds()
-            if wait > 0:
-                self.sleep(wait)
+        wait = 0.0 if last is None else gap - (self.clock() - last).total_seconds()
+        # Before sleeping: a gap that would carry the load past the deadline is not waited.
+        self._check_deadline(self.clock() + timedelta(seconds=max(wait, 0.0)))
+        if wait > 0:
+            self.sleep(wait)
 
     def dwell(self, lo: float = 4.0, hi: float = 12.0) -> None:
         """A human pause inside a page (between scrolls). Not counted as a request."""

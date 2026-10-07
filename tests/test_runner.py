@@ -160,10 +160,34 @@ def test_run_platform_reports_browser_crash(settings, engine):
 
 def test_run_platform_surfaces_scraper_errors(settings, engine):
     browser = FakeBrowser()
-    browser.default = PageResult(200, "https://x.com/search")  # no data: an error
+    browser.default = PageResult(200, "https://x.com/account/access")  # a challenge
     ingestor = runner.Ingestor(engine, Universe({}))
     result = run_platform(settings, X, engine, ingestor, lambda p: browser)
-    assert "no timeline data" in result["error"]
+    assert "challenged" in result["error"]
+
+
+def test_policy_for_carries_the_cycle_deadline(settings):
+    deadline = datetime.now(UTC)
+    assert policy_for(settings, X).deadline is None
+    assert policy_for(settings, REDDIT, deadline).deadline == deadline
+
+
+def test_cycle_deadline_is_a_share_of_the_cycle():
+    start = datetime(2026, 10, 7, 20, 30, tzinfo=UTC)
+    assert runner.cycle_deadline(start, 30) == start + timedelta(minutes=22.5)
+
+
+def test_a_cycle_past_its_deadline_launches_no_browser_and_still_exports(settings, engine):
+    settings.symbol_universe_max_age_hours = 1e9
+
+    def never(platform):
+        raise AssertionError("browser must not launch")
+
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    report = run_cycle(settings, engine, (REDDIT, X), factory=never, deadline=past)
+    assert report.ok, report.errors
+    assert all("out of cycle time" in report.platforms[p]["skipped"] for p in (REDDIT, X))
+    assert report.export
 
 
 def test_failed_export_is_an_error_but_not_a_crash(settings, engine, monkeypatch):

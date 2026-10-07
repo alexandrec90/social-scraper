@@ -249,6 +249,19 @@ def test_scrape_waits_up_to_a_fifth_of_a_cycle_unless_now(settings, engine, monk
     assert len(slept) == 1
 
 
+def test_scrape_ends_its_page_loads_inside_its_own_cycle(settings, engine, monkeypatch):
+    """The deadline counts from before the jitter: the scheduler's next fire is due one
+    cycle after this one, however long the wait was."""
+    seen = {}
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: seen.update(kw) or RunReport("t"))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    before = datetime.now(UTC)
+    cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export"]))
+    share = timedelta(minutes=settings.cycle_minutes * runner.CYCLE_DEADLINE_SHARE)
+    assert before + share <= seen["deadline"] <= datetime.now(UTC) + share
+    assert runner.CYCLE_DEADLINE_SHARE < 1
+
+
 def test_run_passes_options_through(settings, engine, monkeypatch):
     seen = {}
     monkeypatch.setattr(cli, "run_forever", lambda *a, **kw: seen.update(kw))
@@ -270,7 +283,9 @@ def test_scrape_exits_1_when_the_bucket_export_fails(
     monkeypatch.setattr(store, "make_s3_client", lambda s: s3_client)
     # No platforms, so no browser: the cycle is the export alone.
     monkeypatch.setattr(
-        cli, "run_cycle", lambda s, e, p, export: runner.run_cycle(s, e, (), export=export)
+        cli,
+        "run_cycle",
+        lambda s, e, p, export, deadline: runner.run_cycle(s, e, (), export=export),
     )
     args = argparse.Namespace(platform="all", no_export=False, now=True)
     assert cmd_scrape(settings, engine, args) == 1

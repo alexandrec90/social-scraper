@@ -21,6 +21,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ from social_scraper.models import REDDIT, X
 from social_scraper.pipeline import Ingestor
 from social_scraper.reddit.scraper import RedditOptions, RedditScraper
 from social_scraper.sports import cycle as sports_cycle
-from social_scraper.sports.cycle import SportsContext
+from social_scraper.sports.cycle import PolicyFor, SportsContext
 from social_scraper.sports.leagues import LeagueConfigError
 from social_scraper.symbols.universe import Universe, load_universe
 from social_scraper.throttle import Policy, Throttle, ThrottleStop
@@ -50,6 +51,12 @@ REPORT_FILE = "scrape-run.json"
 # Timing jitter only; SystemRandom because nothing here needs a reproducible sequence.
 _JITTER = secrets.SystemRandom()
 BrowserFactory = Callable[[str], AbstractContextManager[Browser]]
+# The share of a scheduled cycle in which a page load may start (`cycle_deadline`). The
+# rest is the tail -- the load in flight, closing Chrome, the export -- so the run ends
+# before the scheduler's next fire, which it skips while one is still going. The start
+# jitter, Reddit and X fill 20-25 minutes of a 30-minute cycle, so under load they did
+# not fit: 2026-10-07, a 29-minute run, and the second skipped fire that day.
+CYCLE_DEADLINE_SHARE = 0.75
 
 
 @dataclass
@@ -68,8 +75,13 @@ class RunReport:
         return not self.errors
 
 
-def policy_for(settings: Settings, platform: str) -> Policy:
-    """The throttle policy for `platform`: its own pace, budgets and active hours."""
+def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
+    """When the last page load of a cycle that started at `started` may start."""
+    return started + timedelta(minutes=cycle_minutes * CYCLE_DEADLINE_SHARE)
+
+
+def policy_for(settings: Settings, platform: str, deadline: datetime | None = None) -> Policy:
+    """The throttle policy for `platform`: its own pace, budgets, hours and deadline."""
     reddit = platform == REDDIT
     s = settings
     return Policy(
@@ -84,6 +96,7 @@ def policy_for(settings: Settings, platform: str) -> Policy:
         block_cooldown_max_hours=s.block_cooldown_max_hours,
         active_hours=s.reddit_hours if reddit else s.x_hours,
         timezone=s.scraper_timezone,
+        deadline=deadline,
     )
 
 
@@ -120,8 +133,15 @@ def universe_for(settings: Settings) -> Universe:
     )
 
 
-def _crawl(settings: Settings, platform: str, engine: Engine, ingestor: Ingestor, browser: Browser):
-    throttle = Throttle(policy_for(settings, platform), DbThrottleStore(engine))
+def _crawl(
+    settings: Settings,
+    platform: str,
+    engine: Engine,
+    ingestor: Ingestor,
+    browser: Browser,
+    policies: PolicyFor,
+):
+    throttle = Throttle(policies(settings, platform), DbThrottleStore(engine))
     if platform == REDDIT:
         options = RedditOptions(
             max_pages=settings.reddit_max_pages,
@@ -135,14 +155,19 @@ def _crawl(settings: Settings, platform: str, engine: Engine, ingestor: Ingestor
 
 
 def run_platform(
-    settings: Settings, platform: str, engine: Engine, ingestor: Ingestor, factory: BrowserFactory
+    settings: Settings,
+    platform: str,
+    engine: Engine,
+    ingestor: Ingestor,
+    factory: BrowserFactory,
+    policies: PolicyFor = policy_for,
 ) -> dict[str, Any]:
     """Crawl one platform; everything that goes wrong lands in the returned dict."""
     try:
         # Check before launching Chrome: a paused platform should cost nothing.
-        Throttle(policy_for(settings, platform), DbThrottleStore(engine)).check()
+        Throttle(policies(settings, platform), DbThrottleStore(engine)).check()
         with factory(platform) as browser:
-            stats = _crawl(settings, platform, engine, ingestor, browser)
+            stats = _crawl(settings, platform, engine, ingestor, browser, policies)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
     except (PlaywrightError, SQLAlchemyError, OSError) as exc:
@@ -176,19 +201,24 @@ def run_cycle(
     platforms: tuple[str, ...] = (REDDIT, X),
     factory: BrowserFactory | None = None,
     export: bool = True,
+    deadline: datetime | None = None,
 ) -> RunReport:
+    """One cycle. No page load starts after `deadline`; the export still runs."""
     report = RunReport(started_at=datetime.now(UTC).isoformat())
     domains = settings.enabled_domains
     factory = factory or default_browser_factory(settings)
+    policies = partial(policy_for, deadline=deadline)
     ingestor = Ingestor(engine, universe_for(settings)) if STOCKS in domains else None
     sports = prepare_sports(settings, engine, report) if SPORTS in domains else None
     for platform in platforms:
         results: dict[str, dict[str, Any]] = {}
         if ingestor is not None:
-            results[platform] = run_platform(settings, platform, engine, ingestor, factory)
+            results[platform] = run_platform(
+                settings, platform, engine, ingestor, factory, policies
+            )
         if sports is not None:
             results[f"{platform}:{SPORTS}"] = sports_cycle.run_platform(
-                settings, platform, engine, sports, factory, policy_for
+                settings, platform, engine, sports, factory, policies
             )
         for label, result in results.items():
             report.platforms[label] = result
@@ -198,6 +228,8 @@ def run_cycle(
         report.sports["discovery"] = sports_cycle.discover_names(
             settings, engine, datetime.now(UTC)
         )
+    # Timestamped in the scheduled log, so a long tail shows which side of it the time went.
+    log.info("crawls done; pruning and exporting")
     DbThrottleStore(engine).prune(datetime.now(UTC) - timedelta(days=REQUEST_LOG_RETENTION_DAYS))
     if export:
         exported = export_to_lake(engine, settings, datetime.now(UTC))

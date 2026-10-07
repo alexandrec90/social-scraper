@@ -53,6 +53,7 @@ from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
     RunReport,
+    cycle_deadline,
     run_cycle,
     run_forever,
     start_jitter_s,
@@ -108,6 +109,8 @@ def platforms_of(choice: str) -> tuple[str, ...]:
 
 
 def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    # From before the jitter: the wait is part of the cycle the next fire is due after.
+    deadline = cycle_deadline(datetime.now(UTC), settings.cycle_minutes)
     if not args.now:
         # A scheduler fires on a fixed grid, and a fixed interval is a bot signature. The
         # default, not a flag: devkit's scheduled task runs bare `scrape`, and with the
@@ -118,7 +121,13 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
     started = datetime.now(UTC).isoformat()
     try:
         schema.create_all(engine)
-        report = run_cycle(settings, engine, platforms_of(args.platform), export=not args.no_export)
+        report = run_cycle(
+            settings,
+            engine,
+            platforms_of(args.platform),
+            export=not args.no_export,
+            deadline=deadline,
+        )
     except Exception as exc:
         # The database down, or a bug outside the per-platform guard. Still overwrite the
         # report: the previous run's "ok" must not be what is left on disk. Re-raised, so

@@ -40,6 +40,7 @@ from social_scraper.throttle import (
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
+    OutOfTime,
     Throttle,
 )
 from social_scraper.x import accounts, discovery
@@ -83,10 +84,13 @@ UNAVAILABLE = "unavailable"
 # Empty profile loads in a row, across accounts, at which X's layout -- not the accounts
 # -- is the cause: on 2026-10-03 a renamed op emptied every profile. One empty profile
 # among loaded ones is that account (2026-10-06: one of two, the other read fine).
+# Searches count the same way, on a streak of their own: one `$MSFT` search came back
+# empty among some seventy that read (2026-10-07), and failed the scrape.
 LAYOUT_STREAK = 2
 # Empty visits in a row after which a tracked account is dropped.
 MAX_EMPTY_VISITS = 2
 EMPTY_STREAK_PREFIX = "x:empty_timeline_streak:"
+EMPTY_SEARCH_STREAK_PREFIX = "x:empty_search_streak:"
 EMPTY_VISITS_PREFIX = "x:empty_visits:"
 
 
@@ -195,7 +199,8 @@ class XCrawler:
 
         A login wall on a *search* skips the remaining searches only: profile timelines
         are readable logged out, so seeds and tracked accounts still get visited. Any
-        other wall -- or a login wall on a timeline -- ends the cycle.
+        other wall -- or a login wall on a timeline -- ends the cycle, and so does the
+        cycle's deadline, as a notice.
         """
         searching = True
         for step in steps:
@@ -207,6 +212,9 @@ class XCrawler:
                     self.timeline(step)
                 else:
                     self.search(*step)
+            except OutOfTime as exc:
+                self.stats.notices.append(str(exc))
+                return
             except FetchFailed as exc:
                 if exc.outcome == LOGIN_REQUIRED and not is_visit:
                     # Running logged out is a supported mode, not a failure: say it once.
@@ -218,11 +226,18 @@ class XCrawler:
                     return
 
     def search(self, query: str, latest: bool) -> None:
-        result = self.fetch(search_url(query, latest), SEARCH_OPS, "search")
+        try:
+            result = self.fetch(search_url(query, latest), SEARCH_OPS, "search")
+        except FetchFailed as exc:
+            if exc.outcome != EMPTY:
+                raise
+            self.empty_search(exc)
+            return
         posts = parse_payloads([p.data for p in result.payloads], channel="search")
         self.stats.searches += 1
         self.stats.ingest.add(self.ingestor.ingest(posts))
         with self.engine.begin() as conn:
+            self._reset_states(conn, EMPTY_SEARCH_STREAK_PREFIX + self.accounts_table.name)
             self.stats.new_accounts += accounts.observe(
                 conn, posts, accounts.SEARCH, self.clock(), self.accounts_table
             )
@@ -300,12 +315,36 @@ class XCrawler:
                 note += " -- a seed: take it out of the seed list"
         self.stats.notices.append(note)
 
+    def empty_search(self, exc: FetchFailed) -> None:
+        """A search that captured nothing: a notice once, X's layout `LAYOUT_STREAK` in a row.
+
+        The streak spans cycles, as the profiles' does, so a renamed search op still
+        fails the scrape on its second cycle rather than going quiet.
+        """
+        key = EMPTY_SEARCH_STREAK_PREFIX + self.accounts_table.name
+        with self.engine.begin() as conn:
+            streak = int(repository.get_state(conn, key) or 0) + 1
+            repository.set_state(conn, key, str(streak), self.clock())
+        if streak < LAYOUT_STREAK:
+            self.stats.notices.append(f"search: {exc.detail}")
+            return
+        url = exc.detail.rpartition(" <- ")[2]
+        self.stats.errors.append(
+            f"{EMPTY}: {streak} searches in a row captured no results "
+            f"(X's layout, not the queries) <- {url}"
+        )
+
     def _clear_empty(self, conn: Connection, account: discovery.AccountRow) -> None:
         """A profile read fine: the empty-profile streak and this account's misses end."""
-        for key in (
+        self._reset_states(
+            conn,
             EMPTY_STREAK_PREFIX + self.accounts_table.name,
             f"{EMPTY_VISITS_PREFIX}{self.accounts_table.name}:{account.user_id}",
-        ):
+        )
+
+    def _reset_states(self, conn: Connection, *keys: str) -> None:
+        """Zero each counter in `keys` that is set, writing nothing for the rest."""
+        for key in keys:
             if repository.get_state(conn, key) not in (None, "0"):
                 repository.set_state(conn, key, "0", self.clock())
 
