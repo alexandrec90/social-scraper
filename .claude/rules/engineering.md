@@ -97,16 +97,16 @@ the statement. The reproductions are in
 `MSYS2_ARG_CONV_EXCL` in `.claude/settings.json` exempts revs opening `origin/`,
 `upstream/` or `refs/`; for any other rev with a slash, spell it `feature/x:./.devkit.toml`.
 
-## Waiting on a CI gate: one blocking call, not a poll loop
+## Waiting: one backgrounded call, not a poll loop
 
 ```bash
 gh pr checks <N> --watch --fail-fast      # with run_in_background: true
 ```
 
-`--watch` returns only once every check has settled, collapsing N polls into one call plus
-the completion notification. **Backgrounding is the half that is easy to drop**: a gate
-routinely outruns the Bash tool's ceiling, and a foreground `--watch` that times out is a
-poll loop with the timeout as its interval.
+`--watch` returns once every check has settled: one call and its notice. **Backgrounding
+is the half that is easy to drop**, here and for an `until` loop on a file a job will
+write (or put that loop in `Monitor`): a foreground wait holds the turn, and one that times
+out is a poll loop with the timeout as its interval.
 
 Diagnosing a failure (`gh run view --log-failed`, to a file where the volume warrants) and
 asking once are not polling; the waste begins at the *second* identical poll.
