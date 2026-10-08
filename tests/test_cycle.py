@@ -16,8 +16,10 @@ from conftest import (
     x_user_classic,
 )
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from sqlalchemy import select
 
+from social_scraper.browser import TIMED_OUT
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.fetch import LaunchTimedOut, PageResult, Payload
@@ -207,6 +209,12 @@ def test_run_platform_skips_and_errors(engine, settings):
         "Chrome not found"
         in run_platform(settings, REDDIT, engine, ctx, crash, policy_for)["error"]
     )
+
+    def slow(platform):
+        raise PlaywrightTimeout("Page.wait_for_selector: Timeout 30000ms exceeded.")
+
+    result = run_platform(settings, REDDIT, engine, ctx, slow, policy_for)
+    assert "error" not in result and "Timeout 30000ms" in result[TIMED_OUT]
 
 
 def test_a_sports_browser_that_will_not_start_is_a_skip_until_it_keeps_happening(engine, settings):

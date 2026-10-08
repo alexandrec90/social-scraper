@@ -56,6 +56,10 @@ from social_scraper.fetch import LaunchTimedOut, PageResult, Payload
 log = logging.getLogger(__name__)
 
 NAV_TIMEOUT_MS = 45_000
+# A crawl's result key when a Playwright timeout escaped it, where any other failure is
+# `error`. A page load past `NAV_TIMEOUT_MS` comes back as `PageResult.timed_out` and a
+# launch past Playwright's three minutes as `LaunchTimedOut`; this is any other wait.
+TIMED_OUT = "timed_out"
 # `_goto`'s answer for a navigation that timed out: not None, which is a load that
 # answered without a response object.
 NO_ANSWER = object()

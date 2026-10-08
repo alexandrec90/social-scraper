@@ -11,10 +11,11 @@ from conftest import (
     reddit_submission,
 )
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from social_scraper import runner
 from social_scraper.archive import store
-from social_scraper.browser import PlaywrightBrowser
+from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.fetch import LaunchTimedOut, PageResult
 from social_scraper.models import REDDIT, X
@@ -156,6 +157,52 @@ def test_run_platform_reports_browser_crash(settings, engine):
     ingestor = runner.Ingestor(engine, Universe({}))
     result = run_platform(settings, REDDIT, engine, ingestor, crash)
     assert "Chrome not found" in result["error"]
+
+
+def test_run_platform_reports_a_timeout_apart_from_an_error(settings, engine):
+    # A page load or a launch that times out never gets here (`PageResult.timed_out`,
+    # `LaunchTimedOut`); any other Playwright wait that runs out does.
+    def slow(platform):
+        raise PlaywrightTimeout("Page.wait_for_selector: Timeout 30000ms exceeded.")
+
+    ingestor = runner.Ingestor(engine, Universe({}))
+    result = run_platform(settings, REDDIT, engine, ingestor, slow)
+    assert "error" not in result
+    assert result[TIMED_OUT].startswith("TimeoutError: Page.wait_for_selector")
+
+
+def test_a_timed_out_crawl_is_a_timeout_of_the_cycle_not_an_error(settings, engine):
+    def slow(platform):
+        raise PlaywrightTimeout("Page.wait_for_selector: Timeout 30000ms exceeded.")
+
+    report = run_cycle(settings, engine, (REDDIT,), factory=slow, export=False)
+    assert report.ok and report.timeouts == [
+        "reddit: TimeoutError: Page.wait_for_selector: Timeout 30000ms exceeded."
+    ]
+
+
+def test_record_results_files_errors_and_timeouts_apart():
+    report = RunReport("t")
+    runner.record_results(
+        report, {"reddit": {"error": "boom"}, "x": {TIMED_OUT: "TimeoutError: t"}, "y": {}}
+    )
+    assert report.errors == ["reddit: boom"] and report.timeouts == ["x: TimeoutError: t"]
+    assert set(report.platforms) == {"reddit", "x", "y"}
+
+
+@pytest.mark.parametrize(
+    ("timeouts", "previous", "streak", "errors"),
+    [
+        ([], 2, 0, []),
+        (["x: t"], 0, 1, []),
+        (["x: t"], 1, 2, []),
+        (["x: t"], 2, 3, ["x: t (timed out 3 cycles running)"]),
+    ],
+)
+def test_judge_timeouts_fails_only_at_the_streak(timeouts, previous, streak, errors):
+    report = RunReport("t", timeouts=timeouts)
+    runner.judge_timeouts(report, previous)
+    assert report.timeout_streak == streak and report.errors == errors
 
 
 def test_a_browser_that_will_not_start_is_a_skip_until_it_keeps_happening(settings, engine):

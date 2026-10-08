@@ -210,6 +210,39 @@ def report_body(settings):
     return json.loads((settings.logs_dir / runner.REPORT_FILE).read_text())
 
 
+def test_a_timeout_fails_the_scrape_only_three_cycles_running(
+    settings, engine, monkeypatch, capsys
+):
+    """2e04c832, 2795e03e: a page load or a Chrome launch timing out while a backfill had
+    the machine loaded failed the scheduled job each time, and the next quiet cycle was
+    clean. A timeout is retried by the next cycle; three in a row is a failure."""
+    timed_out = "reddit: TimeoutError: Page.goto: Timeout 45000ms exceeded."
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", timeouts=[timed_out]))
+    for streak in (1, 2):
+        assert cmd_scrape(settings, engine, scrape_args()) == 0
+        out = capsys.readouterr().out
+        assert f"ok -- reddit timed out, retried next run ({streak} of 3 before it fails)" in out
+        assert report_body(settings)["timeout_streak"] == streak
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    assert f"FAILED -- {timed_out} (timed out 3 cycles running)" in capsys.readouterr().out
+
+
+def test_a_cycle_without_a_timeout_ends_the_streak(settings, engine, monkeypatch):
+    write_report(RunReport("earlier", timeout_streak=2), settings.logs_dir)
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["timeout_streak"] == 0
+
+
+@pytest.mark.parametrize(
+    "body", ["not json", "[]", '{"timeout_streak": "2"}', '{"timeout_streak": -1}']
+)
+def test_an_unreadable_previous_report_starts_the_streak_over(settings, body):
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    (settings.logs_dir / runner.REPORT_FILE).write_text(body, encoding="utf-8")
+    assert runner.previous_streak(settings.logs_dir) == 0
+
+
 def test_scrape_writes_the_report_and_sets_exit_code(settings, engine, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", errors=["x: boom"]))
     assert cmd_scrape(settings, engine, scrape_args()) == 1
