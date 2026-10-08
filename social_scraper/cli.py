@@ -36,7 +36,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict
@@ -47,7 +46,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
-from social_scraper import backfill
+from social_scraper import backfill, scratch
 from social_scraper.archive import lens
 from social_scraper.archive.store import LocalStore, ObjectStore, stores_for
 from social_scraper.config import SPORTS, Settings
@@ -275,10 +274,10 @@ def run_backfill(
                 [LocalStore(settings.archive_root)] if args.local_only else stores_for(settings)
             )
         universe = universe_for(settings)
-        # The spool can reach gigabytes; `data/` is on the same disk as the lake tree.
-        settings.data_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="import-", dir=settings.data_dir) as spool:
-            report = run(universe, stores, Path(spool), started)
+        # The spool can reach tens of GiB, a dry run's too; `data/` is on the same disk as
+        # the lake tree. `scratch_dir` first clears what a killed run left there.
+        with scratch.scratch_dir(settings.data_dir) as spool:
+            report = run(universe, stores, spool, started)
     except Exception as exc:
         # A bucket that cannot be configured, the symbol directory unreachable: the
         # previous run's report must not be what is left on disk. Re-raised, as in scrape.

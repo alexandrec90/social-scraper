@@ -1,5 +1,8 @@
 import argparse
 import json
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -105,6 +108,27 @@ def test_run_backfill_hands_the_run_its_stores_and_maps_the_report_to_an_exit_co
     assert seen == {"universe": universe, "stores": None, "spool_exists": True}
     assert "FAILED -- details in" in capsys.readouterr().out
     assert json.loads((settings.logs_dir / "demo-import.json").read_text())["ok"] is False
+
+
+def test_run_backfill_sweeps_a_killed_runs_spool_but_not_a_running_ones(
+    settings, universe, monkeypatch
+):
+    # 2026-10-08: a dry run reaped for low memory left its 29.7 GiB spool in data/ while
+    # a long Reddit import, whose spool sat beside it, kept running.
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    killed = settings.data_dir / f"import-{gone.pid}-abcdefgh"
+    running = settings.data_dir / f"import-{os.getpid()}-ijklmnop"
+    for spool in (killed, running):
+        (spool / "tmp").mkdir(parents=True)
+        (spool / "spool.duckdb").write_bytes(b"rows")
+
+    def run(got_universe, stores, spool, started):
+        return ImportReport(started_at=started.isoformat())
+
+    assert run_backfill(settings, import_args(dry_run=True), run, "demo-import.json") == 0
+    assert sorted(p.name for p in settings.data_dir.iterdir()) == [running.name]
 
 
 def test_x_import_writes_the_lake_and_its_report(
