@@ -131,6 +131,42 @@ def test_the_child_s_two_streams_arrive_in_the_order_it_wrote_them(monkeypatch):
     assert (code, output.split()) == (0, ["first", "second", "third"])
 
 
+def test_an_unattended_child_is_told_nobody_will_answer_a_prompt():
+    """fb1f5465: every Worktree Reconcile run from 01:15 to 05:00 on 2026-10-08 was held
+    to the scheduler's one-hour kill with nothing written, so the 05:00 fire was skipped
+    as an overlap. A pass with no boxes spawns only `git fetch` and `gh`, and git asks
+    Git Credential Manager, which waits on a sign-in nobody at 3 a.m. answers."""
+    env = lw.child_env({}, unattended=True)
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GCM_INTERACTIVE"] == "never"
+    assert env["GH_PROMPT_DISABLED"] == "1"
+    # A fetch whose connection stalls is ended rather than waited on for the hour.
+    assert int(env["GIT_HTTP_LOW_SPEED_TIME"]) > 0
+    assert int(env["GIT_HTTP_LOW_SPEED_LIMIT"]) > 0
+
+
+def test_a_clicked_child_may_still_prompt_and_a_caller_s_choice_stands():
+    """A person running a task can answer a sign-in, so only the unattended caller
+    loses the prompt -- and a value already in the environment is kept either way."""
+    assert not set(lw.UNATTENDED_ENV) & set(lw.child_env({}))
+    assert lw.child_env({"GCM_INTERACTIVE": "auto"}, unattended=True)["GCM_INTERACTIVE"] == "auto"
+
+
+def test_always_runs_the_command_with_the_unattended_environment(monkeypatch, tmp_path):
+    seen: dict[str, dict] = {}
+
+    def fake_stream(command, env=None):
+        seen[command[0]] = env or {}
+        return 0, "ok"
+
+    monkeypatch.delenv("GIT_TERMINAL_PROMPT", raising=False)
+    monkeypatch.setattr(lw, "stream", fake_stream)
+    lw.main(["--always", "Nightly", "--", "scheduled"], root=tmp_path)
+    lw.main(["Clicked", "--", "clicked"], root=tmp_path)
+    assert seen["scheduled"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_TERMINAL_PROMPT" not in seen["clicked"]
+
+
 # --- capping ------------------------------------------------------------------
 
 

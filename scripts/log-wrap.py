@@ -149,6 +149,21 @@ COLOR_ENV = {
     "PYTHONUNBUFFERED": "1",
 }
 
+# Set, the same way, on an unattended (`--always`) child only: nobody is there to answer
+# a prompt, so a tool that would ask must fail instead, and a transfer that stalls must
+# end. fb1f5465: every Worktree Reconcile run from 01:15 to 05:00 on 2026-10-08 was held
+# to the scheduler's one-hour kill, writing nothing, until a fire was skipped as an
+# overlap. A pass with no boxes spawns only `git fetch` and `gh`, unbounded, and git asks
+# Git Credential Manager, which can wait on a sign-in window. Git aborts a transfer slower
+# than `GIT_HTTP_LOW_SPEED_LIMIT` bytes/s for `GIT_HTTP_LOW_SPEED_TIME` seconds.
+UNATTENDED_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "never",
+    "GH_PROMPT_DISABLED": "1",
+    "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
+    "GIT_HTTP_LOW_SPEED_TIME": "120",
+}
+
 # Windows only. This wrapper has two kinds of caller and the flag is for the unattended
 # one: a scheduled task runs it under `pythonw.exe`, which has no console, and Windows
 # answers that by allocating a brand new console **window** for every console child. The
@@ -375,11 +390,11 @@ def write_artifact(root: Path, name: str, body: str, since: float = 0.0) -> Path
     return path
 
 
-def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
+def child_env(base: dict[str, str] | None = None, unattended: bool = False) -> dict[str, str]:
     """The child's environment, with colour, UTF-8 and unbuffered output forced unless
-    the caller decided."""
+    the caller decided -- and, for an `unattended` child, no prompts (`UNATTENDED_ENV`)."""
     env = dict(os.environ if base is None else base)
-    for key, value in COLOR_ENV.items():
+    for key, value in (COLOR_ENV | (UNATTENDED_ENV if unattended else {})).items():
         env.setdefault(key, value)
     return env
 
@@ -407,8 +422,9 @@ def echo(line: str, out=None) -> None:
         return
 
 
-def stream(command: list[str]) -> tuple[int, str]:
+def stream(command: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
     """Run `command`, echoing output live while keeping a copy. `(exit code, output)`.
+    `env` is the child's whole environment, `child_env()` when None.
 
     stderr is merged into stdout on purpose. Two pipes would need two readers to avoid
     deadlocking on a full buffer, and the artifact wants the interleaving the operator
@@ -418,6 +434,7 @@ def stream(command: list[str]) -> tuple[int, str]:
     pipe object buffers ahead -- which is invisible in a test and turns a long task's
     terminal into a stall followed by a flood.
     """
+    env = child_env() if env is None else env
     try:
         process = subprocess.Popen(
             command,
@@ -426,7 +443,7 @@ def stream(command: list[str]) -> tuple[int, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=child_env(),
+            env=env,
             creationflags=NO_WINDOW,
         )
     except FileNotFoundError:
@@ -440,7 +457,7 @@ def stream(command: list[str]) -> tuple[int, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=child_env(),
+            env=env,
             shell=True,
             creationflags=NO_WINDOW,
         )
@@ -453,7 +470,8 @@ def stream(command: list[str]) -> tuple[int, str]:
     return process.wait(), "".join(captured)
 
 
-def main(argv: list[str] | None = None, run=stream, root: Path | None = None) -> int:
+def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> int:
+    """`run(command)` is `stream` when None, in the environment `--always` asks for."""
     parsed = parse_argv(sys.argv[1:] if argv is None else argv)
     if parsed is None:
         print(
@@ -465,7 +483,10 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
     title, command, always = parsed
 
     started = time.time()
-    code, output = run(command)
+    if run is None:
+        code, output = stream(command, child_env(unattended=always))
+    else:
+        code, output = run(command)
 
     name = slug(title)
     path = write_artifact(

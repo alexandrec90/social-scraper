@@ -252,7 +252,15 @@ def _named_tests(posix: str) -> list[str]:
         return []
     if stem.startswith("test_") and any(posix.startswith(f"{d}/") for d in TEST_DIRS):
         return [posix]
-    return [f"{d}/test_{stem[:-3].replace('-', '_')}.py" for d in TEST_DIRS]
+    return [f"{d}/test_{name}.py" for name in _module_names(posix) for d in TEST_DIRS]
+
+
+def _module_names(posix: str) -> list[str]:
+    """`<stem>`, then `<package>_<stem>`: two `scraper.py` in sibling packages are tested
+    as `test_x_scraper.py` and `test_reddit_scraper.py`, which the stem alone never named
+    (social-scraper, 2026-10-07). Hyphens read as underscores."""
+    parts = posix.removesuffix(".py").replace("-", "_").split("/")
+    return [parts[-1], *(["_".join(parts[-2:])] if len(parts) > 1 else [])]
 
 
 def frontend_tier(root: Path) -> tuple[str, str] | None:

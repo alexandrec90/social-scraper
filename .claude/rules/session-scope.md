@@ -5,12 +5,12 @@ description: What a coding session leaves to the fix pass — no commit, push or
 # Rule: Stop at the change
 
 Deliberately **unscoped**, and vendored from devkit like `engineering.md`: change it
-there, not here.
+there.
 
 A coding session makes the change and describes it. It does **not**:
 
-- `git commit`, `git push`, or open a PR (`gh pr create`) — finish with the `/ship`
-  skill, which writes the commit message to a file and stops;
+- `git commit`, `git push`, or open a PR (`gh pr create`) — only the top-level session
+  ships; a subagent never invokes `/ship` or writes `logs/ship-intent.md`;
 - run the whole test suite — `pytest tests`, or any run naming no test file, however
   few tests it holds — or wait on a CI gate.
 
@@ -28,8 +28,8 @@ sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md), tests 
 Every session — fixer or not — that finds the linter or the tests unable to *start*
 fixes that in the same session. A missing `.venv` or `node_modules`, or a runtime off the
 project's pin, for example. It does not mention the problem in passing, write
-`logs/fix-blocked.md` over it, or leave it: the next session, on the same machine, would
-hit the same wall.
+`logs/fix-blocked.md` over it, or leave it: the next session on this machine hits the
+same wall.
 
 1. Run the project's provisioning command — the one its preflight names, or devkit's
    `python "$DEVKIT_DIR/scripts/worktree.py" provision .` from the tree (it installs;
