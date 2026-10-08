@@ -29,7 +29,15 @@ from social_scraper.db import repository
 from social_scraper.fetch import Browser, FetchFailed, PageResult
 from social_scraper.pipeline import IngestStats, PostIngestor
 from social_scraper.reddit.parse import REDDIT_BASE, parse_listing
-from social_scraper.throttle import CHALLENGED, ERROR, OK, RATE_LIMITED, OutOfTime, Throttle
+from social_scraper.throttle import (
+    CHALLENGED,
+    ERROR,
+    OK,
+    RATE_LIMITED,
+    TIMED_OUT,
+    OutOfTime,
+    Throttle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +68,8 @@ def listing_url(sub: str, listing: str, after: str | None = None, extra: str = "
 def classify(result: PageResult, expect_json: bool = True) -> tuple[str, str]:
     """What a Reddit page load means for the throttle: `(outcome, detail)`."""
     status, text = result.status, result.text.lower()
+    if result.timed_out:
+        return TIMED_OUT, "page load timed out"
     if status == 429:
         return RATE_LIMITED, "HTTP 429"
     if any(marker in text for marker in _WALL_MARKERS):
@@ -170,7 +180,7 @@ class RedditScraper:
             self.throttle.record(outcome, "warm_up", result.status, detail)
             if outcome == OK:
                 return
-            self.stats.errors.append(f"warm-up r/{sub}: {detail}")
+            self._failed(f"warm-up r/{sub}: {detail}", outcome)
             raise FetchFailed(outcome, detail)
         detail = f"JavaScript challenge not cleared after {WARM_UP_ATTEMPTS} loads"
         self.throttle.record(CHALLENGED, "warm_up", None, detail)
@@ -181,11 +191,24 @@ class RedditScraper:
         try:
             self.crawl_listing(sub, listing, **kwargs)
         except FetchFailed as exc:
-            self.stats.errors.append(f"r/{sub}/{listing}: {exc}")
-            if exc.outcome in (CHALLENGED, RATE_LIMITED):
+            noticed = self._failed(f"r/{sub}/{listing}: {exc}", exc.outcome)
+            # A timeout streak stops the run here: the breaker has just paused the
+            # platform, and the next `acquire` would end it as a skip, losing this run.
+            if exc.outcome in (CHALLENGED, RATE_LIMITED) or (
+                exc.outcome == TIMED_OUT and not noticed
+            ):
                 raise
         except ValueError as exc:
             self.stats.errors.append(f"r/{sub}/{listing}: unparseable page ({exc})")
+
+    def _failed(self, line: str, outcome: str) -> bool:
+        """Record a failed load: a notice when it timed out and the platform is not
+        failing (`Throttle.failing`), else an error. True when it was a notice."""
+        if outcome == TIMED_OUT and not self.throttle.failing():
+            self.stats.notices.append(line)
+            return True
+        self.stats.errors.append(line)
+        return False
 
     def crawl_listing(
         self,

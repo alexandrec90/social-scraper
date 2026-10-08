@@ -11,8 +11,11 @@ from social_scraper.reddit.scraper import RedditScraper, RedditRunStats, classif
 from social_scraper.throttle import (
     CHALLENGED,
     ERROR,
+    ERROR_STREAK,
     OK,
     RATE_LIMITED,
+    TIMED_OUT,
+    Block,
     MemoryThrottleStore,
     Policy,
     Throttle,
@@ -270,3 +273,60 @@ def test_missing_subreddit_404_is_not_an_error(engine, universe):
     s, _ = scraper(engine, universe, browser)
     stats = s.run(("wallstreetbets",))
     assert stats.errors == []
+
+
+TIMED_OUT_PAGE = PageResult(None, "u", timed_out=True)
+
+
+def test_a_timed_out_load_classifies_as_a_timeout_not_a_missing_body():
+    assert classify(TIMED_OUT_PAGE) == (TIMED_OUT, "page load timed out")
+    assert classify(TIMED_OUT_PAGE, expect_json=False)[0] == TIMED_OUT
+
+
+def test_one_timed_out_listing_is_a_notice_and_the_crawl_goes_on(engine, universe):
+    """2026-10-08: one 45 s `Page.goto` timeout, on a machine a backfill was loading,
+    ended the platform's crawl and failed the scheduled scrape."""
+    browser = FakeBrowser(
+        {
+            BASE + "new.json": TIMED_OUT_PAGE,
+            BASE + "comments.json": ok(reddit_listing([reddit_comment("c", T0)])),
+            BASE + "top.json": ok(reddit_listing([])),
+        }
+    )
+    s, store = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert stats.errors == []
+    assert any("new" in n and "timed out" in n for n in stats.notices)
+    assert stats.ingest.stored == 1 and stats.requests == 3
+    # Recorded against the breaker as a plain error, which the next success clears.
+    assert store.get_block("reddit").consecutive_failures == 0
+
+
+def test_timeouts_in_a_row_are_an_error_and_end_the_run(engine, universe):
+    browser = FakeBrowser()
+    browser.default = TIMED_OUT_PAGE
+    s, store = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets", "stocks"), warm=False)
+    assert len(browser.calls) == ERROR_STREAK
+    assert len(stats.notices) == ERROR_STREAK - 1
+    assert len(stats.errors) == 1 and "timed out" in stats.errors[0]
+    assert store.get_block("reddit").blocked_until is not None
+
+
+def test_a_timeout_after_failing_runs_is_an_error_at_once(engine, universe):
+    """The streak is the breaker's persisted count, so a platform that keeps timing out
+    across cycles is not a notice every cycle."""
+    browser = FakeBrowser()
+    browser.default = TIMED_OUT_PAGE
+    s, store = scraper(engine, universe, browser)
+    store.set_block("reddit", Block(None, "error: HTTP 502", ERROR_STREAK), NOW)
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert len(browser.calls) == 1 and stats.notices == [] and len(stats.errors) == 1
+
+
+def test_a_timed_out_warm_up_is_a_notice(engine, universe):
+    browser = FakeBrowser({BASE: TIMED_OUT_PAGE})
+    s, _ = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets",))
+    assert browser.calls == [BASE]
+    assert stats.errors == [] and "warm-up" in stats.notices[0]

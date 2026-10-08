@@ -22,7 +22,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from social_scraper.config import Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
-from social_scraper.fetch import Browser
+from social_scraper import launch
+from social_scraper.fetch import Browser, LaunchTimedOut
 from social_scraper.models import REDDIT
 from social_scraper.reddit.scraper import RedditOptions, RedditRunStats, RedditScraper
 from social_scraper.sports import discover, registry
@@ -163,10 +164,14 @@ def run_platform(
         throttle.check()
         with factory(platform) as browser:
             now = datetime.now(UTC)
+            launch.started(engine, platform, now)
             crawl = crawl_reddit if platform == REDDIT else crawl_x
             stats = crawl(settings, ctx, engine, browser, throttle, now)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
+    except LaunchTimedOut as exc:
+        log.warning("sports %s: %s", platform, exc)
+        return launch.timed_out(engine, platform, exc, datetime.now(UTC))
     except (PlaywrightError, SQLAlchemyError, OSError) as exc:
         log.exception("sports %s crawl failed", platform)
         return {"error": f"{type(exc).__name__}: {exc}"}

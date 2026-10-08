@@ -29,6 +29,11 @@ class PageResult:
     payloads: list[Payload] = field(default_factory=list)
     # Visible text excerpt: how a captcha or login wall is recognised.
     text: str = ""
+    # The load got no answer within the browser's navigation timeout. Returned rather
+    # than raised, so the scraper records it against the throttle and goes on to the next
+    # page: raised, it ended the whole platform's crawl and failed the cycle (2026-10-08,
+    # one 45 s `Page.goto` timeout while a backfill loaded the machine).
+    timed_out: bool = False
 
 
 class Browser(Protocol):
@@ -46,6 +51,14 @@ class Browser(Protocol):
         """Open `url`, scroll `scrolls` times, and return every JSON response whose URL
         satisfies `want`. `between` is called before each scroll (the human pause)."""
         ...
+
+
+class LaunchTimedOut(Exception):
+    """The browser did not start within Playwright's launch timeout.
+
+    Its own type so a crawl can tell "Chrome would not start this cycle" -- a loaded
+    machine -- from a Playwright error about a page (`launch.py`).
+    """
 
 
 class FetchFailed(Exception):

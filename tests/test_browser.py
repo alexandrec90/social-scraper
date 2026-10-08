@@ -10,7 +10,9 @@ renamed user agent on 2026-10-02 (the same two reads, through this class).
 
 from pathlib import Path
 
+import pytest
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from social_scraper import browser as browser_mod
 from social_scraper.browser import (
@@ -25,6 +27,7 @@ from social_scraper.browser import (
     launch_args,
     open_for_login,
 )
+from social_scraper.fetch import LaunchTimedOut
 
 HEADLESS_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -311,6 +314,52 @@ def test_init_script_keeps_what_the_stream_reads():
     # The two scripts are a pair: one keeps `$R` reads, the other walks what was kept.
     assert "__keptSsr" in KEEP_SSR_JS and "__keptSsr" in SSR_TWEETS_JS
     assert "new Proxy" in KEEP_SSR_JS
+
+
+class SlowPage(FakePage):
+    def goto(self, url, wait_until, timeout):
+        raise PlaywrightTimeoutError(f"Page.goto: Timeout {timeout}ms exceeded.")
+
+
+def test_a_timed_out_json_load_is_a_result_not_a_raise():
+    """2026-10-08: the raise ended the platform's crawl and failed the scheduled scrape."""
+    r = make(SlowPage()).get_json("https://www.reddit.com/r/x/new.json")
+    assert r.timed_out and r.status is None and r.final_url.endswith("new.json")
+
+
+def test_a_timed_out_capture_is_a_result_and_drops_its_listener():
+    page = SlowPage()
+    r = make(page).capture("https://x.com/a", lambda u: True, 2, lambda: None)
+    assert r.timed_out and r.payloads == [] and page.removed == ["response"]
+    assert page.waits == []  # no settling, no scrolling on a page that never loaded
+
+
+class StalledPlaywright(FakePlaywright):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def launch_persistent_context(self, **kwargs):
+        raise self.error
+
+
+def test_a_launch_timeout_is_its_own_error_and_stops_playwright(monkeypatch, tmp_path):
+    """A raise from `__enter__` never reaches `__exit__`: the driver would outlive the run."""
+    fake = StalledPlaywright(PlaywrightTimeoutError("Timeout 180000ms exceeded."))
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: fake)
+    with pytest.raises(LaunchTimedOut, match="180000ms"):
+        with PlaywrightBrowser(tmp_path / "x", "chrome", headless=False):
+            raise AssertionError("entered")
+    assert fake.calls[-1] == ("stop",)
+
+
+def test_any_launch_failure_stops_playwright(monkeypatch, tmp_path):
+    fake = StalledPlaywright(PlaywrightError("Chrome not found"))
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: fake)
+    with pytest.raises(PlaywrightError, match="Chrome not found"):
+        with PlaywrightBrowser(tmp_path / "x", "chrome", headless=False):
+            raise AssertionError("entered")
+    assert fake.calls[-1] == ("stop",)
 
 
 def test_open_for_login_waits_for_the_window(monkeypatch, tmp_path):

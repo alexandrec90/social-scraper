@@ -40,6 +40,13 @@ OK = "ok"
 RATE_LIMITED = "rate_limited"
 CHALLENGED = "challenged"
 ERROR = "error"
+# The page load got no answer in time (`PageResult.timed_out`). A plain error to the
+# breaker; to a crawler, a notice until `ERROR_STREAK` loads in a row have failed
+# (`Throttle.failing`), since one slow load on a loaded machine is not the platform down.
+TIMED_OUT = "timed_out"
+# Failed loads in a row at which a plain error pauses the platform, and at which a
+# timed-out load stops being a notice.
+ERROR_STREAK = 3
 # The page wants a sign-in. Not the platform pushing back -- our own state -- so it is
 # logged but leaves the circuit breaker alone; the scraper decides what to skip.
 LOGIN_REQUIRED = "login_required"
@@ -192,6 +199,11 @@ class Throttle:
         """A human pause inside a page (between scrolls). Not counted as a request."""
         self.sleep(self.rng.uniform(lo, hi))
 
+    def failing(self) -> bool:
+        """Whether the last `ERROR_STREAK` loads on this platform all failed -- across
+        runs, from the breaker's persisted count -- so a timeout is no longer a notice."""
+        return self.store.get_block(self.policy.platform).consecutive_failures >= ERROR_STREAK
+
     def record(self, outcome: str, kind: str, status: int | None = None, detail: str = "") -> None:
         """Log the request and move the circuit breaker according to `outcome`."""
         p, now = self.policy, self.clock()
@@ -213,7 +225,11 @@ class Throttle:
             until = now + timedelta(minutes=minutes)
         else:
             # A plain error (timeout, 5xx) only pauses once it keeps happening.
-            until = now + timedelta(minutes=p.backoff_base_minutes) if failures >= 3 else None
+            until = (
+                now + timedelta(minutes=p.backoff_base_minutes)
+                if failures >= ERROR_STREAK
+                else None
+            )
         reason = f"{outcome}: {detail}"[:500]
         self.store.set_block(p.platform, Block(until, reason, failures), now)
         if until is not None:

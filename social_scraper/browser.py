@@ -51,11 +51,14 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from social_scraper.fetch import PageResult, Payload
+from social_scraper.fetch import LaunchTimedOut, PageResult, Payload
 
 log = logging.getLogger(__name__)
 
 NAV_TIMEOUT_MS = 45_000
+# `_goto`'s answer for a navigation that timed out: not None, which is a load that
+# answered without a response object.
+NO_ANSWER = object()
 TEXT_EXCERPT_CHARS = 3_000
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 # Where Windows itself parks minimized windows: off every monitor.
@@ -141,17 +144,32 @@ class PlaywrightBrowser:
         self._rng = secrets.SystemRandom()
 
     def __enter__(self) -> PlaywrightBrowser:
+        """Start Playwright and Chrome. A launch past Playwright's timeout is
+        `LaunchTimedOut`; whatever fails, what was started is stopped before it raises --
+        a `with` whose `__enter__` raises never reaches `__exit__`, so the driver and any
+        Chrome it had started would outlive the run, holding the profile."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
+        try:
+            self._launch()
+        except PlaywrightTimeoutError as exc:
+            self.__exit__(None, None, None)
+            raise LaunchTimedOut(f"{self.profile_dir.name}: {exc}") from exc
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def _launch(self) -> None:
         user_agent = headful_user_agent(self._probe_user_agent()) if self.headless else None
         self._ctx = self._pw.chromium.launch_persistent_context(**self.launch_options(user_agent))
         self._ctx.add_init_script(KEEP_SSR_JS)
         self._page = self._ctx.pages[0] if self._ctx.pages else self._ctx.new_page()
         if self.minimized:
             self._minimize()
-        return self
 
     def launch_options(self, user_agent: str | None) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -200,15 +218,31 @@ class PlaywrightBrowser:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self._ctx is not None:
-            self._ctx.close()
-        if self._pw is not None:
-            self._pw.stop()
+        try:
+            if self._ctx is not None:
+                self._ctx.close()
+        finally:
+            self._ctx = None
+            if self._pw is not None:
+                self._pw.stop()
+                self._pw = None
+
+    def _goto(self, url: str) -> Any:
+        """The navigation's response; `NO_ANSWER` when it got none in time."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        try:
+            return self._page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except PlaywrightTimeoutError as exc:
+            log.warning("page load timed out: %s (%s)", url, exc)
+            return NO_ANSWER
 
     def get_json(self, url: str) -> PageResult:
         from playwright.sync_api import Error as PlaywrightError
 
-        resp = self._page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        resp = self._goto(url)
+        if resp is NO_ANSWER:
+            return PageResult(status=None, final_url=url, timed_out=True)
         data = None
         if resp is not None:
             try:
@@ -241,7 +275,9 @@ class PlaywrightBrowser:
 
         self._page.on("response", on_response)
         try:
-            resp = self._page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            resp = self._goto(url)
+            if resp is NO_ANSWER:
+                return PageResult(status=None, final_url=url, timed_out=True)
             self._settle()
             for _ in range(scrolls):
                 between()

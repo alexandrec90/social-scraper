@@ -9,9 +9,11 @@ from social_scraper.fetch import FetchFailed, PageResult, Payload
 from social_scraper.pipeline import Ingestor
 from social_scraper.throttle import (
     CHALLENGED,
+    ERROR_STREAK,
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
+    TIMED_OUT,
     MemoryThrottleStore,
     Policy,
     Throttle,
@@ -425,6 +427,40 @@ def test_the_base_crawler_needs_a_domain(engine, universe):
     assert base.is_tout(None) is False
     stock = scraper(engine, universe, FakeBrowser())
     assert isinstance(stock, scraper_mod.XCrawler)
+
+
+TIMED_OUT_PAGE = PageResult(None, "https://x.com/search", timed_out=True)
+
+
+def test_a_timed_out_load_is_a_timeout_not_an_empty_page():
+    """Empty would count against the account (`empty_timeline`), dropping it for X being slow."""
+    assert classify(TIMED_OUT_PAGE) == (TIMED_OUT, "page load timed out")
+
+
+def test_one_timed_out_search_is_a_notice_and_the_cycle_goes_on(engine, universe):
+    with engine.begin() as conn:
+        accounts.add_seeds(conn, ["alice"], NOW)
+    browser = FakeBrowser(
+        {
+            "https://x.com/search": TIMED_OUT_PAGE,
+            "https://x.com/alice": timeline_page(x_tweet_classic("2", "$NVDA", ALICE, ("NVDA",))),
+        }
+    )
+    stats = scraper(engine, universe, browser, pages=2, search_share=0.5, watchlist=("NVDA",)).run()
+    assert stats.errors == [] and stats.timelines == 1
+    assert any("timed out" in n for n in stats.notices)
+
+
+def test_timeouts_in_a_row_are_an_error_and_end_the_cycle(engine, universe):
+    with engine.begin() as conn:
+        accounts.add_seeds(conn, ["alice", "bob"], NOW)
+    browser = FakeBrowser()
+    browser.default = TIMED_OUT_PAGE
+    s = scraper(engine, universe, browser, pages=4, search_share=0.5, watchlist=("NVDA",))
+    stats = s.run()
+    assert len(browser.calls) == ERROR_STREAK
+    assert len(stats.errors) == 1 and "timed out" in stats.errors[0]
+    assert len(stats.notices) == ERROR_STREAK - 1
 
 
 def test_run_stats_start_empty():

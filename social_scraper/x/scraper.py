@@ -40,6 +40,7 @@ from social_scraper.throttle import (
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
+    TIMED_OUT,
     OutOfTime,
     Throttle,
 )
@@ -105,6 +106,8 @@ def search_url(query: str, latest: bool) -> str:
 def classify(result: PageResult) -> tuple[str, str]:
     """What an X page load means for the throttle: `(outcome, detail)`."""
     url, text = result.final_url, result.text.lower().replace(_CURLY_APOSTROPHE, "'")
+    if result.timed_out:
+        return TIMED_OUT, "page load timed out"
     if any(p in url for p in _LOGIN_PATHS):
         return LOGIN_REQUIRED, "not logged in -- run `uv run social-scraper login x`"
     if any(p in url for p in _LOCKED_PATHS):
@@ -221,8 +224,13 @@ class XCrawler:
                     self.stats.notices.append(f"search skipped -- {exc.detail}")
                     searching = False
                     continue
+                if exc.outcome == TIMED_OUT and not self.throttle.failing():
+                    # One slow load on a loaded machine; the next page may answer.
+                    self.stats.notices.append(str(exc))
+                    continue
                 self.stats.errors.append(str(exc))
-                if exc.outcome in (CHALLENGED, RATE_LIMITED, LOGIN_REQUIRED):
+                # A timeout streak ends the cycle too: the breaker has just paused X.
+                if exc.outcome in (CHALLENGED, RATE_LIMITED, LOGIN_REQUIRED, TIMED_OUT):
                     return
 
     def search(self, query: str, latest: bool) -> None:

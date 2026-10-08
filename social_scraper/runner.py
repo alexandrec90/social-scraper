@@ -33,7 +33,8 @@ from social_scraper.browser import PlaywrightBrowser
 from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
 from social_scraper.export import export_to_lake
-from social_scraper.fetch import Browser
+from social_scraper import launch
+from social_scraper.fetch import Browser, LaunchTimedOut
 from social_scraper.models import REDDIT, X
 from social_scraper.pipeline import Ingestor
 from social_scraper.reddit.scraper import RedditOptions, RedditScraper
@@ -198,9 +199,13 @@ def run_platform(
         # Check before launching Chrome: a paused platform should cost nothing.
         Throttle(policies(settings, platform), DbThrottleStore(engine)).check()
         with factory(platform) as browser:
+            launch.started(engine, platform, datetime.now(UTC))
             stats = _crawl(settings, platform, engine, ingestor, browser, policies)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
+    except LaunchTimedOut as exc:
+        log.warning("%s: %s", platform, exc)
+        return launch.timed_out(engine, platform, exc, datetime.now(UTC))
     except (PlaywrightError, SQLAlchemyError, OSError) as exc:
         log.exception("%s crawl failed", platform)
         return {"error": f"{type(exc).__name__}: {exc}"}
