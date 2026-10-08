@@ -53,7 +53,7 @@ where = ["."]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["tests/"]
-addopts = "-q -p devkit_temproot"
+addopts = "-p devkit_temproot"
 pythonpath = ["scripts/pytest-plugins"]
 
 [tool.mypy]
