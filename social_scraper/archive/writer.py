@@ -13,6 +13,9 @@ local tree or the bucket, `archive/store.py`):
 3. **Verify**: read the staged object back and check its row count and exact key set.
 4. Replace `part.parquet` with it, then update `_catalog/<dataset>.json` in the same
    call -- never as a later backfill (`.claude/rules/data-lake.md`).
+
+Steps 1-4 hold the partition's lock and the catalog update holds the catalog's
+(`archive/lock.py`): the scheduled export and a backfill can write the same tree at once.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from social_scraper.archive import manifest
+from social_scraper.archive.lock import file_lock
 from social_scraper.archive.manifest import DatasetSpec
 from social_scraper.archive.store import ObjectStore
 from social_scraper.models import as_utc
@@ -111,12 +115,23 @@ def write_partition(
     """
     rel = f"{partition_dir}/{PART_FILE}"
     new = rows if isinstance(rows, pa.Table) else pa.Table.from_pylist(rows, schema=spec.schema)
-    merged = merge(
-        _read_existing(store, rel, spec.schema),
-        new.select(spec.schema.names).cast(spec.schema),
-        spec.key_columns,
-        keep_existing,
-    )
+    new = new.select(spec.schema.names).cast(spec.schema)
+    # Two locks, taken one after the other and never nested, so no two writers can
+    # deadlock: the partition's for its read-merge-write, then the catalog's for its own.
+    with file_lock(store.lock_path(rel)):
+        merged = _replace_partition(store, spec, rel, new, keep_existing)
+    stamps = [as_utc(t) for t in merged.column(spec.ts_column).to_pylist() if t is not None]
+    result = PartitionResult(rel, merged.num_rows, min(stamps), max(stamps))
+    with file_lock(store.lock_path(manifest.catalog_key(spec.name))):
+        _record(store, spec, result, now)
+    return result
+
+
+def _replace_partition(
+    store: ObjectStore, spec: DatasetSpec, rel: str, new: pa.Table, keep_existing: bool
+) -> pa.Table:
+    """Merge `new` into the object at `rel`, verify the staged copy, promote it."""
+    merged = merge(_read_existing(store, rel, spec.schema), new, spec.key_columns, keep_existing)
     expected = set(_keys(merged, spec.key_columns))
     if len(expected) != merged.num_rows:
         raise VerifyError(f"{store.name}: {rel}: duplicate keys in the merged partition")
@@ -130,13 +145,11 @@ def write_partition(
         store.delete(staged)
         raise VerifyError(f"{store.name}: {rel}: read-back did not match what was written")
     store.promote(staged, rel)
-    stamps = [as_utc(t) for t in merged.column(spec.ts_column).to_pylist() if t is not None]
-    result = PartitionResult(rel, merged.num_rows, min(stamps), max(stamps))
-    _record(store, spec, result, now)
-    return result
+    return merged
 
 
 def _record(store: ObjectStore, spec: DatasetSpec, result: PartitionResult, now: datetime) -> None:
+    """Add `result` to the catalog. Read-modify-write: the caller holds the catalog lock."""
     current = manifest.load(store, spec.name) or {}
     partitions = dict(current.get("partitions") or {})
     partitions[result.key] = manifest.partition_entry(
