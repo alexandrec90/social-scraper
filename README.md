@@ -120,6 +120,7 @@ your personal one.
 | `lake [--days N]` | per-symbol daily mentions/authors/stance from the lake |
 | `universe` | refresh the symbol directory |
 | `reddit-import PATH... [--since D] [--until D] [--all-posts] [--local-only] [--dry-run]` | backfill Reddit history from archive dumps; report in `logs/reddit-import.json` |
+| `x-import FOLDER... [same options]` | backfill X history from tweet CSV datasets; report in `logs/x-import.json` |
 | `sports-sync [KEY...]` | re-read leagues from Wikidata now; outcome in `logs/sports-sync.json` |
 
 Every run overwrites `logs/scrape-run.json` with what each platform did, every error,
@@ -146,8 +147,13 @@ archives, which are free to download and need no account:
   `<sub>_submissions.zst` and `<sub>_comments.zst` for the subreddits in
   `REDDIT_SUBREDDITS` -- the full torrent is terabytes.
 - **2026 onwards:** [Arctic Shift](https://github.com/ArthurHeitmann/arctic_shift)'s
-  per-subreddit [download tool](https://arctic-shift.photon-reddit.com/download-tool),
-  which publishes each month a few weeks after it ends.
+  monthly torrents (`RC_<month>.zst` comments, `RS_<month>.zst` submissions; all of
+  Reddit, 60-75 GiB a month) from its
+  [download links](https://github.com/ArthurHeitmann/arctic_shift/blob/master/download_links.md),
+  published a few weeks after each month ends, or its per-subreddit
+  [download tool](https://arctic-shift.photon-reddit.com/download-tool) for a few
+  subreddits. A whole-Reddit month imports in about an hour: lines from other
+  subreddits are dropped from the raw bytes, before any parsing (142k lines/s, measured).
 
 Put the files in one folder and import it (a folder, because PowerShell hands a native
 command its `*.zst` unexpanded):
@@ -172,6 +178,23 @@ per post -- Arctic Shift's about 36 hours after posting -- which stays on the ro
 symbol registry, which the live export rewrites from the database. The spool goes under `DATA_DIR` and can reach gigabytes for
 r/wallstreetbets; `--dry-run` first says how much is coming. Use of the archives is
 governed by Reddit's terms, which the archives do not restate -- check them before use.
+
+### X history from tweet datasets
+
+X has no free bulk archive, and id-only datasets can no longer be turned back into text,
+so only datasets that shipped the text help. `x-import` reads them; first supported is
+the [Cashtag Piggybacking dataset](https://zenodo.org/record/2686862) (CNR, CC BY 4.0,
+research use only): about 9M cashtag tweets from May to September 2017, with each
+author's bot label. Download `tweets.csv.zip` and `users.csv.zip` into one folder:
+
+```bash
+uv run social-scraper x-import D:/social-dumps/cashtag-2017 --local-only
+```
+
+Tweets land as `platform=x`, `channel=archive`, authors hashed from their numeric id like
+the crawler's (no handle stored); retweets are skipped, as the crawler skips them; the
+bot label is `extra.bot`. Report in `logs/x-import.json`. Both importers share
+`backfill.py`: the spool, the lake write and the never-over-a-live-row rule.
 
 ## Data contract (data-lake / ibkr_trader)
 
@@ -249,7 +272,9 @@ social_scraper/
   throttle.py             pacing, budgets, active hours, circuit breaker
   reddit/                 listing parser + incremental subreddit crawler; dumps.py
                           backfills history from Pushshift / Arctic Shift dumps
-  x/                      GraphQL/SSR tweet parser, account discovery, crawler
+  x/                      GraphQL/SSR tweet parser, account discovery, crawler;
+                          tweet_dumps.py backfills history from tweet CSV datasets
+  backfill.py             what every archive importer shares: spool, lake write, report
   symbols/                NASDAQ symbol universe + mention extraction
   sports/                 the sports domain: league list, Wikidata sync, matcher, crawl plans
   pipeline.py             scrub, extract, score, upsert

@@ -18,6 +18,8 @@ reddit-import PATH... backfill the lake from Pushshift / Arctic Shift dump files
                       folders of them); --since/--until YYYY-MM-DD (default since
                       2015-01-01), --all-posts keeps posts naming no symbol,
                       --local-only skips the bucket, --dry-run counts without writing
+x-import FOLDER...    backfill X history from tweet CSV datasets (tweets.csv[.zip], with
+                      users.csv[.zip] beside it); same options, no default --since
 sports-sync [KEY...]  re-read the named leagues (default: all) from Wikidata now; the
                       outcome goes to logs/sports-sync.json, and any failure exits 1
 
@@ -36,6 +38,7 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,12 +47,14 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
+from social_scraper import backfill
 from social_scraper.archive import lens
 from social_scraper.archive.store import LocalStore, ObjectStore, stores_for
 from social_scraper.config import SPORTS, Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.export import export_to_lake
+from social_scraper.backfill import ImportReport
 from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
@@ -67,6 +72,8 @@ from social_scraper.sports import registry as sports_registry
 from social_scraper.sports.leagues import LeagueConfigError, load_leagues
 from social_scraper.sports.sync import SyncPolicy, sync_leagues
 from social_scraper.sports.wikidata import WikidataClient
+from social_scraper.symbols.universe import Universe
+from social_scraper.x import tweet_dumps
 
 LOGIN_URLS = {REDDIT: "https://www.reddit.com/login/", X: "https://x.com/i/flow/login"}
 
@@ -90,13 +97,14 @@ def build_parser() -> argparse.ArgumentParser:
     lake = sub.add_parser("lake")
     lake.add_argument("--days", type=int, default=3)
     sub.add_parser("universe")
-    imp = sub.add_parser("reddit-import")
-    imp.add_argument("paths", nargs="+", type=Path)
-    imp.add_argument("--since", type=utc_date, default=dumps.DEFAULT_SINCE)
-    imp.add_argument("--until", type=utc_date, default=None)
-    imp.add_argument("--all-posts", action="store_true")
-    imp.add_argument("--local-only", action="store_true")
-    imp.add_argument("--dry-run", action="store_true")
+    for name, since in (("reddit-import", dumps.DEFAULT_SINCE), ("x-import", None)):
+        imp = sub.add_parser(name)
+        imp.add_argument("paths", nargs="+", type=Path)
+        imp.add_argument("--since", type=utc_date, default=since)
+        imp.add_argument("--until", type=utc_date, default=None)
+        imp.add_argument("--all-posts", action="store_true")
+        imp.add_argument("--local-only", action="store_true")
+        imp.add_argument("--dry-run", action="store_true")
     sub.add_parser("sports-sync").add_argument("leagues", nargs="*", metavar="KEY")
     return parser
 
@@ -235,15 +243,17 @@ def cmd_universe(settings: Settings, engine: Engine, args: argparse.Namespace) -
     return 0
 
 
-def cmd_reddit_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+BackfillRun = Callable[[Universe, "list[ObjectStore] | None", Path, datetime], ImportReport]
+
+
+def run_backfill(
+    settings: Settings,
+    args: argparse.Namespace,
+    run: BackfillRun,
+    report_file: str,
+) -> int:
+    """What every `*-import` command shares: stores, symbols, spool, report, exit code."""
     started = datetime.now(UTC)
-    flt = dumps.DumpFilter(
-        subreddits=frozenset(s.lower() for s in settings.subreddits),
-        since=args.since,
-        until=args.until,
-        ignore_authors=settings.ignored_reddit_authors,
-        all_posts=args.all_posts,
-    )
     try:
         stores: list[ObjectStore] | None = None  # a dry run writes nowhere
         if not args.dry_run:
@@ -253,21 +263,21 @@ def cmd_reddit_import(settings: Settings, engine: Engine, args: argparse.Namespa
         universe = universe_for(settings)
         # The spool can reach gigabytes; `data/` is on the same disk as the lake tree.
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="reddit-import-", dir=settings.data_dir) as spool:
-            paths = dumps.expand_inputs(args.paths)
-            report = dumps.import_dumps(paths, universe, flt, stores, Path(spool), started)
+        with tempfile.TemporaryDirectory(prefix="import-", dir=settings.data_dir) as spool:
+            report = run(universe, stores, Path(spool), started)
     except Exception as exc:
         # A bucket that cannot be configured, the symbol directory unreachable: the
         # previous run's report must not be what is left on disk. Re-raised, as in scrape.
-        report = dumps.ImportReport(
+        report = ImportReport(
             started_at=started.isoformat(),
             finished_at=datetime.now(UTC).isoformat(),
             dry_run=args.dry_run,
             errors=[f"import: {type(exc).__name__}: {exc}"],
         )
-        print(f"FAILED -- details in {dumps.write_report(report, settings.logs_dir)}")
+        path = backfill.write_report(report, settings.logs_dir, report_file)
+        print(f"FAILED -- details in {path}")
         raise
-    path = dumps.write_report(report, settings.logs_dir)
+    path = backfill.write_report(report, settings.logs_dir, report_file)
     for row in report.by_year:
         print(
             f"  {row['year']}: {row['posts']} posts ({row['comments']} comments), "
@@ -279,6 +289,31 @@ def cmd_reddit_import(settings: Settings, engine: Engine, args: argparse.Namespa
     print(f"{len(report.files)} file(s): {report.posts} posts, {report.mentions} mentions {where}")
     print(f"{'ok' if report.ok else 'FAILED'} -- details in {path}")
     return 0 if report.ok else 1
+
+
+def cmd_reddit_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    flt = dumps.DumpFilter(
+        subreddits=frozenset(s.lower() for s in settings.subreddits),
+        since=args.since,
+        until=args.until,
+        ignore_authors=settings.ignored_reddit_authors,
+        all_posts=args.all_posts,
+    )
+
+    def run(universe, stores, spool, started):
+        paths = dumps.expand_inputs(args.paths)
+        return dumps.import_dumps(paths, universe, flt, stores, spool, started)
+
+    return run_backfill(settings, args, run, dumps.REPORT_FILE)
+
+
+def cmd_x_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    flt = tweet_dumps.TweetFilter(since=args.since, until=args.until, all_posts=args.all_posts)
+
+    def run(universe, stores, spool, started):
+        return tweet_dumps.import_folder(args.paths, universe, flt, stores, spool, started)
+
+    return run_backfill(settings, args, run, tweet_dumps.REPORT_FILE)
 
 
 SPORTS_SYNC_FILE = "sports-sync.json"
@@ -344,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         "lake": cmd_lake,
         "universe": cmd_universe,
         "reddit-import": cmd_reddit_import,
+        "x-import": cmd_x_import,
         "sports-sync": cmd_sports_sync,
     }[args.command]
     return handler(settings, engine, args)
