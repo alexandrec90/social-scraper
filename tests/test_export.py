@@ -1,5 +1,5 @@
 import io
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pyarrow.parquet as pq
 from conftest import LAKE_BUCKET, NOW, Clock, IsolatedSettings, bucket_keys
@@ -8,11 +8,14 @@ from sqlalchemy import select
 from social_scraper import export as export_mod
 from social_scraper.archive import datasets, manifest
 from social_scraper.archive import store as store_mod
+from social_scraper.archive.lock import TIMEOUT_S
 from social_scraper.archive.store import LocalStore, S3Store
 from social_scraper.archive.writer import from_parquet, to_parquet
 from social_scraper.db import repository, schema
 from social_scraper.export import (
+    NO_DEADLINE,
     DatasetExport,
+    Deadline,
     ExportResult,
     export_all,
     export_dataset,
@@ -172,6 +175,63 @@ def test_unwritable_lake_degrades_and_keeps_the_watermark(engine, universe, tmp_
     with engine.connect() as conn:
         assert repository.get_watermark(conn, datasets.POSTS.name) is None
         assert conn.execute(select(schema.posts)).first() is not None
+
+
+# --- a deadline: what is left waits for the next run ------------------------------------
+
+
+def test_past_its_deadline_the_export_defers_every_dataset_and_keeps_the_watermarks(
+    engine, universe, tmp_path
+):
+    seed(engine, universe, Clock(), post("a", "calls"))
+    result = export_all(engine, [LocalStore(tmp_path)], NOW, Deadline(NOW, lambda: NOW))
+    assert result.ok, "a deferral is not an error"
+    by_name = {d.dataset: d for d in result.datasets}
+    assert "out of export time" in by_name["social_scraper_posts"].deferred
+    assert "social_scraper_posts" in result.deferred
+    assert not list(tmp_path.rglob("*.parquet"))
+    with engine.connect() as conn:
+        assert repository.get_watermark(conn, datasets.POSTS.name) is None
+    # The next run, with time to spare, exports the same rows.
+    in_time = Deadline(NOW + timedelta(hours=1), lambda: NOW)
+    later = export_all(engine, [LocalStore(tmp_path)], NOW, in_time)
+    assert {d.dataset: d.rows for d in later.datasets}["social_scraper_posts"] == 1
+    assert not later.deferred
+
+
+def test_a_partition_lock_held_past_the_deadline_defers_and_leaves_the_holders_lock(
+    engine, universe, tmp_path
+):
+    """2026-10-07: a `backfill export-full` held the lake's locks while the 20:30 scrape
+    exported; each wait could take the lock's whole ten minutes, and the export ran 35
+    minutes past its crawl. With a deadline, the wait ends there."""
+    seed(engine, universe, Clock(), post("a", "calls"))
+    store = LocalStore(tmp_path)
+    with engine.connect() as conn:
+        row = repository.rows_since(conn, schema.posts, "updated_at", None, 1)[0]
+    (lake_row,), _ = lake_rows(datasets.POSTS, [row])
+    lock = store.lock_path(f"{datasets.POSTS.partition_of(lake_row)}/part.parquet")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("a backfill")
+    until = datetime.now(UTC) + timedelta(seconds=0.3)
+    report = export_dataset(engine, [store], datasets.POSTS, NOW, deadline=Deadline(until))
+    assert report.deferred and "held by another writer" in report.deferred
+    assert report.rows == 0
+    assert lock.read_text() == "a backfill"
+    with engine.connect() as conn:
+        assert repository.get_watermark(conn, datasets.POSTS.name) is None
+
+
+def test_lock_wait_is_the_time_left_capped_at_the_locks_own_timeout():
+    def at(seconds):
+        return Deadline(NOW + timedelta(seconds=seconds), lambda: NOW)
+
+    assert NO_DEADLINE.lock_wait_s() == TIMEOUT_S and not NO_DEADLINE.passed()
+    assert at(30).lock_wait_s() == 30 and not at(30).passed()
+    assert at(3600).lock_wait_s() == TIMEOUT_S
+    assert at(-5).lock_wait_s() == 0 and at(-5).passed()
+    assert at(0).passed(), "the deadline itself is past it"
+    assert at(0).deferral("held") == f"out of export time at {NOW:%H:%M:%S}Z (held)"
 
 
 # --- export_to_lake: the stores the settings configure ---------------------------------

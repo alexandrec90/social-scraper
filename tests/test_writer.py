@@ -8,13 +8,16 @@ import pytest
 from conftest import NOW
 
 from social_scraper.archive import manifest, writer
+from social_scraper.archive.lock import TIMEOUT_S, LockTimeout
 from social_scraper.archive.manifest import DatasetSpec
 from social_scraper.archive.store import LocalStore
 from social_scraper.archive.writer import (
+    KEEP_EXISTING,
     PART_FILE,
     STAGED_SUFFIX,
     PartitionResult,
     VerifyError,
+    WriteOptions,
     from_parquet,
     merge,
     to_parquet,
@@ -55,13 +58,25 @@ def test_merge_keep_existing_only_adds_new_keys():
     assert merge(None, new, ("id",), keep_existing=True) is new
 
 
+def test_a_bounded_wait_for_a_held_partition_gives_up_before_writing(tmp_path):
+    store = LocalStore(tmp_path)
+    lock = store.lock_path(f"demo/dt=x/{PART_FILE}")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("another writer")
+    with pytest.raises(LockTimeout):
+        write_partition(store, SPEC, "demo/dt=x", rows(("a", 1)), NOW, WriteOptions(wait_s=0))
+    assert not (tmp_path / "demo" / "dt=x" / PART_FILE).exists()
+    assert manifest.load(store, SPEC.name) is None
+    assert writer.DEFAULT_WRITE == WriteOptions(keep_existing=False, wait_s=TIMEOUT_S)
+
+
 def test_write_partition_takes_a_table_and_can_keep_stored_rows(tmp_path):
     store = LocalStore(tmp_path)
     write_partition(store, SPEC, "demo/dt=x", rows(("a", 1)), NOW)
     # Columns out of order, as a spool hands them back: selected into the spec's order.
     table = pa.Table.from_pylist(rows(("a", 7), ("b", 7)), schema=SPEC.schema)
     table = table.select(["score", "id", "created_at"])
-    result = write_partition(store, SPEC, "demo/dt=x", table, NOW, keep_existing=True)
+    result = write_partition(store, SPEC, "demo/dt=x", table, NOW, KEEP_EXISTING)
     assert result.rows == 2
     got = {r["id"]: r["score"] for r in pq.read_table(tmp_path / result.key).to_pylist()}
     assert got == {"a": 1, "b": 7}

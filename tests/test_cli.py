@@ -235,6 +235,15 @@ def test_a_failed_scrape_names_its_first_error_without_the_url(tmp_path):
     assert line.endswith("scrape-run.json")
 
 
+def test_an_ok_scrape_names_a_deferred_export(tmp_path):
+    """A deferred export is not a failure, but a lake falling behind must show in the log."""
+    export = [{"dataset": "a", "deferred": "out of export time"}, {"dataset": "b"}]
+    line = cli.outcome_line(RunReport("t", export=export), tmp_path / "scrape-run.json")
+    assert line.startswith("ok -- export of 1 dataset(s) deferred to the next run -- details")
+    done = RunReport("t", export=[{"dataset": "b", "deferred": None}])
+    assert cli.outcome_line(done, tmp_path).startswith("ok -- details in")
+
+
 def test_scrape_with_the_database_down_raises_and_overwrites_the_report(settings, tmp_path):
     # Raised, not returned: the process exits 1 with the traceback, as any uncaught error.
     write_report(RunReport("earlier"), settings.logs_dir)
@@ -316,6 +325,14 @@ def test_a_scheduled_scrape_counts_its_deadline_from_the_fire(settings, engine, 
     cmd_scrape(settings, engine, build_parser().parse_args(["scrape", "x", "--no-export"]))
     share = timedelta(minutes=settings.cycle_minutes * runner.CYCLE_DEADLINE_SHARE)
     assert seen["deadline"] == fired + share
+    export_share = timedelta(minutes=settings.cycle_minutes * runner.EXPORT_DEADLINE_SHARE)
+    assert runner.export_deadline(seen["deadline"], settings.cycle_minutes) == fired + export_share
+
+
+def test_the_export_stops_after_the_page_loads_and_before_the_next_fire():
+    """2026-10-07: a backfill held the lake's locks and the 20:30 export ran 35 minutes,
+    so the 21:00 fire was skipped. The export ends inside the cycle, after the crawl's."""
+    assert runner.CYCLE_DEADLINE_SHARE < runner.EXPORT_DEADLINE_SHARE < 1
 
 
 def test_run_passes_options_through(settings, engine, monkeypatch):

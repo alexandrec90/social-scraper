@@ -8,7 +8,7 @@ local tree or the bucket, `archive/store.py`):
    rows in on the natural key -- **the new row wins**, because a re-observed post
    carries fresher engagement than the copy already archived. A backfill
    (`reddit/dumps.py`) is the exception: its rows were observed earlier than anything
-   already stored, so it passes `keep_existing`.
+   already stored, so it passes `KEEP_EXISTING`.
 2. Write the result to `part.parquet.tmp`.
 3. **Verify**: read the staged object back and check its row count and exact key set.
 4. Replace `part.parquet` with it, then update `_catalog/<dataset>.json` in the same
@@ -28,7 +28,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from social_scraper.archive import manifest
-from social_scraper.archive.lock import file_lock
+from social_scraper.archive.lock import TIMEOUT_S, file_lock
 from social_scraper.archive.manifest import DatasetSpec
 from social_scraper.archive.store import ObjectStore
 from social_scraper.models import as_utc
@@ -47,6 +47,21 @@ class PartitionResult:
     rows: int
     min_ts: datetime
     max_ts: datetime
+
+
+@dataclass(frozen=True)
+class WriteOptions:
+    """How `write_partition` merges, and how long it waits for the partition's lock."""
+
+    keep_existing: bool = False  # see `merge`
+    # `LockTimeout` past it, before anything is written: a caller with a deadline passes
+    # the time it has left. The catalog's lock always keeps the full timeout -- once the
+    # partition is replaced, recording it is what must happen.
+    wait_s: float = TIMEOUT_S
+
+
+DEFAULT_WRITE = WriteOptions()
+KEEP_EXISTING = WriteOptions(keep_existing=True)
 
 
 def _keys(table: pa.Table, columns: tuple[str, ...]) -> list[tuple]:
@@ -106,20 +121,20 @@ def write_partition(
     partition_dir: str,
     rows: list[dict[str, Any]] | pa.Table,
     now: datetime,
-    keep_existing: bool = False,
+    options: WriteOptions = DEFAULT_WRITE,
 ) -> PartitionResult:
     """Merge `rows` into one partition of `store` and record it in that store's catalog.
 
     `rows` may already be a table in `spec.schema` -- a backfill's partition can be large
-    enough that a list of dicts is the expensive part. `keep_existing`: see `merge`.
+    enough that a list of dicts is the expensive part. `options`: see `WriteOptions`.
     """
     rel = f"{partition_dir}/{PART_FILE}"
     new = rows if isinstance(rows, pa.Table) else pa.Table.from_pylist(rows, schema=spec.schema)
     new = new.select(spec.schema.names).cast(spec.schema)
     # Two locks, taken one after the other and never nested, so no two writers can
     # deadlock: the partition's for its read-merge-write, then the catalog's for its own.
-    with file_lock(store.lock_path(rel)):
-        merged = _replace_partition(store, spec, rel, new, keep_existing)
+    with file_lock(store.lock_path(rel), timeout_s=options.wait_s):
+        merged = _replace_partition(store, spec, rel, new, options.keep_existing)
     stamps = [as_utc(t) for t in merged.column(spec.ts_column).to_pylist() if t is not None]
     result = PartitionResult(rel, merged.num_rows, min(stamps), max(stamps))
     with file_lock(store.lock_path(manifest.catalog_key(spec.name))):

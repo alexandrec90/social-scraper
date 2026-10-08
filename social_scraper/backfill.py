@@ -42,7 +42,7 @@ import pyarrow as pa
 from social_scraper.archive import datasets
 from social_scraper.archive.manifest import DatasetSpec, ManifestError
 from social_scraper.archive.store import ObjectStore
-from social_scraper.archive.writer import VerifyError, write_partition
+from social_scraper.archive.writer import KEEP_EXISTING, VerifyError, write_partition
 from social_scraper.export import lake_rows
 from social_scraper.models import Post
 from social_scraper.pipeline import build_row
@@ -313,7 +313,7 @@ def write_spool(
         written = 0
         for part, rows in partition_runs(open_reader()):
             for store in stores:
-                write_partition(store, spec, part, rows, now, keep_existing=True)
+                write_partition(store, spec, part, rows, now, KEEP_EXISTING)
             written += 1
         report.partitions[spec.name] = written
 
