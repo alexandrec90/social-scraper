@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
-from social_scraper.fetch import PageResult, Payload
+from social_scraper.fetch import LaunchTimedOut, PageResult, Payload
 from social_scraper.models import REDDIT, X
 from social_scraper.runner import policy_for
 from social_scraper.sports import cycle, registry
@@ -207,6 +207,18 @@ def test_run_platform_skips_and_errors(engine, settings):
         "Chrome not found"
         in run_platform(settings, REDDIT, engine, ctx, crash, policy_for)["error"]
     )
+
+
+def test_a_sports_browser_that_will_not_start_is_a_skip_until_it_keeps_happening(engine, settings):
+    ctx = prepare(settings, engine, NOW)
+
+    def stalled(platform):
+        raise LaunchTimedOut("Timeout 180000ms exceeded.")
+
+    first = run_platform(settings, REDDIT, engine, ctx, stalled, policy_for)
+    assert "180000ms" in first["skipped"]
+    run_platform(settings, REDDIT, engine, ctx, stalled, policy_for)
+    assert "error" in run_platform(settings, REDDIT, engine, ctx, stalled, policy_for)
 
 
 def test_discover_names_with_nothing_due_asks_nothing(engine, settings):
