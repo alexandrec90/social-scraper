@@ -16,9 +16,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from social_scraper.browser import TIMED_OUT
 from social_scraper.config import Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
@@ -167,6 +169,9 @@ def run_platform(
             stats = crawl(settings, ctx, engine, browser, throttle, now)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
+    except PlaywrightTimeout as exc:
+        log.warning("sports %s crawl timed out: %s", platform, exc)
+        return {TIMED_OUT: f"{type(exc).__name__}: {exc}"}
     except (PlaywrightError, SQLAlchemyError, OSError) as exc:
         log.exception("sports %s crawl failed", platform)
         return {"error": f"{type(exc).__name__}: {exc}"}

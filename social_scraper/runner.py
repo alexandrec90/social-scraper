@@ -26,10 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from social_scraper.browser import PlaywrightBrowser
+from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
 from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
 from social_scraper.export import export_to_lake
@@ -69,6 +70,13 @@ EXPORT_DEADLINE_SHARE = 0.9
 # that: 2026-10-07 17:30, the scrape started at 17:35:44 (compose 3m24s, uv 2m20s under
 # load), so a deadline counted from it let the run reach past the 18:00 fire.
 FIRED_AT_ENV = "DEVKIT_FIRED_AT"
+# A crawl that timed out -- a page load past `NAV_TIMEOUT_MS`, Chrome slower to launch
+# than Playwright's three minutes -- fails the cycle only once it has happened this many
+# cycles running (`judge_timeouts`). One is the machine, not the scraper: 2026-10-08, every
+# timeout landed while a person's arctic backfill had the machine loaded, each was filed
+# on devkit's ledger as a failed scheduled job (2e04c832, 2795e03e), and the cycle after
+# the load lifted was clean. Three in a row, an hour and a half, is something to act on.
+TIMEOUT_STREAK_FAILS = 3
 
 
 @dataclass
@@ -81,10 +89,34 @@ class RunReport:
     sports: dict[str, Any] = field(default_factory=dict)
     export: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Crawls that timed out this cycle, and how many cycles running one has.
+    timeouts: list[str] = field(default_factory=list)
+    timeout_streak: int = 0
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+def previous_streak(logs_dir: Path) -> int:
+    """The last cycle's `timeout_streak`, from its report; 0 when there is none to read."""
+    try:
+        streak = json.loads((logs_dir / REPORT_FILE).read_text(encoding="utf-8"))["timeout_streak"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    return streak if isinstance(streak, int) and streak >= 0 else 0
+
+
+def judge_timeouts(report: RunReport, previous: int) -> None:
+    """Count this cycle's timeouts onto `previous`, and make them errors once the streak
+    reaches `TIMEOUT_STREAK_FAILS`. A cycle with none ends the streak."""
+    if not report.timeouts:
+        report.timeout_streak = 0
+        return
+    report.timeout_streak = previous + 1
+    if report.timeout_streak >= TIMEOUT_STREAK_FAILS:
+        running = f"timed out {report.timeout_streak} cycles running"
+        report.errors.extend(f"{timeout} ({running})" for timeout in report.timeouts)
 
 
 def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
@@ -201,6 +233,9 @@ def run_platform(
             stats = _crawl(settings, platform, engine, ingestor, browser, policies)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
+    except PlaywrightTimeout as exc:
+        log.warning("%s crawl timed out: %s", platform, exc)
+        return {TIMED_OUT: f"{type(exc).__name__}: {exc}"}
     except (PlaywrightError, SQLAlchemyError, OSError) as exc:
         log.exception("%s crawl failed", platform)
         return {"error": f"{type(exc).__name__}: {exc}"}
@@ -224,6 +259,17 @@ def prepare_sports(settings: Settings, engine: Engine, report: RunReport) -> Spo
         # Wikidata down degrades freshness, not the crawl: a notice, not a failed cycle.
         report.sports["notice"] = "wikidata sync failed for some leagues; previous entities kept"
     return ctx
+
+
+def record_results(report: RunReport, results: dict[str, dict[str, Any]]) -> None:
+    """Each crawl's result into `report`, its error into `errors` and its timeout into
+    `timeouts`, keyed by label."""
+    for label, result in results.items():
+        report.platforms[label] = result
+        if "error" in result:
+            report.errors.append(f"{label}: {result['error']}")
+        if TIMED_OUT in result:
+            report.timeouts.append(f"{label}: {result[TIMED_OUT]}")
 
 
 def run_cycle(
@@ -252,10 +298,7 @@ def run_cycle(
             results[f"{platform}:{SPORTS}"] = sports_cycle.run_platform(
                 settings, platform, engine, sports, factory, policies
             )
-        for label, result in results.items():
-            report.platforms[label] = result
-            if "error" in result:
-                report.errors.append(f"{label}: {result['error']}")
+        record_results(report, results)
     if sports is not None:
         report.sports["discovery"] = sports_cycle.discover_names(
             settings, engine, datetime.now(UTC)

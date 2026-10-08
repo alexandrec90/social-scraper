@@ -59,9 +59,12 @@ from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
     FIRED_AT_ENV,
+    TIMEOUT_STREAK_FAILS,
     RunReport,
     cycle_deadline,
     cycle_start,
+    judge_timeouts,
+    previous_streak,
     run_cycle,
     run_forever,
     start_jitter_s,
@@ -152,6 +155,7 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         )
         print(f"FAILED -- details in {write_report(report, settings.logs_dir)}")
         raise
+    judge_timeouts(report, previous_streak(settings.logs_dir))
     path = write_report(report, settings.logs_dir)
     print(outcome_line(report, path))
     return 0 if report.ok else 1
@@ -163,14 +167,19 @@ def outcome_line(report: RunReport, path: Path) -> str:
     A failure leads with its first error, minus the URL: a bare `FAILED` made a renamed
     X op and one dead account one ledger group, read as a fix that did not hold
     (2026-10-06). The URL, and every other error, are in the report. A deferred export
-    is named on an ok line, so a lake falling behind is visible in the scheduled log.
+    is named on an ok line, so a lake falling behind is visible in the scheduled log, and
+    so is a crawl that timed out short of `TIMEOUT_STREAK_FAILS` cycles running.
     """
     if report.ok:
+        notes = []
+        if report.timeouts:
+            timed_out = ", ".join(t.split(": ")[0] for t in report.timeouts)
+            streak = f"{report.timeout_streak} of {TIMEOUT_STREAK_FAILS} before it fails"
+            notes.append(f"{timed_out} timed out, retried next run ({streak})")
         deferred = [d["dataset"] for d in report.export if d.get("deferred")]
         if deferred:
-            later = f"export of {len(deferred)} dataset(s) deferred to the next run"
-            return f"ok -- {later} -- details in {path}"
-        return f"ok -- details in {path}"
+            notes.append(f"export of {len(deferred)} dataset(s) deferred to the next run")
+        return " -- ".join(["ok", *notes, f"details in {path}"])
     first = report.errors[0].split(" <- ")[0]
     return f"FAILED -- {first[:160]} -- details in {path}"
 

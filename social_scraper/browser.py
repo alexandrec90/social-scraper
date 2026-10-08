@@ -56,6 +56,9 @@ from social_scraper.fetch import PageResult, Payload
 log = logging.getLogger(__name__)
 
 NAV_TIMEOUT_MS = 45_000
+# A crawl's result key when Playwright timed out -- a page load past `NAV_TIMEOUT_MS`, or
+# a launch past Playwright's own three minutes -- where any other failure is `error`.
+TIMED_OUT = "timed_out"
 TEXT_EXCERPT_CHARS = 3_000
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 # Where Windows itself parks minimized windows: off every monitor.
