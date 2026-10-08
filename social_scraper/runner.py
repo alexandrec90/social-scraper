@@ -57,6 +57,12 @@ BrowserFactory = Callable[[str], AbstractContextManager[Browser]]
 # jitter, Reddit and X fill 20-25 minutes of a 30-minute cycle, so under load they did
 # not fit: 2026-10-07, a 29-minute run, and the second skipped fire that day.
 CYCLE_DEADLINE_SHARE = 0.75
+# The share of a scheduled cycle by which the export stops (`export_deadline`); what is
+# left over waits for the next run (`export.py`). The rest -- one partition write in
+# flight, the report, the process exiting -- fits in the last 10%. 2026-10-07: a
+# backfill held the lake's locks and the 20:30 export ran until the wrapper's 55-minute
+# timeout ended it, with the 21:00 fire skipped behind it.
+EXPORT_DEADLINE_SHARE = 0.9
 # When devkit's scheduler fired this `scrape`, as an ISO timestamp (devkit's
 # `collector_tasks.FIRED_AT`). The scrape's own start is minutes later -- the db coming
 # up, `uv run` starting -- and the next fire is due one cycle after the fire, not after
@@ -84,6 +90,13 @@ class RunReport:
 def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
     """When the last page load of a cycle that started at `started` may start."""
     return started + timedelta(minutes=cycle_minutes * CYCLE_DEADLINE_SHARE)
+
+
+def export_deadline(crawl_deadline: datetime, cycle_minutes: float) -> datetime:
+    """When the export stops and defers the rest, for the cycle whose last page load may
+    start at `crawl_deadline` (`cycle_deadline`): the same start, a later share."""
+    later = EXPORT_DEADLINE_SHARE - CYCLE_DEADLINE_SHARE
+    return crawl_deadline + timedelta(minutes=cycle_minutes * later)
 
 
 def cycle_start(now: datetime, fired: str | None) -> datetime:
@@ -221,7 +234,8 @@ def run_cycle(
     export: bool = True,
     deadline: datetime | None = None,
 ) -> RunReport:
-    """One cycle. No page load starts after `deadline`; the export still runs."""
+    """One cycle. No page load starts after `deadline`; the export still runs, and
+    stops at `export_deadline`, deferring what is left to the next cycle."""
     report = RunReport(started_at=datetime.now(UTC).isoformat())
     domains = settings.enabled_domains
     factory = factory or default_browser_factory(settings)
@@ -250,7 +264,8 @@ def run_cycle(
     log.info("crawls done; pruning and exporting")
     DbThrottleStore(engine).prune(datetime.now(UTC) - timedelta(days=REQUEST_LOG_RETENTION_DAYS))
     if export:
-        exported = export_to_lake(engine, settings, datetime.now(UTC))
+        until = export_deadline(deadline, settings.cycle_minutes) if deadline else None
+        exported = export_to_lake(engine, settings, datetime.now(UTC), until=until)
         report.export = [asdict(d) for d in exported.datasets]
         report.errors.extend(f"export {d.dataset}: {d.error}" for d in exported.datasets if d.error)
     report.finished_at = datetime.now(UTC).isoformat()

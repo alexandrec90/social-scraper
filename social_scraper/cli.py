@@ -162,9 +162,14 @@ def outcome_line(report: RunReport, path: Path) -> str:
 
     A failure leads with its first error, minus the URL: a bare `FAILED` made a renamed
     X op and one dead account one ledger group, read as a fix that did not hold
-    (2026-10-06). The URL, and every other error, are in the report.
+    (2026-10-06). The URL, and every other error, are in the report. A deferred export
+    is named on an ok line, so a lake falling behind is visible in the scheduled log.
     """
     if report.ok:
+        deferred = [d["dataset"] for d in report.export if d.get("deferred")]
+        if deferred:
+            later = f"export of {len(deferred)} dataset(s) deferred to the next run"
+            return f"ok -- {later} -- details in {path}"
         return f"ok -- details in {path}"
     first = report.errors[0].split(" <- ")[0]
     return f"FAILED -- {first[:160]} -- details in {path}"

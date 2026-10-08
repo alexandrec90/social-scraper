@@ -205,6 +205,26 @@ def test_a_cycle_past_its_deadline_launches_no_browser_and_still_exports(setting
     assert report.export
 
 
+def test_export_deadline_is_a_later_share_of_the_same_cycle():
+    start = datetime(2026, 10, 7, 20, 30, tzinfo=UTC)
+    crawl = runner.cycle_deadline(start, 30)
+    assert runner.export_deadline(crawl, 30) == start + timedelta(minutes=27)
+
+
+def test_a_cycle_past_its_export_deadline_defers_the_export_and_is_ok(settings, engine):
+    """A deferred export is the next run's work, not an error: nothing is wrong with the
+    lake, and an error here would fail the scheduled job for another writer's backfill."""
+    settings.symbol_universe_max_age_hours = 1e9
+    run_cycle(settings, engine, (REDDIT,), factory=lambda p: reddit_browser(), export=False)
+    # A crawl deadline this far back puts the export's past too.
+    past = datetime.now(UTC) - timedelta(minutes=settings.cycle_minutes)
+    report = run_cycle(settings, engine, (), deadline=past)
+    assert report.ok, report.errors
+    deferred = [d["dataset"] for d in report.export if d["deferred"]]
+    assert "social_scraper_posts" in deferred
+    assert not (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
+
+
 def test_failed_export_is_an_error_but_not_a_crash(settings, engine, monkeypatch):
     settings.symbol_universe_max_age_hours = 1e9
     (settings.archive_root).parent.mkdir(parents=True, exist_ok=True)
