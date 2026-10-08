@@ -8,9 +8,11 @@ from social_scraper import throttle as throttle_mod
 from social_scraper.throttle import (
     CHALLENGED,
     ERROR,
+    ERROR_STREAK,
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
+    TIMED_OUT,
     Block,
     BudgetExhausted,
     CircuitOpen,
@@ -189,6 +191,17 @@ def test_plain_errors_pause_only_when_repeated():
     assert store.get_block("x").blocked_until is None
     t.record(ERROR, "k", 500)
     assert store.get_block("x").blocked_until is not None
+
+
+def test_a_timeout_is_a_plain_error_and_failing_is_the_pause_streak():
+    t, store, _ = make()
+    for _ in range(ERROR_STREAK - 1):
+        t.record(TIMED_OUT, "k", None, "page load timed out")
+    assert not t.failing() and store.get_block("x").blocked_until is None
+    t.record(TIMED_OUT, "k", None, "page load timed out")
+    assert t.failing() and store.get_block("x").blocked_until is not None
+    t.record(OK, "k", 200)
+    assert not t.failing()
 
 
 def test_success_closes_the_circuit():

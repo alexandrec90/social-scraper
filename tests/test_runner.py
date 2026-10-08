@@ -17,7 +17,7 @@ from social_scraper import runner
 from social_scraper.archive import store
 from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
 from social_scraper.db.throttle_store import DbThrottleStore
-from social_scraper.fetch import PageResult
+from social_scraper.fetch import LaunchTimedOut, PageResult
 from social_scraper.models import REDDIT, X
 from social_scraper.runner import (
     RunReport,
@@ -160,22 +160,24 @@ def test_run_platform_reports_browser_crash(settings, engine):
 
 
 def test_run_platform_reports_a_timeout_apart_from_an_error(settings, engine):
+    # A page load or a launch that times out never gets here (`PageResult.timed_out`,
+    # `LaunchTimedOut`); any other Playwright wait that runs out does.
     def slow(platform):
-        raise PlaywrightTimeout("BrowserType.launch_persistent_context: Timeout 180000ms exceeded.")
+        raise PlaywrightTimeout("Page.wait_for_selector: Timeout 30000ms exceeded.")
 
     ingestor = runner.Ingestor(engine, Universe({}))
     result = run_platform(settings, REDDIT, engine, ingestor, slow)
     assert "error" not in result
-    assert result[TIMED_OUT].startswith("TimeoutError: BrowserType.launch_persistent_context")
+    assert result[TIMED_OUT].startswith("TimeoutError: Page.wait_for_selector")
 
 
 def test_a_timed_out_crawl_is_a_timeout_of_the_cycle_not_an_error(settings, engine):
     def slow(platform):
-        raise PlaywrightTimeout("Page.goto: Timeout 45000ms exceeded.")
+        raise PlaywrightTimeout("Page.wait_for_selector: Timeout 30000ms exceeded.")
 
     report = run_cycle(settings, engine, (REDDIT,), factory=slow, export=False)
     assert report.ok and report.timeouts == [
-        "reddit: TimeoutError: Page.goto: Timeout 45000ms exceeded."
+        "reddit: TimeoutError: Page.wait_for_selector: Timeout 30000ms exceeded."
     ]
 
 
@@ -201,6 +203,29 @@ def test_judge_timeouts_fails_only_at_the_streak(timeouts, previous, streak, err
     report = RunReport("t", timeouts=timeouts)
     runner.judge_timeouts(report, previous)
     assert report.timeout_streak == streak and report.errors == errors
+
+
+def test_a_browser_that_will_not_start_is_a_skip_until_it_keeps_happening(settings, engine):
+    """2026-10-08 03:56Z: Chrome's 180 s launch timeout on a loaded machine failed the scrape."""
+
+    def stalled(platform):
+        raise LaunchTimedOut(f"{platform}: Timeout 180000ms exceeded.")
+
+    ingestor = runner.Ingestor(engine, Universe({}))
+    results = [run_platform(settings, REDDIT, engine, ingestor, stalled) for _ in range(3)]
+    assert "180000ms" in results[0]["skipped"] and "skipped" in results[1]
+    assert "3 launches in a row" in results[2]["error"]
+
+
+def test_a_browser_that_starts_ends_the_launch_streak(settings, engine):
+    def stalled(platform):
+        raise LaunchTimedOut("Timeout 180000ms exceeded.")
+
+    ingestor = runner.Ingestor(engine, Universe({}))
+    for _ in range(2):
+        run_platform(settings, REDDIT, engine, ingestor, stalled)
+    run_platform(settings, REDDIT, engine, ingestor, lambda p: reddit_browser())
+    assert "skipped" in run_platform(settings, REDDIT, engine, ingestor, stalled)
 
 
 def test_run_platform_surfaces_scraper_errors(settings, engine):
