@@ -12,6 +12,7 @@ requires an empty-on-success artifact to prevent.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import subprocess
@@ -765,7 +766,8 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     ledger = _ledger(tmp_path, monkeypatch)
 
     artifact = lw.artifact_ref("devkit-cut-release")
-    lw.record_failure("Devkit: Cut Release", ["python", "x.py"], 2, artifact, tmp_path, "E: x")
+    failure = lw.Failure("Devkit: Cut Release", ["python", "x.py"], 2, artifact, "E: x")
+    lw.record_failure(failure, tmp_path)
 
     [fields] = _fields(ledger)
     assert fields["event"] == lw.FAILED_EVENT
@@ -776,6 +778,22 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     assert fields["command"] == "python x.py"
     assert "Devkit: Cut Release" in fields["message"]
     assert fields["cause"] == "E: x"
+    assert "started" not in fields, "no start given: none invented"
+
+
+def test_a_failure_records_when_its_run_began_beside_when_it_ended(tmp_path, monkeypatch):
+    """1fad5675: a scrape begun at 04:00Z failed at 04:13Z on code from before the fix that
+    merged at 04:04Z. Dated only by when it was filed, it read as a fix that did not hold;
+    `started=` is what lets `fix_verify.covered` see it began on the old code."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    began = _dt.datetime(2026, 10, 9, 4, 0, 1, tzinfo=_dt.UTC).timestamp()
+    monkeypatch.setattr(lw.time, "time", lambda: began)
+
+    lw.main(["--always", "N", "--", "x"], run=lambda _c: (1, "E: boom"), root=tmp_path)
+
+    [fields] = _fields(ledger)
+    assert fields["started"] == "2026-10-09T04:00:01+00:00"
+    assert lw.started_stamp(began) == fields["started"]
 
 
 def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
