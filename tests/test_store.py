@@ -1,3 +1,6 @@
+import re
+from types import SimpleNamespace
+
 import pytest
 from botocore.exceptions import (
     ClientError,
@@ -220,6 +223,24 @@ def test_a_server_that_fails_or_cannot_be_reached_is_lake_unavailable(error):
         with pytest.raises(LakeUnavailable, match=LAKE_BUCKET):
             call()
     assert issubclass(LakeUnavailable, StoreError)
+
+
+def test_a_failure_names_the_endpoint_the_request_went_to():
+    # 2026-10-08: "s3://data-lake: put ... InternalError" read as a Cloudflare R2 fault
+    # until `Settings()` was probed; the bucket was the SeaweedFS pool on a home PC.
+    class Pool(ServerDown):
+        meta = SimpleNamespace(endpoint_url="http://100.76.121.58:8333")
+
+    s = S3Store(Pool(internal_error()), LAKE_BUCKET)
+    where = f"s3://{LAKE_BUCKET} at http://100.76.121.58:8333"
+    assert s.where == where
+    with pytest.raises(LakeUnavailable, match=re.escape(f"{where}: put k failed")):
+        s.put_bytes("k", b"x")
+
+
+def test_a_client_with_no_endpoint_is_named_by_its_bucket_alone():
+    s = S3Store(ServerDown(internal_error()), LAKE_BUCKET)
+    assert s.where == s.name == f"s3://{LAKE_BUCKET}"
 
 
 def test_is_unavailable_reads_the_status_not_the_code():
