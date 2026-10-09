@@ -13,6 +13,7 @@ from conftest import (
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
+from social_scraper import export as export_mod
 from social_scraper import runner
 from social_scraper.archive import store
 from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
@@ -313,6 +314,40 @@ def test_run_cycle_exports_to_the_bucket_when_configured(settings, engine, s3_cl
     assert report.ok, report.errors
     assert "_catalog/social_scraper_posts.json" in bucket_keys(s3_client)
     assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
+
+
+def test_a_cycle_whose_lake_is_down_is_ok_and_says_so(settings, engine, monkeypatch):
+    """5354e2f6: the pool's gateway answered every put with a 500 while one PC was off."""
+    settings.symbol_universe_max_age_hours = 1e9
+
+    def down(*a, **kw):
+        raise store.LakeUnavailable("s3://data-lake: put k failed: InternalError")
+
+    monkeypatch.setattr(export_mod, "write_partition", down)
+    report = run_cycle(settings, engine, (REDDIT,), factory=lambda p: reddit_browser())
+    assert report.ok, report.errors
+    assert report.lake_down and "InternalError" in report.lake_down
+    assert all(d["deferred"] == report.lake_down for d in report.export)
+
+
+def test_judge_lake_fails_an_outage_at_its_limit_and_not_before():
+    now = datetime(2026, 10, 9, 22, 31, tzinfo=UTC)
+
+    def judged(previous):
+        report = runner.RunReport(
+            "t", export=[{"dataset": "a"}], lake_down="lake not accepting writes"
+        )
+        runner.judge_lake(report, previous, now)
+        return report
+
+    first = judged(None)
+    assert first.ok and first.lake_down_since == now.isoformat()
+    almost = judged(now - runner.LAKE_DOWN_FAILS_AFTER + timedelta(seconds=1))
+    assert almost.ok
+    at_limit = judged(now - runner.LAKE_DOWN_FAILS_AFTER)
+    assert at_limit.errors == [
+        "export: lake not accepting writes (for 24 h, since 2026-10-08 22:31Z)"
+    ]
 
 
 # --- the sports domain ------------------------------------------------------------------
