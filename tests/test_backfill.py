@@ -10,13 +10,16 @@ from social_scraper.archive.store import LocalStore, StoreError
 from social_scraper.backfill import (
     BACKFILL_KEY,
     HAS_CREDENTIAL,
+    NO_CASHTAG,
     NO_SYMBOL,
     UNPARSABLE,
+    ArchiveFilter,
     Converted,
     FileStats,
     ImportReport,
     Spool,
     lake_post,
+    lake_post_strict,
     run_import,
 )
 from social_scraper.models import X, AuthorInfo, Post
@@ -65,12 +68,43 @@ def test_lake_post_never_writes_a_credential(universe):
     assert lake_post(leaked, universe, "s") == Converted(HAS_CREDENTIAL)
 
 
+def test_lake_post_strict_needs_an_explicit_listed_ticker(universe):
+    bare = tweet(text="NVDA looks strong")
+    assert lake_post(bare, universe, "s").skip is None  # a bare listed symbol is enough...
+    assert lake_post_strict(bare, universe, "s", None, False) == Converted(NO_CASHTAG)
+    kept = lake_post_strict(tweet(text="$NVDA and AMD"), universe, "s", {"link": "l"}, False)
+    # ...and once kept, the post's every mention is recorded, bare ones included.
+    assert kept.skip is None and {m["symbol"] for m in kept.mentions} == {"NVDA", "AMD"}
+    assert json.loads(kept.post["extra"]) == {BACKFILL_KEY: "s", "link": "l"}
+    assert lake_post_strict(tweet(text="hello"), universe, "s", None, True).skip is None
+
+
+def test_archive_filter_window():
+    flt = ArchiveFilter(since=CREATED, until=CREATED + timedelta(days=1))
+    assert flt.in_range(CREATED)
+    assert not flt.in_range(CREATED - timedelta(seconds=1))
+    assert not flt.in_range(CREATED + timedelta(days=1))
+    assert ArchiveFilter().in_range(CREATED)
+
+
 def test_file_stats_count_skips_by_reason():
     stats = FileStats("f")
     stats.skip("a")
     stats.skip("a")
     stats.skip("b")
-    assert stats.skipped == {"a": 2, "b": 1}
+    stats.skip("c", 5)
+    stats.skip("d", 0)  # a bulk skip of nothing leaves no zero entry
+    assert stats.skipped == {"a": 2, "b": 1, "c": 5}
+
+
+def test_connect_is_utc_and_capped(tmp_path):
+    con = backfill.connect(tmp_path / "x.duckdb", tmp_path / "tmp")
+    try:
+        assert con.execute("SELECT current_setting('TimeZone')").fetchone()[0] == "UTC"
+        limit = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        assert limit.startswith("1.") and "GiB" in limit
+    finally:
+        con.close()
 
 
 def test_spool_take_counts_skips_and_buffers_kept_rows(tmp_path, universe, monkeypatch):

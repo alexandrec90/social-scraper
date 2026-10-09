@@ -35,9 +35,11 @@ from pathlib import Path
 from social_scraper import backfill
 from social_scraper.archive.store import ObjectStore
 from social_scraper.backfill import (
+    ARCHIVE_CHANNEL,
     LOG_EVERY,
     OUT_OF_RANGE,
     UNPARSABLE,
+    ArchiveFilter,
     Converted,
     FileStats,
     ImportReport,
@@ -51,24 +53,12 @@ from social_scraper.x.parse import X_BASE, parse_time
 log = logging.getLogger(__name__)
 
 REPORT_FILE = "x-import.json"
-# How a tweet reached the lake, beside the crawler's `search` and `timeline`.
-CHANNEL = "archive"
+CHANNEL = ARCHIVE_CHANNEL
 TWEETS = "tweets.csv"
 USERS = "users.csv"
 RETWEET = "retweet"  # skip reason
 NO_ID = frozenset({"", "0"})  # what the dataset writes for "not a reply/retweet"
-
-
-@dataclass(frozen=True)
-class TweetFilter:
-    since: datetime | None = None
-    until: datetime | None = None  # exclusive
-    all_posts: bool = False
-
-    def in_range(self, created: datetime) -> bool:
-        if self.since is not None and created < self.since:
-            return False
-        return self.until is None or created < self.until
+TweetFilter = ArchiveFilter
 
 
 @dataclass(frozen=True)

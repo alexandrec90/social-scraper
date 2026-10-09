@@ -54,6 +54,17 @@ STOPLIST = frozenset(
 )
 
 
+# `has_strict_cashtag`: upper case, two letters or more, and not followed by another `$`
+# (LaTeX's `$AB$`). Lower case is PHP's `$name` and jQuery's `$el`; one letter is `$x`.
+_STRICT_CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Z]{2,5}(?:[.\-][A-Z])?)(?![\w$])")
+# Shell variables a programmer writes in prose ("add it to your $PATH"; `PATH` is
+# UiPath), and placeholder amounts ("$XX billion"; `XX` is listed) -- both seen in a
+# Hacker News sample (2026-10-08). The stoplist covers the rest (`$USD` is a dollar).
+NOT_CASHTAGS = frozenset(
+    "PATH HOME USER SHELL TERM LANG PWD HOST TMP TEMP CC CXX IFS XX XXX XXXX XXXXX".split()
+)
+
+
 @dataclass(frozen=True)
 class Mention:
     symbol: str
@@ -93,6 +104,21 @@ def extract_mentions(text: str, universe: Universe, tagged: tuple[str, ...] = ()
             if raw not in STOPLIST and raw in universe:
                 add(raw, BARE)
     return list(found.values())
+
+
+def has_strict_cashtag(text: str, universe: Universe) -> bool:
+    """Whether `text` writes a listed symbol as an explicit `$TICKER`.
+
+    The evidence a general-topic platform needs (Bluesky, Hacker News), where most
+    upper-case words and many `$words` are not about stocks. Stricter than a `cashtag`
+    mention: upper case, in the universe, and neither a stoplist word nor a shell
+    variable.
+    """
+    for raw in _STRICT_CASHTAG_RE.findall(text):
+        symbol = normalize_symbol(raw)
+        if symbol in universe and symbol not in STOPLIST and symbol not in NOT_CASHTAGS:
+            return True
+    return False
 
 
 def validated_symbols(mentions: list[Mention]) -> list[str]:

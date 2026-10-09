@@ -20,6 +20,14 @@ reddit-import PATH... backfill the lake from Pushshift / Arctic Shift dump files
                       --local-only skips the bucket, --dry-run counts without writing
 x-import FOLDER...    backfill X history from tweet CSV datasets (tweets.csv[.zip], with
                       users.csv[.zip] beside it); same options, no default --since
+stocktwits-import FOLDER...
+                      backfill StockTwits 2008-2022 from the NYU dataset (a folder with
+                      messages/ and feature_wo_messages/); same options as x-import
+bluesky-import PATH...
+                      backfill Bluesky 2023-2024 from Zenodo 14669616's user_posts.tar.gz
+                      (or .jsonl files); keeps only posts naming an explicit $TICKER
+hn-import PATH...     backfill Hacker News from open-index/hacker-news Parquet files (or
+                      folders of them); keeps only items naming an explicit $TICKER
 sports-sync [KEY...]  re-read the named leagues (default: all) from Wikidata now; the
                       outcome goes to logs/sports-sync.json, and any failure exits 1
 
@@ -51,11 +59,13 @@ from sqlalchemy.engine import Engine
 from social_scraper import backfill, scratch, watchdog
 from social_scraper.archive import lens
 from social_scraper.archive.store import LocalStore, ObjectStore, stores_for
+from social_scraper.bluesky import dumps as bluesky_dumps
 from social_scraper.config import SPORTS, Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.export import export_to_lake
-from social_scraper.backfill import ImportReport
+from social_scraper.backfill import ArchiveFilter, ImportReport
+from social_scraper.hackernews import dumps as hn_dumps
 from social_scraper.models import PLATFORMS, REDDIT, X
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
@@ -81,6 +91,7 @@ from social_scraper.sports import registry as sports_registry
 from social_scraper.sports.leagues import LeagueConfigError, load_leagues
 from social_scraper.sports.sync import SyncPolicy, sync_leagues
 from social_scraper.sports.wikidata import WikidataClient
+from social_scraper.stocktwits import dumps as stocktwits_dumps
 from social_scraper.symbols.universe import Universe
 from social_scraper.x import tweet_dumps
 
@@ -106,7 +117,13 @@ def build_parser() -> argparse.ArgumentParser:
     lake = sub.add_parser("lake")
     lake.add_argument("--days", type=int, default=3)
     sub.add_parser("universe")
-    for name, since in (("reddit-import", dumps.DEFAULT_SINCE), ("x-import", None)):
+    for name, since in (
+        ("reddit-import", dumps.DEFAULT_SINCE),
+        ("x-import", None),
+        ("stocktwits-import", None),
+        ("bluesky-import", None),
+        ("hn-import", None),
+    ):
         imp = sub.add_parser(name)
         imp.add_argument("paths", nargs="+", type=Path)
         imp.add_argument("--since", type=utc_date, default=since)
@@ -372,6 +389,37 @@ def cmd_x_import(settings: Settings, engine: Engine, args: argparse.Namespace) -
     return run_backfill(settings, args, run, tweet_dumps.REPORT_FILE)
 
 
+def archive_filter(args: argparse.Namespace) -> ArchiveFilter:
+    return ArchiveFilter(since=args.since, until=args.until, all_posts=args.all_posts)
+
+
+def cmd_stocktwits_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    flt = archive_filter(args)
+
+    def run(universe, stores, spool, started):
+        return stocktwits_dumps.import_folder(args.paths, universe, flt, stores, spool, started)
+
+    return run_backfill(settings, args, run, stocktwits_dumps.REPORT_FILE)
+
+
+def cmd_bluesky_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    flt = archive_filter(args)
+
+    def run(universe, stores, spool, started):
+        return bluesky_dumps.import_files(args.paths, universe, flt, stores, spool, started)
+
+    return run_backfill(settings, args, run, bluesky_dumps.REPORT_FILE)
+
+
+def cmd_hn_import(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
+    flt = archive_filter(args)
+
+    def run(universe, stores, spool, started):
+        return hn_dumps.import_files(args.paths, universe, flt, stores, spool, started)
+
+    return run_backfill(settings, args, run, hn_dumps.REPORT_FILE)
+
+
 SPORTS_SYNC_FILE = "sports-sync.json"
 
 
@@ -436,6 +484,9 @@ def main(argv: list[str] | None = None) -> int:
         "universe": cmd_universe,
         "reddit-import": cmd_reddit_import,
         "x-import": cmd_x_import,
+        "stocktwits-import": cmd_stocktwits_import,
+        "bluesky-import": cmd_bluesky_import,
+        "hn-import": cmd_hn_import,
         "sports-sync": cmd_sports_sync,
     }[args.command]
     return handler(settings, engine, args)

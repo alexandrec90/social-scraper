@@ -82,6 +82,14 @@ repos:
         # compose credentials already use. Add a baseline file only once the pragma count
         # gets annoying — it is one more artifact to keep in sync, and a stale one hides
         # real findings.
+        #
+        # A lake partition key ("social_scraper/posts/platform=bluesky/dt=2024-03-10") is
+        # all Base64 characters, and whether it trips the entropy limit depends only on
+        # the platform name and date in it. A line whose quoted string is entirely such a
+        # key is excluded, so a test asserting one cannot fail at commit by chance.
+        args:
+          - --exclude-lines
+          - '"social_scraper/[a-z_]+/platform=[a-z]+/dt=\d{4}-\d{2}-\d{2}(/part\.parquet)?"'
         exclude: |
           (?x)^(
             uv\.lock|            # generated hashes, indistinguishable from secrets

@@ -1,6 +1,7 @@
 """Bulk history into the lake: what every archive importer shares.
 
-An importer (`reddit/dumps.py`, `x/tweet_dumps.py`) turns its archive's records into
+An importer (`reddit/dumps.py`, `x/tweet_dumps.py`, `stocktwits/dumps.py`,
+`bluesky/dumps.py`, `hackernews/dumps.py`) turns its archive's records into
 `Post`s and hands each to `lake_post`, which runs the crawler's own `pipeline.build_row`
 -- the same ids, author hash, scrubbing, symbol extraction and stance as a scraped post
 -- and returns the `social_scraper_posts` and `social_scraper_mentions` rows `export`
@@ -24,6 +25,12 @@ idempotent.
 What a backfill does not carry: engagement snapshots (an archive kept one observation
 per post, which stays on the row) and the symbol registry (`social_scraper_symbols`), a
 single file the live export rewrites from the database's counts.
+
+**A general-topic archive needs stronger evidence.** A finance subreddit or StockTwits
+is about stocks, so an upper-case word that is a listed symbol usually is one. On
+Bluesky or Hacker News it usually is not ("AMD" maybe, "NOW" or "PATH" rarely), so
+those importers call `lake_post_strict`: a post is kept only when it writes an
+explicit, listed `$TICKER` (`extract.has_strict_cashtag`).
 """
 
 from __future__ import annotations
@@ -46,13 +53,16 @@ from social_scraper.archive.writer import KEEP_EXISTING, VerifyError, write_part
 from social_scraper.export import lake_rows
 from social_scraper.models import Post
 from social_scraper.pipeline import build_row
-from social_scraper.symbols.extract import Mention, extract_mentions
+from social_scraper.symbols.extract import Mention, extract_mentions, has_strict_cashtag
 from social_scraper.symbols.universe import Universe
 
 log = logging.getLogger(__name__)
 
 # The key in a post's `extra` naming the file it came from.
 BACKFILL_KEY = "backfill"
+# How an archived post reached the lake, beside the crawler's `search` and `timeline`;
+# every importer but Reddit's (whose channel is the subreddit) uses it.
+ARCHIVE_CHANNEL = "archive"
 SPOOL_BATCH = 50_000
 READ_BATCH = 100_000
 # DuckDB takes 80% of RAM by default; a full backfill's spool got the run killed for low
@@ -66,6 +76,7 @@ LOG_EVERY = 1_000_000
 UNPARSABLE = "unparsable"
 OUT_OF_RANGE = "out_of_range"
 NO_SYMBOL = "no_symbol"
+NO_CASHTAG = "no_cashtag"  # `lake_post_strict`: no explicit, listed $TICKER
 HAS_CREDENTIAL = "has_credential"  # matched `privacy.contains_secret`: never written
 
 PART = "part"
@@ -109,6 +120,20 @@ ORDER BY p.y
 
 
 @dataclass(frozen=True)
+class ArchiveFilter:
+    """What every importer but Reddit's filters on: a time window, and `--all-posts`."""
+
+    since: datetime | None = None
+    until: datetime | None = None  # exclusive
+    all_posts: bool = False
+
+    def in_range(self, created: datetime) -> bool:
+        if self.since is not None and created < self.since:
+            return False
+        return self.until is None or created < self.until
+
+
+@dataclass(frozen=True)
 class Converted:
     """One archive record: why it was skipped, or the lake rows it becomes."""
 
@@ -127,8 +152,9 @@ class FileStats:
     skipped: dict[str, int] = field(default_factory=dict)
     error: str | None = None
 
-    def skip(self, reason: str) -> None:
-        self.skipped[reason] = self.skipped.get(reason, 0) + 1
+    def skip(self, reason: str, count: int = 1) -> None:
+        if count:
+            self.skipped[reason] = self.skipped.get(reason, 0) + count
 
 
 @dataclass
@@ -175,6 +201,16 @@ def lake_post(
     return Converted(None, lake, mentions_of(row, found))
 
 
+def lake_post_strict(
+    post: Post, universe: Universe, source: str, extra: dict[str, Any] | None, all_posts: bool
+) -> Converted:
+    """`lake_post` for a general-topic platform: without `all_posts`, a post is kept only
+    when it writes an explicit, listed `$TICKER` (`NO_CASHTAG` otherwise)."""
+    if not all_posts and not has_strict_cashtag(post.text, universe):
+        return Converted(NO_CASHTAG)
+    return lake_post(post, universe, source, extra=extra, all_posts=all_posts)
+
+
 def mentions_of(row: dict[str, Any], found: Iterable[Mention]) -> tuple[dict[str, Any], ...]:
     """The `social_scraper_mentions` rows for a post row, each with its partition."""
     mentions = []
@@ -195,6 +231,21 @@ def mentions_of(row: dict[str, Any], found: Iterable[Mention]) -> tuple[dict[str
     return tuple(mentions)
 
 
+def connect(database: Path, temp: Path) -> duckdb.DuckDBPyConnection:
+    """A DuckDB file for an import's own use, capped like the spool and spilling to `temp`.
+
+    UTC, so timestamps come back to Arrow in the lake's zone and `year()` is a UTC year.
+    Each connection gets its own `temp`: two sharing one could clash on spill files.
+    """
+    config: dict[str, str | bool | int | float | list[str]] = {
+        "temp_directory": str(temp),
+        "TimeZone": "UTC",
+        "memory_limit": SPOOL_MEMORY,
+        "threads": SPOOL_THREADS,
+    }
+    return duckdb.connect(str(database), config=config)
+
+
 class Spool:
     """Rows on their way to the lake, in a DuckDB file under `directory`.
 
@@ -204,14 +255,7 @@ class Spool:
     """
 
     def __init__(self, directory: Path) -> None:
-        # UTC, so timestamps come back to Arrow in the lake's zone and `year()` is a UTC year.
-        config: dict[str, str | bool | int | float | list[str]] = {
-            "temp_directory": str(directory / "tmp"),
-            "TimeZone": "UTC",
-            "memory_limit": SPOOL_MEMORY,
-            "threads": SPOOL_THREADS,
-        }
-        self.con = duckdb.connect(str(directory / "spool.duckdb"), config=config)
+        self.con = connect(directory / "spool.duckdb", directory / "tmp")
         self._posts: list[dict[str, Any]] = []
         self._mentions: list[dict[str, Any]] = []
         # Replaced, not created: a spool file left by an interrupted run starts empty.

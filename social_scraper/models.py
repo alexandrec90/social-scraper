@@ -15,6 +15,11 @@ from typing import Any
 REDDIT = "reddit"
 X = "x"
 PLATFORMS = (REDDIT, X)
+# Archive-only: imported from published datasets, never crawled, so not in PLATFORMS
+# (which drives `scrape`, `login` and the request budgets).
+STOCKTWITS = "stocktwits"
+BLUESKY = "bluesky"
+HACKERNEWS = "hackernews"
 
 
 def stable_hash(value: str) -> str:

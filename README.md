@@ -121,6 +121,9 @@ your personal one.
 | `universe` | refresh the symbol directory |
 | `reddit-import PATH... [--since D] [--until D] [--all-posts] [--local-only] [--dry-run]` | backfill Reddit history from archive dumps; report in `logs/reddit-import.json` |
 | `x-import FOLDER... [same options]` | backfill X history from tweet CSV datasets; report in `logs/x-import.json` |
+| `stocktwits-import FOLDER... [same options]` | backfill StockTwits 2008-2022 from the NYU dataset; report in `logs/stocktwits-import.json` |
+| `bluesky-import PATH... [same options]` | backfill Bluesky 2023-2024 from Zenodo 14669616; report in `logs/bluesky-import.json` |
+| `hn-import PATH... [same options]` | backfill Hacker News from `open-index/hacker-news`; report in `logs/hn-import.json` |
 | `sports-sync [KEY...]` | re-read leagues from Wikidata now; outcome in `logs/sports-sync.json` |
 
 Every run overwrites `logs/scrape-run.json` with what each platform did, every error,
@@ -193,8 +196,36 @@ uv run social-scraper x-import D:/social-dumps/cashtag-2017 --local-only
 
 Tweets land as `platform=x`, `channel=archive`, authors hashed from their numeric id like
 the crawler's (no handle stored); retweets are skipped, as the crawler skips them; the
-bot label is `extra.bot`. Report in `logs/x-import.json`. Both importers share
+bot label is `extra.bot`. Report in `logs/x-import.json`. Every importer shares
 `backfill.py`: the spool, the lake write and the never-over-a-live-row rule.
+
+### StockTwits, Bluesky and Hacker News
+
+Three more free archives of people talking about stocks, none crawled live, each with
+its own `platform` in the lake and `channel=archive`:
+
+| Command | Archive | Download | What is kept |
+| --- | --- | --- | --- |
+| `stocktwits-import` | NYU's StockTwits records, May 2008 to 2022 | the `messages/` and `feature_wo_messages/` folders of `s3://stocktwits-nyu/dataset/v1/data/csv/` (public, ~80 GiB) | messages naming a symbol, as on Reddit; the symbols StockTwits tagged count, and the author's Bullish/Bearish label is `extra.sentiment` |
+| `bluesky-import` | [Zenodo 14669616](https://zenodo.org/records/14669616), Feb 2023 to Mar 2024 | `user_posts.tar.gz` (18 GiB), imported as it is | posts with an explicit, listed `$TICKER`; reposts skipped |
+| `hn-import` | [`open-index/hacker-news`](https://huggingface.co/datasets/open-index/hacker-news), 2006 on | `data/**/*.parquet` (12 GiB) | items with an explicit, listed `$TICKER`; deleted and dead items skipped |
+
+```bash
+uv run social-scraper stocktwits-import D:/social-dumps/stocktwits-2008-2022
+uv run social-scraper bluesky-import D:/social-dumps/bluesky-2024/user_posts.tar.gz
+uv run social-scraper hn-import D:/social-dumps/hackernews/data
+```
+
+Bluesky and Hacker News are general-topic, so a bare upper-case word is not evidence
+there: only a `$TICKER` in upper case, of two letters or more, that is listed and is
+neither a stoplist word nor a shell variable (`$PATH` is UiPath) or placeholder (`$XX`).
+Expect little: 578 Hacker News items in all of 2021 (of 4.2M), and one Bluesky post in
+240k in a 5M-line sample (measured 2026-10-08). A crypto token sharing a ticker (`$FET`) still gets through.
+
+StockTwits joins two tables in DuckDB before reading a message: it loads the 29 GiB of
+metadata into a sorted table under `DATA_DIR` first, so leave it disk room. The Bluesky
+dataset replaced every account and post id with its own integer, so its rows link to no
+bsky.app page and its author hashes join with nothing else.
 
 ## Data contract (data-lake / ibkr_trader)
 
@@ -274,6 +305,8 @@ social_scraper/
                           backfills history from Pushshift / Arctic Shift dumps
   x/                      GraphQL/SSR tweet parser, account discovery, crawler;
                           tweet_dumps.py backfills history from tweet CSV datasets
+  stocktwits/, bluesky/,  archive importers only (dumps.py each): these platforms are
+  hackernews/             never crawled
   backfill.py             what every archive importer shares: spool, lake write, report
   symbols/                NASDAQ symbol universe + mention extraction
   sports/                 the sports domain: league list, Wikidata sync, matcher, crawl plans
