@@ -446,6 +446,48 @@ def test_an_unattended_failure_is_kept_where_the_next_run_cannot_erase_it(tmp_pa
     assert "all fine" in (logs / "nightly.log").read_text(encoding="utf-8")
 
 
+def test_each_failure_names_its_own_copy_not_the_jobs(tmp_path, monkeypatch):
+    """96d2638e / e711daa0: five groups of one job, each a different cause, were handed
+    the newest failure's `.failed.log` as their own evidence. Each row now names a copy
+    of its own failure, which the next failure does not overwrite."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "first cause"), root=tmp_path)
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "second cause"), root=tmp_path)
+
+    refs = [fields["artifact"] for fields in _fields(ledger)]
+    assert len(set(refs)) == 2 and all(r.startswith("logs/failed/nightly-") for r in refs)
+    assert "first cause" in (tmp_path / refs[0]).read_text(encoding="utf-8")
+    assert "second cause" in (tmp_path / refs[1]).read_text(encoding="utf-8")
+    assert "second cause" in (tmp_path / "logs" / "nightly.failed.log").read_text(encoding="utf-8")
+
+
+def test_the_per_failure_copies_are_bounded_per_job(tmp_path, monkeypatch):
+    monkeypatch.setattr(lw, "ARCHIVE_KEEP", 2)
+    folder = tmp_path / lw.LOGS_DIR / lw.ARCHIVE_DIR
+    folder.mkdir(parents=True)
+    # Another job whose slug starts the same is not this job's to prune.
+    (folder / "nightly-extra-20260101-000000.log").write_text("other", encoding="utf-8")
+    when = lw._dt.datetime(2026, 10, 8, 12, 30, 0)
+    refs = [lw.archive_artifact(tmp_path, "nightly", f"run {n}", now=when) for n in range(3)]
+
+    assert refs[0] == "logs/failed/nightly-20261008-123000.log"
+    assert refs[1] == "logs/failed/nightly-20261008-123000-2.log", "same second, own file"
+    kept = sorted(p.name for p in folder.iterdir())
+    assert kept == [
+        "nightly-20261008-123000-2.log",
+        "nightly-20261008-123000-3.log",
+        "nightly-extra-20260101-000000.log",
+    ]
+
+
+def test_an_unwritable_archive_falls_back_to_the_kept_copy(tmp_path, monkeypatch):
+    ledger = _ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(lw, "archive_artifact", lambda *_a, **_k: None)
+    lw.main(["--always", "Nightly", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
+
+    assert "artifact=logs/nightly.failed.log" in ledger.read_text(encoding="utf-8")
+
+
 def test_the_kept_copy_does_not_claim_to_be_this_mornings_run(tmp_path, monkeypatch):
     """A reader who believes a Tuesday file is today's is worse off than one with no
     file, so the copy that a pass does not clear must not say `overwritten per run`."""
@@ -734,6 +776,7 @@ def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
     assert lw.artifact_ref("n", kept=False) == "logs/n.log"
     ledger = _ledger(tmp_path, monkeypatch)
     monkeypatch.setattr(lw, "write_artifact", lambda root, name, *_a, **_k: None)
+    monkeypatch.setattr(lw, "archive_artifact", lambda *_a, **_k: None)
 
     lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
 
