@@ -68,6 +68,11 @@ FRONTEND_SUFFIXES = (
 HARNESS_CONFIG = Path("scripts") / "hooks" / "harness_config.py"
 # How much of a failed vitest run the artifact keeps: its summary is at the end.
 VITEST_TAIL_LINES = 120
+# The per-test timeout of this runner's own vitest run, which shares the machine with
+# every other agent's: roguelike's synchronous `src/knobs.test.ts`, 28 ms alone, timed
+# out at vitest's default 5 s while imports took 37 s instead of 11 (bff74201). A test
+# that hangs still fails; the project's own config, and CI, keep their timeout.
+VITEST_TEST_TIMEOUT_MS = 60_000
 
 # Per-failure line cap. Chosen to hold a first-party traceback plus the assertion
 # without letting a single deep failure crowd out the rest of the run.
@@ -302,7 +307,8 @@ def vitest_related(root: Path, front_dir: str, sources: list[str]) -> list[str] 
     vitest = shutil.which("vitest", path=str(base / "node_modules" / ".bin"))
     if not vitest:
         return None
-    return [vitest, "related", "--run", *(os.path.relpath(root / s, base) for s in sources)]
+    paths = [os.path.relpath(root / s, base) for s in sources]
+    return [vitest, "related", "--run", f"--testTimeout={VITEST_TEST_TIMEOUT_MS}", *paths]
 
 
 def frontend_run(
