@@ -7,6 +7,7 @@ from social_scraper.symbols.extract import (
     TAGGED,
     Mention,
     extract_mentions,
+    has_strict_cashtag,
     is_shouting,
     validated_symbols,
 )
@@ -82,3 +83,21 @@ def test_tagged_symbols_win_precedence():
 def test_validated_symbols_sorted_and_filtered():
     ms = [Mention("NVDA", BARE, True), Mention("XYZ", CASHTAG, False), Mention("AMD", BARE, True)]
     assert validated_symbols(ms) == ["AMD", "NVDA"]
+
+
+def test_strict_cashtag_needs_an_explicit_listed_upper_case_ticker():
+    u = make_universe("NVDA", "BRK-B", "PATH", "IT", "F", "XX")
+    assert has_strict_cashtag("long $NVDA into earnings", u)
+    assert has_strict_cashtag("$BRK.B is my bond fund", u)
+    for text in (
+        "NVDA bare",  # no `$`
+        "$nvda",  # lower case: PHP's `$name`, jQuery's `$el`
+        "$F",  # one letter: `$x`
+        "$XYZ unlisted",
+        "add it to your $PATH",  # a shell variable that is a listed symbol
+        "only $XX billion",  # a placeholder amount
+        "$IT",  # the stoplist
+        "math $NVDA$ here",  # LaTeX
+        "costs $100",
+    ):
+        assert not has_strict_cashtag(text, u), text

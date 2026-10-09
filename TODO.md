@@ -23,6 +23,10 @@
       `REDDIT_SUBREDDITS` files from the subreddit torrent (needs a torrent client) and
       Arctic Shift for 2026, run `reddit-import <folder> --dry-run` to size it, check the
       R2 bucket has room, then run it for real
+- [ ] Backfill StockTwits, Bluesky and Hacker News (README, "StockTwits, Bluesky and
+      Hacker News"): `stocktwits-import`, `bluesky-import`, `hn-import`. StockTwits
+      first loads ~29 GiB of metadata into DuckDB under `DATA_DIR`; run it when no
+      other import is using the memory
 
 ## Sports domain (needs you)
 

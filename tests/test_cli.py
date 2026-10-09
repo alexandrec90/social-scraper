@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from conftest import LAKE_BUCKET, Clock, IsolatedSettings, bucket_keys, reddit_submission
 from sqlalchemy.exc import OperationalError
@@ -13,10 +15,14 @@ from social_scraper.archive import store
 from social_scraper.cli import (
     build_parser,
     cmd_export,
+    archive_filter,
+    cmd_bluesky_import,
+    cmd_hn_import,
     cmd_lake,
     cmd_reddit_import,
     cmd_run,
     cmd_scrape,
+    cmd_stocktwits_import,
     cmd_x_import,
     cmd_sports_sync,
     cmd_status,
@@ -26,8 +32,11 @@ from social_scraper.cli import (
     run_backfill,
     utc_date,
 )
-from social_scraper.backfill import ImportReport
+from social_scraper.backfill import ArchiveFilter, ImportReport
+from social_scraper.bluesky import dumps as bluesky_dumps
+from social_scraper.hackernews import dumps as hn_dumps
 from social_scraper.reddit import dumps
+from social_scraper.stocktwits import dumps as stocktwits_dumps
 from social_scraper.x import tweet_dumps
 from social_scraper.db.repository import make_engine
 from social_scraper.db.throttle_store import DbThrottleStore
@@ -88,6 +97,14 @@ def test_parser_accepts_every_command():
         p.parse_args(["reddit-import", "a.zst", "--since", "last tuesday"])
     x = p.parse_args(["x-import", "cashtag", "--local-only"])
     assert x.paths == [Path("cashtag")] and x.local_only and x.since is None
+    for name in ("stocktwits-import", "bluesky-import", "hn-import"):
+        archive = p.parse_args([name, "in", "--all-posts", "--since", "2020-01-01"])
+        assert archive.paths == [Path("in")] and archive.all_posts
+        assert archive.since == datetime(2020, 1, 1, tzinfo=UTC)
+        assert p.parse_args([name, "in"]).since is None
+    assert archive_filter(archive) == ArchiveFilter(
+        since=datetime(2020, 1, 1, tzinfo=UTC), until=None, all_posts=True
+    )
 
 
 def test_run_backfill_hands_the_run_its_stores_and_maps_the_report_to_an_exit_code(
@@ -122,6 +139,61 @@ def test_x_import_writes_the_lake_and_its_report(
     out = capsys.readouterr().out
     assert "2017: 1 posts (0 comments), 1 symbols" in out
     body = json.loads((settings.logs_dir / tweet_dumps.REPORT_FILE).read_text())
+    assert body["ok"] and body["posts"] == 1
+
+
+@pytest.mark.parametrize(
+    ("command", "module", "function"),
+    [
+        (cmd_stocktwits_import, stocktwits_dumps, "import_folder"),
+        (cmd_bluesky_import, bluesky_dumps, "import_files"),
+        (cmd_hn_import, hn_dumps, "import_files"),
+    ],
+)
+def test_archive_imports_hand_their_paths_and_filter_to_the_importer(
+    settings, engine, universe, monkeypatch, capsys, command, module, function
+):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    seen = {}
+
+    def fake(paths, got_universe, flt, stores, spool, started):
+        seen.update(paths=paths, flt=flt, stores=stores)
+        return ImportReport(started_at=started.isoformat(), posts=3)
+
+    monkeypatch.setattr(module, function, fake)
+    since = datetime(2020, 1, 1, tzinfo=UTC)
+    args = import_args(Path("in"), since=since, all_posts=True, dry_run=True)
+    assert command(settings, engine, args) == 0
+    assert seen == {
+        "paths": [Path("in")],
+        "flt": ArchiveFilter(since=since, until=None, all_posts=True),
+        "stores": None,
+    }
+    assert json.loads((settings.logs_dir / module.REPORT_FILE).read_text())["posts"] == 3
+    assert "ok -- details in" in capsys.readouterr().out
+
+
+def test_hn_import_writes_the_lake_and_its_report(settings, engine, universe, monkeypatch):
+    monkeypatch.setattr(cli, "universe_for", lambda s: universe)
+    path = settings.data_dir.parent / "hn" / "2021-01.parquet"
+    path.parent.mkdir(parents=True)
+    item = {
+        "id": 5,
+        "deleted": 0,
+        "type": 2,
+        "by": "u",
+        "time": datetime(2021, 1, 1, tzinfo=UTC),
+        "text": "$NVDA up",
+        "dead": 0,
+        "parent": 4,
+        "url": "",
+        "score": 0,
+        "title": "",
+        "descendants": 0,
+    }
+    pq.write_table(pa.Table.from_pylist([item]), path)
+    assert cmd_hn_import(settings, engine, import_args(path.parent, since=None)) == 0
+    body = json.loads((settings.logs_dir / hn_dumps.REPORT_FILE).read_text())
     assert body["ok"] and body["posts"] == 1
 
 
