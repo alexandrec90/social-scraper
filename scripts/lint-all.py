@@ -35,6 +35,13 @@ ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 # directory recursion, this covers an explicit `mypy .`.
 MYPY_SCOPE = ["social_scraper/", "tests/"]
 
+# mypy type-checks for one `sys.platform` at a time, the host's unless told otherwise,
+# and code behind a `sys.platform` check is only checked on its own side. The desktop is
+# Windows and the gate is Linux, so a pass for the host alone let `ctypes.WinDLL` in
+# `scratch.py` reach main red: clean here, `attr-defined` there. Every pass runs for
+# both, each with its own cache, which a flipped `--platform` would otherwise rebuild.
+MYPY_PLATFORMS = ("linux", "win32")
+
 # Every Python path in `sync-devkit.py`'s MANIFEST, kept out of the passes that
 # *rewrite* files. Reporting on upstream code is merely unhelpful; reformatting it is
 # a change `sync-devkit.py --check` fails the build for, and the agent cannot fix
@@ -239,11 +246,12 @@ def python_sections(scope: list[str], typed: list[str]) -> str:
     )
     # Scoped with nothing inside MYPY_SCOPE, mypy has nothing to check: falling back
     # to the whole scope would widen a per-turn pass.
-    if typed:
+    for platform in MYPY_PLATFORMS if typed else ():
+        flags = ["--platform", platform, "--cache-dir", f".mypy_cache/{platform}"]
         sections += run_tool(
-            "mypy",
-            [sys.executable, "-m", "mypy", *typed, "--show-error-codes"],
-            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+            f"mypy ({platform})",
+            [sys.executable, "-m", "mypy", *typed, *flags, "--show-error-codes"],
+            f"mypy {' '.join(MYPY_SCOPE)} --platform {platform} --show-error-codes",
         )
     return sections
 

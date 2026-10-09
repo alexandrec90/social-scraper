@@ -50,6 +50,14 @@ def test_pid_alive_tells_a_running_process_from_an_exited_one():
     assert not pid_alive(0)
 
 
+def test_the_windows_probe_refuses_any_other_platform(monkeypatch):
+    # The guard is what lets mypy check this module for Linux, where `ctypes` has no
+    # `WinDLL`; at run time it stops a call that `pid_alive` never makes off Windows.
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(OSError, match="linux"):
+        scratch._windows_pid_alive(os.getpid())
+
+
 def test_a_killed_runs_scratch_is_removed_and_said_so(tmp_path, caplog):
     # 2026-10-08: a StockTwits dry run reaped for low memory left 29.7 GiB under data/.
     stale = make_scratch(tmp_path, "import-777-abcdefgh", size=2048)

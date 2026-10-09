@@ -60,6 +60,10 @@ def pid_alive(pid: int) -> bool:
 
 
 def _windows_pid_alive(pid: int) -> bool:
+    # The narrowing is for mypy, which knows `WinDLL` only for a win32 target: the
+    # caller's own `sys.platform` check does not reach into this function.
+    if sys.platform != "win32":
+        raise OSError(f"no Windows process table on {sys.platform}")
     import ctypes
     from ctypes import wintypes
 

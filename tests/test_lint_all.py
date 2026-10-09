@@ -68,8 +68,9 @@ def test_scoped_run_never_hands_mypy_the_vendored_harness(tmp_path, monkeypatch)
 
     lint_all.main(["--paths", "tests/test_cli.py", "scripts/hooks/tests/test_toolchain.py"])
 
-    assert "tests/test_cli.py" in calls["mypy"]
-    assert "scripts/hooks/tests/test_toolchain.py" not in calls["mypy"]
+    for platform in lint_all.MYPY_PLATFORMS:
+        assert "tests/test_cli.py" in calls[f"mypy ({platform})"]
+        assert "scripts/hooks/tests/test_toolchain.py" not in calls[f"mypy ({platform})"]
     assert "scripts/hooks/tests/test_toolchain.py" in calls["ruff"]
 
 
@@ -91,9 +92,32 @@ def test_python_sections_reports_ruff_and_mypy_failures(monkeypatch):
 
     sections = lint_all.python_sections(["tests/test_cli.py"], ["tests/test_cli.py"])
 
-    assert sections == "# ruff\n# mypy\n"
+    assert sections == "# ruff\n# mypy (linux)\n# mypy (win32)\n"
     # Both fix passes leave the vendored harness alone.
     assert all("scripts/hooks" in cmd for cmd in fixes) and len(fixes) == 2
+
+
+def test_mypy_checks_every_platform_whatever_the_host(monkeypatch):
+    # `scratch.py` called `ctypes.WinDLL` in a helper only reached on Windows. mypy on
+    # the Windows desktop passed it and mypy on the Linux gate did not, so main went red
+    # with a local lint that said clean. Each pass names its platform and its own cache:
+    # one shared cache would be rebuilt from scratch every time the platform flips.
+    lint_all = _load_lint_all()
+    monkeypatch.setattr(lint_all.subprocess, "run", lambda *a, **k: None)
+    calls: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        lint_all, "run_tool", lambda name, cmd, hint: calls.setdefault(name, cmd) and ""
+    )
+
+    lint_all.python_sections(["social_scraper/scratch.py"], ["social_scraper/scratch.py"])
+
+    assert {"linux", "win32"} <= set(lint_all.MYPY_PLATFORMS)
+    caches = set()
+    for platform in lint_all.MYPY_PLATFORMS:
+        cmd = calls[f"mypy ({platform})"]
+        assert cmd[cmd.index("--platform") + 1] == platform
+        caches.add(cmd[cmd.index("--cache-dir") + 1])
+    assert len(caches) == len(lint_all.MYPY_PLATFORMS)
 
 
 def test_python_sections_skips_mypy_with_nothing_typed(monkeypatch):
@@ -120,4 +144,4 @@ def test_scoped_run_skips_mypy_when_only_the_harness_changed(tmp_path, monkeypat
     lint_all.main(["--paths", "scripts/hooks/toolchain.py"])
 
     assert "ruff" in calls
-    assert "mypy" not in calls
+    assert not any(name.startswith("mypy") for name in calls)
