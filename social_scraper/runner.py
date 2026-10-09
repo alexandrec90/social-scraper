@@ -65,6 +65,14 @@ CYCLE_DEADLINE_SHARE = 0.75
 # backfill held the lake's locks and the 20:30 export ran until the wrapper's 55-minute
 # timeout ended it, with the 21:00 fire skipped behind it.
 EXPORT_DEADLINE_SHARE = 0.9
+# The share of a scheduled cycle at which a `scrape` still going is ended (`hard_deadline`,
+# `watchdog.Watchdog`): the two deadlines above are checked between steps, and a step
+# blocked on a frozen database never comes back to check one. 2026-10-09: Docker's VM
+# froze from 19:05 to 19:32 UTC, and the 19:00 run's db call ran past the 19:30 fire.
+HARD_DEADLINE_SHARE = 0.95
+# What a cycle ended by its hard deadline records as its timeout: no time and no count, so
+# devkit files every recurrence as one ledger group.
+STUCK = "cycle: still going when the next fire was due -- ended; the scheduled log has its stack"
 # When devkit's scheduler fired this `scrape`, as an ISO timestamp (devkit's
 # `collector_tasks.FIRED_AT`). The scrape's own start is minutes later -- the db coming
 # up, `uv run` starting -- and the next fire is due one cycle after the fire, not after
@@ -169,6 +177,21 @@ def export_deadline(crawl_deadline: datetime, cycle_minutes: float) -> datetime:
     start at `crawl_deadline` (`cycle_deadline`): the same start, a later share."""
     later = EXPORT_DEADLINE_SHARE - CYCLE_DEADLINE_SHARE
     return crawl_deadline + timedelta(minutes=cycle_minutes * later)
+
+
+def hard_deadline(started: datetime, cycle_minutes: float) -> datetime:
+    """When a cycle that started at `started` is ended wherever it is (`STUCK`)."""
+    return started + timedelta(minutes=cycle_minutes * HARD_DEADLINE_SHARE)
+
+
+def stuck_report(started_at: str, now: datetime, logs_dir: Path) -> RunReport:
+    """The report of a cycle its hard deadline ended: a timeout of the cycle, judged as
+    any timeout is (`judge_timeouts`) -- one is the machine, three running fail it -- and
+    the bucket's outage carried on, since no export ran."""
+    report = RunReport(started_at=started_at, finished_at=now.isoformat(), timeouts=[STUCK])
+    judge_timeouts(report, previous_streak(logs_dir))
+    judge_lake(report, previous_lake_down(logs_dir), now)
+    return report
 
 
 def cycle_start(now: datetime, fired: str | None) -> datetime:

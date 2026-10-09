@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -249,6 +250,85 @@ def test_a_timeout_fails_the_scrape_only_three_cycles_running(
         assert report_body(settings)["timeout_streak"] == streak
     assert cmd_scrape(settings, engine, scrape_args()) == 1
     assert f"FAILED -- {timed_out} (timed out 3 cycles running)" in capsys.readouterr().out
+
+
+def stuck_cycle(monkeypatch):
+    """`run_cycle` blocked as on a frozen database, and a hard deadline a second away; the
+    codes the watchdog ends the process with, which releases the block."""
+    release, ended = threading.Event(), []
+
+    def blocked_on_a_frozen_db(*a, **kw):
+        release.wait(30)
+        return RunReport("t")
+
+    def end(code):
+        ended.append(code)
+        release.set()
+
+    monkeypatch.setattr(cli, "run_cycle", blocked_on_a_frozen_db)
+    monkeypatch.setattr(
+        cli, "hard_deadline", lambda started, minutes: datetime.now(UTC) + timedelta(seconds=1)
+    )
+    monkeypatch.setattr(cli, "end_process", end)
+    return ended
+
+
+def test_a_cycle_stuck_past_its_hard_deadline_ends_as_a_timeout(
+    settings, engine, monkeypatch, capsys
+):
+    """1590bcaa: 2026-10-09 Docker's VM froze from 19:05 to 19:32 UTC, the 19:00 cycle's db
+    call blocked until it thawed, and the 19:30 fire was skipped behind it."""
+    ended = stuck_cycle(monkeypatch)
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert ended == [0]
+    out = capsys.readouterr().out
+    assert "blocked_on_a_frozen_db" in out, "the stack names where it was stuck"
+    last = out.rstrip().splitlines()[-1]
+    assert last.startswith("ok -- cycle timed out, retried next run (1 of 3 before it fails)")
+    body = report_body(settings)
+    assert body["timeouts"] == [runner.STUCK] and body["timeout_streak"] == 1
+
+
+def test_a_third_stuck_cycle_running_fails_the_scrape(settings, engine, monkeypatch, capsys):
+    write_report(RunReport("earlier", timeout_streak=2), settings.logs_dir)
+    ended = stuck_cycle(monkeypatch)
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    assert ended == [1]
+    last = capsys.readouterr().out.rstrip().splitlines()[-1]
+    assert last.startswith(f"FAILED -- {runner.STUCK} (timed out 3 cycles running)")
+
+
+def test_end_stuck_writes_the_report_and_answers_the_exit_code(settings, capsys):
+    assert cli.end_stuck(settings, "2026-10-09T19:00:06+00:00") == 0
+    assert report_body(settings)["started_at"] == "2026-10-09T19:00:06+00:00"
+    assert capsys.readouterr().out.rstrip().endswith(runner.REPORT_FILE)
+
+
+def test_end_process_ends_it_with_the_code(monkeypatch):
+    codes = []
+    monkeypatch.setattr(cli.os, "_exit", codes.append)
+    cli.end_process(1)
+    assert codes == [1]
+
+
+def test_scrape_cycle_runs_one_cycle_under_its_deadline(settings, engine, monkeypatch):
+    seen = {}
+
+    def cycle(*a, **kw):
+        seen.update(kw)
+        return RunReport("t")
+
+    monkeypatch.setattr(cli, "run_cycle", cycle)
+    deadline = datetime(2026, 10, 9, 19, 22, 30, tzinfo=UTC)
+    assert cli.scrape_cycle(settings, engine, scrape_args(), deadline).started_at == "t"
+    assert seen["deadline"] == deadline and seen["export"] is False
+
+
+def test_a_cycle_that_ends_in_time_is_not_ended(settings, engine, monkeypatch):
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
+    monkeypatch.setattr(cli, "end_process", lambda code: pytest.fail("the watchdog fired"))
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["timeouts"] == []
 
 
 def test_a_cycle_without_a_timeout_ends_the_streak(settings, engine, monkeypatch):

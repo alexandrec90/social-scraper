@@ -26,7 +26,9 @@ sports-sync [KEY...]  re-read the named leagues (default: all) from Wikidata now
 `scrape` exits 1 when the cycle failed -- the database unreachable, a browser crash, a
 platform erroring, a failed export -- and 0 otherwise. A platform deliberately left alone
 (outside X active hours, budget spent, circuit breaker open) is a skip, not a failure, so
-a scheduler firing outside the active hours sees 0.
+a scheduler firing outside the active hours sees 0. A cycle still going when the next fire
+is due -- a step blocked on a frozen database -- is ended there and judged as a timeout
+(`watchdog`).
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
-from social_scraper import backfill, scratch
+from social_scraper import backfill, scratch, watchdog
 from social_scraper.archive import lens
 from social_scraper.archive.store import LocalStore, ObjectStore, stores_for
 from social_scraper.config import SPORTS, Settings
@@ -62,6 +64,7 @@ from social_scraper.runner import (
     RunReport,
     cycle_deadline,
     cycle_start,
+    hard_deadline,
     judge_lake,
     judge_timeouts,
     previous_lake_down,
@@ -69,9 +72,11 @@ from social_scraper.runner import (
     run_cycle,
     run_forever,
     start_jitter_s,
+    stuck_report,
     universe_for,
     write_report,
 )
+from social_scraper.watchdog import Watchdog
 from social_scraper.sports import registry as sports_registry
 from social_scraper.sports.leagues import LeagueConfigError, load_leagues
 from social_scraper.sports.sync import SyncPolicy, sync_leagues
@@ -123,11 +128,61 @@ def platforms_of(choice: str) -> tuple[str, ...]:
     return PLATFORMS if choice == "all" else (choice,)
 
 
+def end_process(code: int) -> None:
+    """End the process from the watchdog's thread, whatever the cycle's is blocked in."""
+    os._exit(code)
+
+
+def end_stuck(settings: Settings, started: str) -> int:
+    """`Watchdog`'s ending of a cycle still going at its hard deadline: where it was stuck,
+    then its report and outcome line, last, as devkit reads it. The exit code."""
+    watchdog.print_stacks()
+    report = stuck_report(started, datetime.now(UTC), settings.logs_dir)
+    print(outcome_line(report, write_report(report, settings.logs_dir)), flush=True)
+    return 0 if report.ok else 1
+
+
 def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
     # From the scheduler's fire, before the db came up and before the jitter: all of it
     # is part of the cycle the next fire is due after.
     started_at = cycle_start(datetime.now(UTC), os.environ.get(FIRED_AT_ENV))
     deadline = cycle_deadline(started_at, settings.cycle_minutes)
+    started = datetime.now(UTC).isoformat()
+    # Ends the run at its hard deadline wherever it is stuck; whichever of it and the
+    # cycle claims the ending first writes the report (`watchdog`).
+    guard = Watchdog(
+        hard_deadline(started_at, settings.cycle_minutes),
+        lambda: end_stuck(settings, started),
+        end_process,
+    ).start()
+    try:
+        report = scrape_cycle(settings, engine, args, deadline)
+    except Exception as exc:
+        if not guard.finish():
+            return guard.outcome()
+        # The database down, or a bug outside the per-platform guard. Still overwrite the
+        # report: the previous run's "ok" must not be what is left on disk. Re-raised, so
+        # the traceback is printed and the process exits 1 as an uncaught error does.
+        failed = RunReport(
+            started_at=started,
+            finished_at=datetime.now(UTC).isoformat(),
+            errors=[f"cycle: {type(exc).__name__}: {exc}"],
+        )
+        print(f"FAILED -- details in {write_report(failed, settings.logs_dir)}")
+        raise
+    if not guard.finish():
+        return guard.outcome()
+    judge_timeouts(report, previous_streak(settings.logs_dir))
+    judge_lake(report, previous_lake_down(settings.logs_dir), datetime.now(UTC))
+    path = write_report(report, settings.logs_dir)
+    print(outcome_line(report, path))
+    return 0 if report.ok else 1
+
+
+def scrape_cycle(
+    settings: Settings, engine: Engine, args: argparse.Namespace, deadline: datetime
+) -> RunReport:
+    """`cmd_scrape`'s cycle: the start jitter, then one `run_cycle`."""
     if not args.now:
         # A scheduler fires on a fixed grid, and a fixed interval is a bot signature. The
         # default, not a flag: devkit's scheduled task runs bare `scrape`, and with the
@@ -135,32 +190,14 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         wait = start_jitter_s(settings.cycle_minutes)
         print(f"waiting {wait:.0f} s so the start is off the clock grid (--now to skip)")
         time.sleep(wait)
-    started = datetime.now(UTC).isoformat()
-    try:
-        schema.create_all(engine)
-        report = run_cycle(
-            settings,
-            engine,
-            platforms_of(args.platform),
-            export=not args.no_export,
-            deadline=deadline,
-        )
-    except Exception as exc:
-        # The database down, or a bug outside the per-platform guard. Still overwrite the
-        # report: the previous run's "ok" must not be what is left on disk. Re-raised, so
-        # the traceback is printed and the process exits 1 as an uncaught error does.
-        report = RunReport(
-            started_at=started,
-            finished_at=datetime.now(UTC).isoformat(),
-            errors=[f"cycle: {type(exc).__name__}: {exc}"],
-        )
-        print(f"FAILED -- details in {write_report(report, settings.logs_dir)}")
-        raise
-    judge_timeouts(report, previous_streak(settings.logs_dir))
-    judge_lake(report, previous_lake_down(settings.logs_dir), datetime.now(UTC))
-    path = write_report(report, settings.logs_dir)
-    print(outcome_line(report, path))
-    return 0 if report.ok else 1
+    schema.create_all(engine)
+    return run_cycle(
+        settings,
+        engine,
+        platforms_of(args.platform),
+        export=not args.no_export,
+        deadline=deadline,
+    )
 
 
 def outcome_line(report: RunReport, path: Path) -> str:
