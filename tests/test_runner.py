@@ -282,6 +282,25 @@ def test_export_deadline_is_a_later_share_of_the_same_cycle():
     assert runner.export_deadline(crawl, 30) == start + timedelta(minutes=27)
 
 
+def test_hard_deadline_falls_after_the_export_and_before_the_next_fire():
+    start = datetime(2026, 10, 9, 19, 0, tzinfo=UTC)
+    hard = runner.hard_deadline(start, 30)
+    assert hard == start + timedelta(minutes=28.5)
+    assert runner.export_deadline(runner.cycle_deadline(start, 30), 30) < hard
+    assert hard < start + timedelta(minutes=30)
+
+
+def test_a_stuck_report_is_a_timeout_and_carries_the_lake_outage(tmp_path):
+    since = "2026-10-08T22:31:00+00:00"
+    runner.write_report(runner.RunReport("earlier", lake_down_since=since), tmp_path)
+    now = datetime(2026, 10, 9, 19, 28, 30, tzinfo=UTC)
+    report = runner.stuck_report("2026-10-09T19:00:06+00:00", now, tmp_path)
+    assert report.timeouts == [runner.STUCK] and report.timeout_streak == 1
+    assert report.ok and report.finished_at == now.isoformat()
+    assert report.lake_down_since == since, "no export ran, so the outage carries on"
+    assert "19:" not in runner.STUCK, "a stable cause: no time in it"
+
+
 def test_a_cycle_past_its_export_deadline_defers_the_export_and_is_ok(settings, engine):
     """A deferred export is the next run's work, not an error: nothing is wrong with the
     lake, and an error here would fail the scheduled job for another writer's backfill."""
