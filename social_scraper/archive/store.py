@@ -157,7 +157,8 @@ def _is_missing(exc: ClientError) -> bool:
 
 
 class S3Store:
-    """An S3-compatible bucket (Cloudflare R2 in production). Takes a built client."""
+    """An S3-compatible bucket at `ARCHIVE_S3_ENDPOINT_URL` -- data-lake's SeaweedFS pool
+    or Cloudflare R2, whichever it names. Takes a built client."""
 
     def __init__(self, client: Any, bucket: str, prefix: str = "") -> None:
         if not bucket:
@@ -166,6 +167,11 @@ class S3Store:
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self.name = f"s3://{bucket}/{self.prefix}".rstrip("/")
+        # What a failure is reported against. A bucket name says nothing about which
+        # server holds it: 2026-10-08's `InternalError` read as an R2 fault until the
+        # settings were probed, and the bucket was the pool on a home PC left off.
+        endpoint = getattr(getattr(client, "meta", None), "endpoint_url", None)
+        self.where = f"{self.name} at {endpoint}" if isinstance(endpoint, str) else self.name
 
     def object_key(self, key: str) -> str:
         """`key` as stored in the bucket: under the prefix, exactly as data-lake reads it."""
@@ -173,7 +179,7 @@ class S3Store:
 
     def _fail(self, action: str, key: str, exc: Exception) -> StoreError:
         kind = LakeUnavailable if is_unavailable(exc) else StoreError
-        return kind(f"{self.name}: {action} {key} failed: {exc}")
+        return kind(f"{self.where}: {action} {key} failed: {exc}")
 
     def get_bytes(self, key: str) -> bytes:
         try:
