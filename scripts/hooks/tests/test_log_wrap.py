@@ -609,6 +609,16 @@ def test_an_unattended_failure_records_its_cause_so_two_causes_are_two_defects(
             "WARNING a: slow\nERROR:root:db gone\nFAILED -- details in x.json\n",
             "ERROR:root:db gone",
         ),
+        # ecf22e00: a status line that names its error before the pointer is the cause,
+        # not the warning logged last -- here a consequence of the failure it names.
+        (
+            "2026-10-08 22:53:39,482 WARNING social_scraper.export: export of posts failed: "
+            "InternalError\n2026-10-08 22:59:20,917 WARNING social_scraper.export: export of "
+            "symbols deferred to the next run: out of export time\n"
+            "FAILED -- export posts: StoreError: s3://data-lake: put a/b.tmp failed: "
+            "InternalError -- details in logs\\scrape-run.json\n",
+            "FAILED -- export posts: StoreError: sN://data-lake: put a/b.tmp failed: InternalError",
+        ),
         # With nothing else said, the pointer is still where to look.
         ("FAILED -- details in logs/run.json\n", "FAILED -- details in logs/run.json"),
         # Nothing error-shaped: the last line said is the best there is.

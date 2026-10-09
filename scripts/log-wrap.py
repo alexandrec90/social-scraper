@@ -248,18 +248,33 @@ def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
 
+def _named(line: str) -> str:
+    """`line` up to a "details in <file>" pointer, or `""` when nothing comes before the
+    pointer but a status word (`STATUS_ONLY`).
+
+    A status line that leads with its error -- social-scraper's `FAILED -- export posts:
+    StoreError: ... -- details in <file>` -- names the cause; skipped whole as a pointer,
+    it lost to the last logged warning, and ecf22e00 filed an export deferred for want of
+    time, the consequence, in place of the store refusing every write."""
+    pointer = POINTER.search(line)
+    if pointer is None:
+        return line
+    head = line[: pointer.start()]
+    return "" if STATUS_ONLY.match(head) else head.rstrip(" -;,(")
+
+
 def cause_said(output: str) -> str:
     """The line of a failed run's output that names why, as the run said it: the
     exception, the first failed test, the `error:` line or a logged error or warning,
-    else the last line; `""` for no output. Colour stripped, whitespace folded, bounded
-    by `SAID_WIDTH`."""
+    else the last line; `""` for no output. A line's pointer to a file is no part of
+    it (`_named`). Colour stripped, whitespace folded, bounded by `SAID_WIDTH`."""
     lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
     found = lines[-1] if lines else ""
     for pattern, which in CAUSE_LINES:
         hits = [
-            line[match.start() :]
+            named[match.start() :]
             for line in lines
-            if not POINTER.search(line) and (match := pattern.search(line))
+            if (named := _named(line)) and (match := pattern.search(named))
         ]
         if hits:
             found = hits[0] if which == "first" else hits[-1]
