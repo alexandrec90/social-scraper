@@ -2,6 +2,7 @@ import io
 from datetime import UTC, datetime, timedelta
 
 import pyarrow.parquet as pq
+from botocore.exceptions import ClientError
 from conftest import LAKE_BUCKET, NOW, Clock, IsolatedSettings, bucket_keys
 from sqlalchemy import select
 
@@ -361,6 +362,50 @@ def test_unreachable_bucket_fails_the_export_and_keeps_the_watermark(
     s3_client.create_bucket(Bucket="no-such-bucket")
     assert export_to_lake(engine, settings, NOW, client=s3_client).ok
     assert bucket_keys(s3_client, "no-such-bucket")
+
+
+class RefusesPuts:
+    """An S3 client whose server fails every put with a 500, as the storage pool's gateway
+    does while one of its two PCs is off; counts the puts it was sent."""
+
+    def __init__(self, client):
+        self._client = client
+        self.puts = 0
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def put_object(self, **kw):
+        self.puts += 1
+        error = {"Code": "InternalError", "Message": "We encountered an internal error"}
+        raise ClientError(
+            {"Error": error, "ResponseMetadata": {"HTTPStatusCode": 500}}, "PutObject"
+        )
+
+
+def test_a_lake_refusing_writes_defers_every_dataset_after_one_try(
+    engine, universe, tmp_path, s3_client
+):
+    """5354e2f6: the 23:00 scrape on 2026-10-08 spent three minutes of botocore retries on
+    each of four datasets against a pool with a PC off, and failed. The first refusal now
+    defers that dataset and every one after it, untried, and the run is ok."""
+    seed(engine, universe, Clock(), post("a", "calls"))
+    settings = s3_settings(tmp_path)
+    down = RefusesPuts(s3_client)
+    result = export_to_lake(engine, settings, NOW, client=down)
+    assert result.ok, "a lake that is down is a deferral, not an error"
+    assert result.lake_down and result.lake_down.startswith(export_mod.LAKE_DOWN)
+    assert "InternalError" in result.lake_down
+    assert result.deferred == [spec.name for spec in datasets.ALL]
+    assert down.puts == 1, "no dataset after the first refusal is tried"
+    with engine.connect() as conn:
+        assert repository.get_watermark(conn, datasets.POSTS.name) is None
+    # The pool back, the next run sends the same rows.
+    later = export_to_lake(engine, settings, NOW, client=s3_client)
+    assert later.ok and later.lake_down is None and not later.deferred
+    assert "social_scraper/posts/platform=reddit/dt=2026-09-28/part.parquet" in bucket_keys(
+        s3_client
+    )
 
 
 def test_unconfigured_bucket_fails_every_dataset_without_raising(engine, tmp_path):

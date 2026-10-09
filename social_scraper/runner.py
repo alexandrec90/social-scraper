@@ -78,6 +78,12 @@ FIRED_AT_ENV = "DEVKIT_FIRED_AT"
 # on devkit's ledger as a failed scheduled job (2e04c832, 2795e03e), and the cycle after
 # the load lifted was clean. Three in a row, an hour and a half, is something to act on.
 TIMEOUT_STREAK_FAILS = 3
+# How long the bucket may refuse every write (`export.ExportResult.lake_down`) before
+# the scrape fails on it (`judge_lake`). Until then each run defers its export and the
+# database holds the rows. The pool behind the bucket takes no writes while either of
+# its two storage PCs is off, which is a night, not a fault (data-lake's
+# `storage-node.py`); a day of it is a lake someone has to bring back.
+LAKE_DOWN_FAILS_AFTER = timedelta(hours=24)
 
 
 @dataclass
@@ -93,6 +99,9 @@ class RunReport:
     # Crawls that timed out this cycle, and how many cycles running one has.
     timeouts: list[str] = field(default_factory=list)
     timeout_streak: int = 0
+    # Why the bucket took nothing this cycle, and since when (ISO) it has taken nothing.
+    lake_down: str | None = None
+    lake_down_since: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -118,6 +127,36 @@ def judge_timeouts(report: RunReport, previous: int) -> None:
     if report.timeout_streak >= TIMEOUT_STREAK_FAILS:
         running = f"timed out {report.timeout_streak} cycles running"
         report.errors.extend(f"{timeout} ({running})" for timeout in report.timeouts)
+
+
+def previous_lake_down(logs_dir: Path) -> datetime | None:
+    """Since when the last cycle's report says the bucket has taken nothing; None when
+    it took writes, or there is no report to read."""
+    try:
+        since = json.loads((logs_dir / REPORT_FILE).read_text(encoding="utf-8"))["lake_down_since"]
+        when = datetime.fromisoformat(since) if isinstance(since, str) else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return when if when is not None and when.tzinfo is not None else None
+
+
+def judge_lake(report: RunReport, previous: datetime | None, now: datetime) -> None:
+    """Carry the bucket's outage on from `previous`, and fail the cycle once it has lasted
+    `LAKE_DOWN_FAILS_AFTER`. A cycle that exported without it ends the outage; one that
+    ran no export (`--no-export`) learned nothing, and carries `previous` on unchanged."""
+    if not report.export:
+        report.lake_down_since = previous.isoformat() if previous else None
+        return
+    if report.lake_down is None:
+        report.lake_down_since = None
+        return
+    since = previous or now
+    report.lake_down_since = since.isoformat()
+    if now - since >= LAKE_DOWN_FAILS_AFTER:
+        hours = (now - since).total_seconds() / 3600
+        report.errors.append(
+            f"export: {report.lake_down} (for {hours:.0f} h, since {since:%Y-%m-%d %H:%M}Z)"
+        )
 
 
 def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
@@ -315,6 +354,7 @@ def run_cycle(
         until = export_deadline(deadline, settings.cycle_minutes) if deadline else None
         exported = export_to_lake(engine, settings, datetime.now(UTC), until=until)
         report.export = [asdict(d) for d in exported.datasets]
+        report.lake_down = exported.lake_down
         report.errors.extend(f"export {d.dataset}: {d.error}" for d in exported.datasets if d.error)
     report.finished_at = datetime.now(UTC).isoformat()
     return report

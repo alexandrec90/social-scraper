@@ -18,6 +18,11 @@ not an error -- nothing is wrong with the lake. On 2026-10-07 a `backfill export
 held the lake's locks while the 20:30 scrape exported, and an export bounded only by
 each lock's own ten-minute timeout ran 35 minutes past its crawl, so the 21:00 fire
 was skipped.
+
+A bucket whose server fails or cannot be reached (`store.LakeUnavailable`) defers the
+same way, and from the first such dataset on: the operational database keeps every row,
+so a lake that is down costs lag, not data. Only an outage that outlasts
+`runner.LAKE_DOWN_FAILS_AFTER` fails the scrape (`runner.judge_lake`).
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from sqlalchemy.engine import Connection, Engine
 from social_scraper.archive import datasets
 from social_scraper.archive.lock import TIMEOUT_S, LockTimeout
 from social_scraper.archive.manifest import DatasetSpec, ManifestError
-from social_scraper.archive.store import ObjectStore, StoreError, stores_for
+from social_scraper.archive.store import LakeUnavailable, ObjectStore, StoreError, stores_for
 from social_scraper.archive.writer import VerifyError, WriteOptions, write_partition
 from social_scraper.config import Settings
 from social_scraper.db import repository, schema
@@ -46,6 +51,8 @@ from social_scraper.privacy import contains_secret
 log = logging.getLogger(__name__)
 
 BATCH_ROWS = 20_000
+# How a deferral for a bucket that took nothing reads (`ExportResult.lake_down`).
+LAKE_DOWN = "lake not accepting writes"
 
 # dataset -> (operational table, the column whose growth means "changed since")
 SOURCES: dict[str, tuple[Table, str]] = {
@@ -75,6 +82,8 @@ class DatasetExport:
 @dataclass
 class ExportResult:
     datasets: list[DatasetExport] = field(default_factory=list)
+    # Why the bucket took nothing this run (`LakeUnavailable`), or None if it answered.
+    lake_down: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -215,11 +224,20 @@ def export_all(
 ) -> ExportResult:
     """Export every dataset to every store; one failing dataset does not stop the others.
 
-    Past `deadline`, every dataset not yet done is deferred to the next run."""
+    Past `deadline`, every dataset not yet done is deferred to the next run. So is every
+    one from the first the bucket's server fails (`LakeUnavailable`): the rest are not
+    tried, since each would spend botocore's retries reaching the same answer."""
     result = ExportResult()
     for spec in datasets.ALL:
+        if result.lake_down:
+            result.datasets.append(DatasetExport(spec.name, deferred=result.lake_down))
+            continue
         try:
             report = export_dataset(engine, stores, spec, now, deadline=deadline)
+        except LakeUnavailable as exc:
+            result.lake_down = f"{LAKE_DOWN}: {exc}"
+            log.warning("export of %s and the rest deferred: %s", spec.name, result.lake_down)
+            report = DatasetExport(spec.name, deferred=result.lake_down)
         # StoreError is an OSError: an unreachable or refusing bucket fails like a full disk.
         except (OSError, VerifyError, ManifestError, pa.ArrowException) as exc:
             log.warning("export of %s failed: %s", spec.name, exc)

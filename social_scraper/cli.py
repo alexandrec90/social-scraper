@@ -62,7 +62,9 @@ from social_scraper.runner import (
     RunReport,
     cycle_deadline,
     cycle_start,
+    judge_lake,
     judge_timeouts,
+    previous_lake_down,
     previous_streak,
     run_cycle,
     run_forever,
@@ -155,6 +157,7 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         print(f"FAILED -- details in {write_report(report, settings.logs_dir)}")
         raise
     judge_timeouts(report, previous_streak(settings.logs_dir))
+    judge_lake(report, previous_lake_down(settings.logs_dir), datetime.now(UTC))
     path = write_report(report, settings.logs_dir)
     print(outcome_line(report, path))
     return 0 if report.ok else 1
@@ -167,7 +170,8 @@ def outcome_line(report: RunReport, path: Path) -> str:
     X op and one dead account one ledger group, read as a fix that did not hold
     (2026-10-06). The URL, and every other error, are in the report. A deferred export
     is named on an ok line, so a lake falling behind is visible in the scheduled log, and
-    so is a crawl that timed out short of `TIMEOUT_STREAK_FAILS` cycles running.
+    so is a crawl that timed out short of `TIMEOUT_STREAK_FAILS` cycles running, and a
+    bucket that has taken nothing for less than `LAKE_DOWN_FAILS_AFTER`.
     """
     if report.ok:
         notes = []
@@ -176,6 +180,8 @@ def outcome_line(report: RunReport, path: Path) -> str:
             streak = f"{report.timeout_streak} of {TIMEOUT_STREAK_FAILS} before it fails"
             notes.append(f"{timed_out} timed out, retried next run ({streak})")
         deferred = [d["dataset"] for d in report.export if d.get("deferred")]
+        if report.lake_down_since:
+            notes.append(f"lake not accepting writes since {report.lake_down_since[:16]}Z")
         if deferred:
             notes.append(f"export of {len(deferred)} dataset(s) deferred to the next run")
         return " -- ".join(["ok", *notes, f"details in {path}"])

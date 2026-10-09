@@ -267,6 +267,67 @@ def test_an_unreadable_previous_report_starts_the_streak_over(settings, body):
     assert runner.previous_streak(settings.logs_dir) == 0
 
 
+LAKE_DOWN = "lake not accepting writes: s3://data-lake: put k failed: InternalError"
+
+
+def lake_down_report(*a, **kw):
+    return RunReport("t", export=[{"dataset": "a", "deferred": LAKE_DOWN}], lake_down=LAKE_DOWN)
+
+
+def test_a_lake_refusing_writes_fails_the_scrape_only_after_a_day(
+    settings, engine, monkeypatch, capsys
+):
+    """5354e2f6: the storage pool takes no writes while either of its PCs is off, and each
+    scrape that night failed on it. The rows wait in the database; a day of it fails."""
+    monkeypatch.setattr(cli, "run_cycle", lake_down_report)
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    out = capsys.readouterr().out
+    since = report_body(settings)["lake_down_since"]
+    assert f"ok -- lake not accepting writes since {since[:16]}Z -- export of 1" in out
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["lake_down_since"] == since, "the outage keeps its start"
+    day_ago = datetime.now(UTC) - runner.LAKE_DOWN_FAILS_AFTER
+    write_report(RunReport("earlier", lake_down_since=day_ago.isoformat()), settings.logs_dir)
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    assert f"FAILED -- export: {LAKE_DOWN} (for 24 h, since" in capsys.readouterr().out
+
+
+def test_an_export_the_lake_took_ends_the_outage(settings, engine, monkeypatch):
+    write_report(
+        RunReport("earlier", lake_down_since="2026-10-08T22:31:00+00:00"), settings.logs_dir
+    )
+    monkeypatch.setattr(
+        cli, "run_cycle", lambda *a, **kw: RunReport("t", export=[{"dataset": "a"}])
+    )
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["lake_down_since"] is None
+
+
+def test_a_cycle_with_no_export_carries_the_outage_on(settings, engine, monkeypatch):
+    since = "2026-10-08T22:31:00+00:00"
+    write_report(RunReport("earlier", lake_down_since=since), settings.logs_dir)
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t"))
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["lake_down_since"] == since
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "not json",
+        "[]",
+        "{}",
+        '{"lake_down_since": 3}',
+        '{"lake_down_since": "soon"}',
+        '{"lake_down_since": "2026-10-08T22:31:00"}',
+    ],
+)
+def test_an_unreadable_previous_report_knows_of_no_outage(settings, body):
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    (settings.logs_dir / runner.REPORT_FILE).write_text(body, encoding="utf-8")
+    assert runner.previous_lake_down(settings.logs_dir) is None
+
+
 def test_scrape_writes_the_report_and_sets_exit_code(settings, engine, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", errors=["x: boom"]))
     assert cmd_scrape(settings, engine, scrape_args()) == 1

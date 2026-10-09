@@ -1,8 +1,15 @@
 import pytest
+from botocore.exceptions import (
+    ClientError,
+    EndpointConnectionError,
+    NoCredentialsError,
+    ReadTimeoutError,
+)
 from conftest import LAKE_BUCKET, IsolatedSettings, bucket_keys
 
 from social_scraper.archive import store
 from social_scraper.archive.store import (
+    LakeUnavailable,
     LocalStore,
     ObjectStore,
     S3Store,
@@ -163,9 +170,71 @@ def test_s3_store_failures_are_store_errors(s3_client):
         lambda: s.promote("k.tmp", "k"),
         lambda: s.delete("k"),
     ):
-        with pytest.raises(StoreError, match="no-such-bucket"):
+        with pytest.raises(StoreError, match="no-such-bucket") as caught:
             call()
+        # A 4xx refuses this request; the server is fine, so nothing is deferred for it.
+        assert not isinstance(caught.value, LakeUnavailable)
     assert issubclass(StoreError, OSError)  # an export treats it like a full disk
+
+
+def internal_error() -> ClientError:
+    """What the SeaweedFS gateway answers a put once botocore's retries run out, while a
+    `001` bucket has no second volume server to place a replica on (2026-10-08)."""
+    response = {
+        "Error": {"Code": "InternalError", "Message": "We encountered an internal error"},
+        "ResponseMetadata": {"HTTPStatusCode": 500},
+    }
+    return ClientError(response, "PutObject")
+
+
+class ServerDown:
+    """An S3 client whose server fails every request with `error`."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def __getattr__(self, name):
+        def fail(**kw):
+            raise self.error
+
+        return fail
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        internal_error(),
+        EndpointConnectionError(endpoint_url="http://100.76.121.58:8333"),
+        ReadTimeoutError(endpoint_url="http://100.76.121.58:8333"),
+    ],
+    ids=["5xx", "unreachable", "read-timeout"],
+)
+def test_a_server_that_fails_or_cannot_be_reached_is_lake_unavailable(error):
+    s = S3Store(ServerDown(error), LAKE_BUCKET)
+    for call in (
+        lambda: s.get_bytes("k"),
+        lambda: s.put_bytes("k", b"x"),
+        lambda: s.promote("k.tmp", "k"),
+        lambda: s.delete("k"),
+    ):
+        with pytest.raises(LakeUnavailable, match=LAKE_BUCKET):
+            call()
+    assert issubclass(LakeUnavailable, StoreError)
+
+
+def test_is_unavailable_reads_the_status_not_the_code():
+    assert store.is_unavailable(internal_error())
+    slow = ClientError(
+        {"Error": {"Code": "SlowDown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}, "PutObject"
+    )
+    assert store.is_unavailable(slow)
+    denied = ClientError(
+        {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+        "PutObject",
+    )
+    assert not store.is_unavailable(denied)
+    assert not store.is_unavailable(ClientError({"Error": {"Code": "InternalError"}}, "PutObject"))
+    assert not store.is_unavailable(NoCredentialsError())
 
 
 def test_s3_store_needs_a_bucket(s3_client):

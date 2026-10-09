@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, HTTPClientError
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from social_scraper.archive.lock import LOCK_SUFFIX
 from social_scraper.config import Settings
@@ -66,6 +67,28 @@ class StoreError(OSError):
     An `OSError`, so an export already treats it like a full disk: the dataset fails,
     its watermark stays put, and the next run retries.
     """
+
+
+class LakeUnavailable(StoreError):
+    """The bucket's server failed the request (a 5xx) or could not be reached at all.
+
+    The store is at fault, not the request, so every other request fails the same way
+    and the export defers the lot rather than failing it (`export.export_all`). The pool
+    behind the bucket refuses every write while either of its two storage PCs is off
+    (data-lake's `storage-node.py`, placement `001`), answering `InternalError` once
+    botocore's retries run out -- about three minutes a dataset. 2026-10-08: the second
+    PC went off at 22:31, and the 23:00 scrape spent twelve minutes on four datasets and
+    failed, filed on devkit's ledger as a broken scheduled job (5354e2f6).
+    """
+
+
+def is_unavailable(exc: Exception) -> bool:
+    """Whether `exc`, from botocore, says the server failed or was never reached --
+    as against refusing this request (a 4xx: a bad key, a missing bucket, credentials)."""
+    if isinstance(exc, ClientError):
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return isinstance(status, int) and status >= 500
+    return isinstance(exc, (BotoConnectionError, HTTPClientError))
 
 
 @runtime_checkable
@@ -149,7 +172,8 @@ class S3Store:
         return f"{self.prefix}/{key}" if self.prefix else key
 
     def _fail(self, action: str, key: str, exc: Exception) -> StoreError:
-        return StoreError(f"{self.name}: {action} {key} failed: {exc}")
+        kind = LakeUnavailable if is_unavailable(exc) else StoreError
+        return kind(f"{self.name}: {action} {key} failed: {exc}")
 
     def get_bytes(self, key: str) -> bytes:
         try:
