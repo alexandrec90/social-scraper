@@ -141,6 +141,16 @@ git -C "$HOME/…/eager-kindling-russell" rev-parse → C:/Users/…/eager-kindl
 The tilde is never expanded before the check — the path predicate rejects any string
 containing `~` outright, alongside `/proc/self`, `/dev/fd` and a leading `/../`.
 
+`$HOME` resolves as an *argument*, not as the program. For an interpreter the script is
+the program, so the same variable is refused one operand earlier (10-08, a supervisor
+session):
+
+```
+python scripts/harness_triage.py --agent "$HOME/x"           → runs
+python "$HOME/…/devkit/scripts/harness_triage.py" --agent claude → refused: "a computed
+    argument goes after the script or --"
+```
+
 The substring match is the expensive one. A statement the parser cannot reduce to a
 simple list is tested against `/git/i` over the entire line, unanchored:
 
