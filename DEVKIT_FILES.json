@@ -1,11 +1,11 @@
 {
-  "devkit_tag": "v0.11.55",
+  "devkit_tag": "v0.11.56",
   "files": {
-    ".claude/engineering-evidence.md": "c1f5a57dc081b8c09014f80fdafb7c73bda3cdf689bfa3c4e08639bf600b7ebe",
+    ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "aea4596d9e27ad0004e4853252b8bdd054a264b4c60409a74fe3ecf6fd3015c0",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
     ".claude/rules/authoring.md": "6b2ac11c4fbfe094c1c7b4fa64406d8a5af6fef57467090848c3983dd076ea11",
-    ".claude/rules/engineering.md": "5d6b1b7d024ccbddc29c224a8d4cd95292998e1acebb6fc64040923424b77d78",
+    ".claude/rules/engineering.md": "87f42e423fd7f897c0a1f243f696552b01f9b9cfa45e41fe903a552862d762d8",
     ".claude/rules/session-scope.md": "6b27539853bf7a138ac0b99c65a05ba508fbce844050726410c15878b80c0deb",
     ".claude/skills/go-nuts/SKILL.md": "78bed86970494e5176b46060ef48fbcaa4fe08bc9d9ea804023f2e7145a63bf2",
     ".claude/skills/ship/SKILL.md": "8522894b72484652c153e3e4b900db9fb5daf8f9da9c8fa855bb98d49bf9517f",

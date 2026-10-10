@@ -75,13 +75,12 @@ What preemptive wrapping has cost is in
 
 **A refusal saying a command is "too complex to verify that it stays inside the
 worktree" or "cannot be shown not to be git" is not a devkit hook** — none is wired. It
-is Claude Code's own `claude --worktree` isolation guard; nothing in devkit changes what
-it accepts. It parses **only the Bash tool's** command lines, so on Windows the
+is Claude Code's own `claude --worktree` isolation guard. It parses **only the Bash tool's** command lines, so on Windows the
 PowerShell tool is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
-| `~` in a path | `$HOME`, which resolves; the tilde is rejected unexpanded |
+| `~` in a path; `$HOME` as the script, `python "$HOME/…/x.py"` | `$HOME` as an argument; the PowerShell tool for a script path |
 | `git -C`, `--git-dir`, `env -C`, `GIT_DIR=`, `cd … &&` before git | bare `git`, from the worktree |
 | command substitution, `for`/`while`, a subshell | one call each — a plain `&&` list is fine |
 | the letters `git` inside any of the above | nothing; it is a false positive |
