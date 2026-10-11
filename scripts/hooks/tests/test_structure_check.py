@@ -915,6 +915,40 @@ def test_main_tighten_then_judges(project, capsys):
     assert "clean (0 known" in out
 
 
+def test_a_tighten_that_leaves_growth_says_it_failed_and_names_the_one_call(project, capsys):
+    """6e2a36b2: `--tighten && --record --reason ...` tightened, printed `1 worse, 0
+    stale`, and recorded nothing. That line was the tighten's own verdict, and its exit 1
+    ended the `&&` before `--record` ran -- which read as `--record` silently doing
+    nothing. The verdict now says whose it is and what records the growth."""
+    root = project(limits={"function_lines": 10})
+    _oversized(root)
+    write(root, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
+    assert sc.main(["--tighten"]) == 1
+    out = capsys.readouterr().out
+    assert "worse, 0 stale after --tighten" in out
+    assert "--tighten --record --reason" in out
+
+
+def test_failed_line_names_the_one_call_only_after_a_tighten_that_left_growth():
+    grew = [sc.Finding("function_lines", "src/big.py", 41, "f")]
+    plain = sc.failed_line(grew, [], "logs/x.log", tightened=False)
+    assert plain == "structure-check: 1 worse, 0 stale -- see logs/x.log"
+    assert "--tighten --record --reason" in sc.failed_line(grew, [], "logs/x.log", True)
+    stale_only = sc.failed_line([], [("k", 2, 1)], "logs/x.log", tightened=True)
+    assert stale_only == "structure-check: 0 worse, 1 stale -- see logs/x.log"
+
+
+def test_tighten_and_record_share_one_call(project, capsys):
+    root = project(limits={"function_lines": 10})
+    _oversized(root)
+    write(root, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
+    assert sc.main(["--tighten", "--record", "--reason", "the split is its own PR"]) == 0
+    out = capsys.readouterr().out
+    assert "recorded function_lines::src/big.py::f" in out
+    assert "dropped 1 line(s)" in out
+    assert "orphan::src/gone.py" not in sc.read_baseline(sc.baseline_path(root))
+
+
 def test_main_exits_two_on_a_configuration_error(project, capsys):
     project(limits={"nope": 1})
     assert sc.main([]) == 2
