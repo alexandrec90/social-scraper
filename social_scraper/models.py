@@ -14,11 +14,23 @@ from typing import Any
 
 REDDIT = "reddit"
 X = "x"
-PLATFORMS = (REDDIT, X)
-# Archive-only: imported from published datasets, never crawled, so not in PLATFORMS
-# (which drives `scrape`, `login` and the request budgets).
 STOCKTWITS = "stocktwits"
+TRADINGVIEW = "tradingview"
+HFBOARDS = "hfboards"
 BLUESKY = "bluesky"
+POLYMARKET = "polymarket"
+# Every platform a cycle crawls, in the order it starts them: what `scrape all` means
+# (narrowed by `SCRAPE_PLATFORMS`), and what has a request budget and a breaker.
+PLATFORMS = (REDDIT, X, STOCKTWITS, TRADINGVIEW, HFBOARDS, BLUESKY, POLYMARKET)
+# Read through a public JSON API over plain HTTPS (`apiclient.py`), not a browser.
+API_PLATFORMS = (BLUESKY, POLYMARKET)
+# What each domain crawls there. Polymarket is in neither: it is markets, not posts,
+# and serves both domains from one crawl (`polymarket/`).
+STOCK_PLATFORMS = (REDDIT, X, STOCKTWITS, TRADINGVIEW, BLUESKY)
+SPORTS_PLATFORMS = (REDDIT, X, HFBOARDS, BLUESKY)
+# The platforms `login` opens a window for; the others are read signed out.
+LOGIN_PLATFORMS = (REDDIT, X)
+# Archive-only: imported from a published dataset, never crawled, so not in PLATFORMS.
 HACKERNEWS = "hackernews"
 
 

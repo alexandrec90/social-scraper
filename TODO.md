@@ -28,6 +28,18 @@
       first loads ~29 GiB of metadata into DuckDB under `DATA_DIR`; run it when no
       other import is using the memory
 
+## Added platforms (StockTwits, TradingView, HFBoards, Bluesky, Polymarket)
+
+- [ ] Run `uv run social-scraper scrape stocktwits --now`, then `tradingview`, `bluesky`,
+      `polymarket` (and `hfboards` with `DOMAINS=stocks,sports`) once by hand, and read
+      `logs/scrape-run.json`: the payload shapes were measured live on 2026-10-10 but the
+      crawlers have only run against fakes. None needs an account or a key
+- [ ] Watch the first day's `status` budgets: with `CRAWL_WORKERS=3` three Chromes can be
+      open at once (lower it if memory is tight; 1 no longer fits a 30-minute cycle)
+- [ ] Not yet checked live: StockTwits `?since=` returning the newest 30 when more arrived
+      (else gaps on busy symbols); HFBoards sticky-thread markup; TradingView `next` pages
+      (only page 1 is read)
+
 ## Sports domain (needs you)
 
 - [ ] Map Mise-o-jeu+ onto the league list: browse Mise-o-jeu+ with sports_betting's
@@ -47,6 +59,10 @@
       League query missed promoted clubs on 2026-10-04; FBS returned 106 of ~134 teams)
 - [ ] sports_betting: read `social_scraper_sports_*` from the lake if its models want
       the chatter (restore-then-use, per `.claude/rules/data-lake.md`)
+- [ ] sports_betting: `social_scraper_polymarket_markets` / `_prices` carry games (teams,
+      moneyline/totals prices over time, live score, `winner`) for every league with
+      `polymarket_tags` -- a market-implied probability to compare its own against.
+      Matching Polymarket team names to Wikidata entities is not done here yet
 
 ## Hand-off to the consumers (other repos -- not changed from here)
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from social_scraper.archive import datasets
-from social_scraper.models import BLUESKY, HACKERNEWS, PLATFORMS, STOCKTWITS
+from social_scraper.models import HACKERNEWS, PLATFORMS
 
 CONFIG = Path(__file__).resolve().parents[1] / ".pre-commit-config.yaml"
 # Read as text, not YAML: only this hook passes `--exclude-lines`, and a reshaped config
@@ -33,7 +33,7 @@ DATED = [
 
 
 @pytest.mark.parametrize("spec", DATED, ids=lambda s: s.name)
-@pytest.mark.parametrize("platform", [*PLATFORMS, STOCKTWITS, BLUESKY, HACKERNEWS])
+@pytest.mark.parametrize("platform", [*PLATFORMS, HACKERNEWS])
 def test_every_partition_key_is_excluded(spec, platform):
     key = spec.partition_of(
         {"platform": platform, spec.ts_column: datetime(2024, 3, 10, tzinfo=UTC)}

@@ -338,6 +338,73 @@ sports_name_candidates = Table(
 )
 
 
+# --- Polymarket (`social_scraper/polymarket/`) --------------------------------------------
+# Prediction markets, not posts: what a market asks, and what it was priced at over time.
+# Both domains' markets share the tables; `domains` says which one each is for, and the
+# stock datasets ibkr_trader reads never see a row of them. No trader or resolver address
+# is kept: Polymarket shows them, but they identify people.
+
+polymarket_markets = Table(
+    "polymarket_markets",
+    metadata,
+    Column("market_id", String(32), primary_key=True),
+    # Always "polymarket": the lake partitions every dataset by platform.
+    Column("platform", String(16), nullable=False),
+    Column("event_id", String(32), nullable=False),
+    Column("event_slug", Text),
+    Column("event_title", Text),
+    Column("question", Text, nullable=False),
+    Column("slug", Text),
+    Column("domains", JSON, nullable=False),  # ["stocks"], ["sports"] or both
+    Column("tags", JSON, nullable=False),  # the event's tag slugs
+    Column("leagues", JSON, nullable=False),  # league keys, from their `polymarket_tags`
+    Column("symbols", JSON, nullable=False),  # listed tickers the market names
+    Column("outcomes", JSON, nullable=False),
+    # moneyline | totals | ... | baseball_player_earned_runs_allowed (35 characters, 2026-10-10)
+    Column("sports_market_type", String(64)),
+    Column("line", Float),
+    # A game's own state, as the event reports it.
+    Column("game_id", String(32)),
+    Column("teams", JSON),
+    Column("score", String(32)),
+    Column("period", String(32)),
+    Column("live", Boolean),
+    Column("ended", Boolean),
+    Column("start_time", TS),
+    Column("end_date", TS),
+    Column("created_at", TS, nullable=False),
+    Column("active", Boolean),
+    Column("closed", Boolean),
+    # The resolved outcome's index into `outcomes`, once a closed market's prices say so.
+    Column("winner", Integer),
+    Column("first_seen_at", TS, nullable=False),
+    Column("updated_at", TS, nullable=False),
+    Index("ix_polymarket_markets_updated_at", "updated_at"),
+    Index("ix_polymarket_markets_open", "closed", "end_date"),
+)
+
+# One market at one observation, written only when its price or game state moved.
+polymarket_prices = Table(
+    "polymarket_prices",
+    metadata,
+    Column("market_id", String(32), primary_key=True),
+    Column("observed_at", TS, primary_key=True),
+    Column("platform", String(16), nullable=False),
+    Column("prices", JSON, nullable=False),  # one per outcome, in `outcomes` order
+    Column("last_trade_price", Float),
+    Column("best_bid", Float),
+    Column("best_ask", Float),
+    Column("spread", Float),
+    Column("volume", Float),
+    Column("volume_24hr", Float),
+    Column("liquidity", Float),
+    Column("score", String(32)),
+    Column("period", String(32)),
+    Column("live", Boolean),
+    Index("ix_polymarket_prices_observed_at", "observed_at"),
+)
+
+
 def create_all(engine: Engine) -> None:
     """Create every missing table. Idempotent; never alters an existing table."""
     metadata.create_all(engine)

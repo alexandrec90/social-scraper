@@ -65,6 +65,8 @@ SOURCES: dict[str, tuple[Table, str]] = {
     datasets.SPORTS_ENGAGEMENT.name: (schema.sports_engagement, "observed_at"),
     datasets.SPORTS_ENTITIES.name: (schema.sports_entities, "updated_at"),
     datasets.SPORTS_ENTITY_LEAGUES.name: (schema.sports_entity_leagues, "refreshed_at"),
+    datasets.POLYMARKET_MARKETS.name: (schema.polymarket_markets, "updated_at"),
+    datasets.POLYMARKET_PRICES.name: (schema.polymarket_prices, "observed_at"),
 }
 
 

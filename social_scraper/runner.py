@@ -2,10 +2,16 @@
 
 A cycle: prepare each enabled domain (`DOMAINS`: the stock symbol universe; the sports
 league list, Wikidata refresh and matcher), crawl each platform in its own browser
-profile -- the stock domain, then sports, under one per-platform throttle -- export to
-the lake, and write `logs/scrape-run.json` -- on failure as on success, overwritten
-each run -- with everything needed to diagnose it. The terminal gets a status line and
-that path (CLAUDE.md, "Failure artifacts").
+profile (or API client) -- the stock domain, then sports, under one per-platform
+throttle -- export to the lake, and write `logs/scrape-run.json` -- on failure as on
+success, overwritten each run -- with everything needed to diagnose it. The terminal
+gets a status line and that path (CLAUDE.md, "Failure artifacts").
+
+Platforms are crawled side by side, `CRAWL_WORKERS` at a time, each in its own thread.
+Every platform already has its own profile, throttle and breaker, so this changes no
+platform's pace; what it changes is that a cycle lasts as long as its slowest platform
+rather than all of them added up, which seven platforms needed: Reddit and X alone
+filled 20-25 minutes of a 30-minute cycle (`CYCLE_DEADLINE_SHARE`).
 
 One platform or domain failing never stops another, and a failed export never fails
 the cycle: the lake degrades, it does not block.
@@ -18,6 +24,7 @@ import logging
 import secrets
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -30,20 +37,34 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from social_scraper.apiclient import ApiClient
+from social_scraper.bluesky import live as bluesky_live
 from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
 from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
 from social_scraper.export import export_to_lake
 from social_scraper import launch
 from social_scraper.fetch import Browser, LaunchTimedOut
-from social_scraper.models import REDDIT, X
+from social_scraper.models import (
+    BLUESKY,
+    POLYMARKET,
+    REDDIT,
+    SPORTS_PLATFORMS,
+    STOCK_PLATFORMS,
+    STOCKTWITS,
+    TRADINGVIEW,
+    X,
+)
 from social_scraper.pipeline import Ingestor
+from social_scraper.polymarket import cycle as polymarket_cycle
 from social_scraper.reddit.scraper import RedditOptions, RedditScraper
 from social_scraper.sports import cycle as sports_cycle
 from social_scraper.sports.cycle import PolicyFor, SportsContext
 from social_scraper.sports.leagues import LeagueConfigError
+from social_scraper.stocktwits import scraper as stocktwits_scraper
 from social_scraper.symbols.universe import Universe, load_universe
 from social_scraper.throttle import Policy, Throttle, ThrottleStop
+from social_scraper.tradingview import scraper as tradingview_scraper
 from social_scraper.x import accounts
 from social_scraper.x.scraper import XPlan, XScraper
 
@@ -92,6 +113,11 @@ TIMEOUT_STREAK_FAILS = 3
 # its two storage PCs is off, which is a night, not a fault (data-lake's
 # `storage-node.py`); a day of it is a lake someone has to bring back.
 LAKE_DOWN_FAILS_AFTER = timedelta(hours=24)
+# The hosts each API platform's client may reach (`apiclient.ApiClient`).
+API_HOSTS = {
+    BLUESKY: frozenset({bluesky_live.HOST}),
+    POLYMARKET: frozenset({polymarket_cycle.HOST}),
+}
 
 
 @dataclass
@@ -207,20 +233,20 @@ def cycle_start(now: datetime, fired: str | None) -> datetime:
 
 
 def policy_for(settings: Settings, platform: str, deadline: datetime | None = None) -> Policy:
-    """The throttle policy for `platform`: its own pace, budgets, hours and deadline."""
-    reddit = platform == REDDIT
+    """The throttle policy for `platform`: its own pace, budgets, hours and deadline,
+    read from the settings named after it (`<platform>_min_delay_s`, ...)."""
     s = settings
     return Policy(
         platform=platform,
-        min_delay_s=s.reddit_min_delay_s if reddit else s.x_min_delay_s,
-        max_delay_s=s.reddit_max_delay_s if reddit else s.x_max_delay_s,
-        hourly_budget=s.reddit_hourly_budget if reddit else s.x_hourly_budget,
-        daily_budget=s.reddit_daily_budget if reddit else s.x_daily_budget,
+        min_delay_s=getattr(s, f"{platform}_min_delay_s"),
+        max_delay_s=getattr(s, f"{platform}_max_delay_s"),
+        hourly_budget=getattr(s, f"{platform}_hourly_budget"),
+        daily_budget=getattr(s, f"{platform}_daily_budget"),
         backoff_base_minutes=s.backoff_base_minutes,
         backoff_max_minutes=s.backoff_max_minutes,
         block_cooldown_hours=s.block_cooldown_hours,
         block_cooldown_max_hours=s.block_cooldown_max_hours,
-        active_hours=s.reddit_hours if reddit else s.x_hours,
+        active_hours=s.hours_of(platform),
         timezone=s.scraper_timezone,
         deadline=deadline,
     )
@@ -240,6 +266,8 @@ def x_plan(settings: Settings) -> XPlan:
 
 def default_browser_factory(settings: Settings) -> BrowserFactory:
     def factory(platform: str) -> AbstractContextManager[Browser]:
+        if platform in API_HOSTS:
+            return ApiClient(API_HOSTS[platform])
         return PlaywrightBrowser(
             settings.profile_dir(platform),
             settings.browser_channel,
@@ -275,9 +303,16 @@ def _crawl(
             ignore_authors=settings.ignored_reddit_authors,
         )
         return RedditScraper(browser, throttle, ingestor, engine, options).run(settings.subreddits)
-    with engine.begin() as conn:
-        accounts.add_seeds(conn, settings.x_seeds, datetime.now(UTC))
-    return XScraper(browser, throttle, ingestor, engine, x_plan(settings)).run()
+    if platform == X:
+        with engine.begin() as conn:
+            accounts.add_seeds(conn, settings.x_seeds, datetime.now(UTC))
+        return XScraper(browser, throttle, ingestor, engine, x_plan(settings)).run()
+    crawl = {
+        STOCKTWITS: stocktwits_scraper.crawl,
+        TRADINGVIEW: tradingview_scraper.crawl,
+        BLUESKY: bluesky_live.crawl,
+    }[platform]
+    return crawl(settings, engine, ingestor, browser, throttle)
 
 
 def run_platform(
@@ -339,6 +374,53 @@ def record_results(report: RunReport, results: dict[str, dict[str, Any]]) -> Non
             report.timeouts.append(f"{label}: {result[TIMED_OUT]}")
 
 
+@dataclass(frozen=True)
+class CycleParts:
+    """What every platform's crawl of one cycle shares: read-only once built."""
+
+    settings: Settings
+    engine: Engine
+    factory: BrowserFactory
+    policies: PolicyFor
+    ingestor: Ingestor | None
+    sports: SportsContext | None
+
+
+def crawl_platform(parts: CycleParts, platform: str) -> dict[str, dict[str, Any]]:
+    """Every domain's crawl of one platform, keyed by report label. Never raises for
+    what a crawl can go wrong with: each `run_platform` puts that in its result."""
+    p = parts
+    if platform == POLYMARKET:
+        leagues = p.sports.leagues if p.sports is not None else None
+        universe = p.ingestor.universe if p.ingestor is not None else None
+        result = polymarket_cycle.run_platform(
+            p.settings, p.engine, p.factory, p.policies, leagues, universe
+        )
+        return {POLYMARKET: result}
+    results: dict[str, dict[str, Any]] = {}
+    if p.ingestor is not None and platform in STOCK_PLATFORMS:
+        results[platform] = run_platform(
+            p.settings, platform, p.engine, p.ingestor, p.factory, p.policies
+        )
+    if p.sports is not None and platform in SPORTS_PLATFORMS:
+        results[f"{platform}:{SPORTS}"] = sports_cycle.run_platform(
+            p.settings, platform, p.engine, p.sports, p.factory, p.policies
+        )
+    return results
+
+
+def crawl_all(
+    parts: CycleParts, platforms: tuple[str, ...], workers: int
+) -> list[dict[str, dict[str, Any]]]:
+    """`crawl_platform` for each platform, `workers` at a time, results in `platforms`
+    order. One worker runs them in this thread, one after another."""
+    if workers <= 1 or len(platforms) <= 1:
+        return [crawl_platform(parts, p) for p in platforms]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crawl") as pool:
+        futures = [pool.submit(crawl_platform, parts, p) for p in platforms]
+        return [f.result() for f in futures]
+
+
 def run_cycle(
     settings: Settings,
     engine: Engine,
@@ -351,20 +433,16 @@ def run_cycle(
     stops at `export_deadline`, deferring what is left to the next cycle."""
     report = RunReport(started_at=datetime.now(UTC).isoformat())
     domains = settings.enabled_domains
-    factory = factory or default_browser_factory(settings)
-    policies = partial(policy_for, deadline=deadline)
-    ingestor = Ingestor(engine, universe_for(settings)) if STOCKS in domains else None
-    sports = prepare_sports(settings, engine, report) if SPORTS in domains else None
-    for platform in platforms:
-        results: dict[str, dict[str, Any]] = {}
-        if ingestor is not None:
-            results[platform] = run_platform(
-                settings, platform, engine, ingestor, factory, policies
-            )
-        if sports is not None:
-            results[f"{platform}:{SPORTS}"] = sports_cycle.run_platform(
-                settings, platform, engine, sports, factory, policies
-            )
+    parts = CycleParts(
+        settings=settings,
+        engine=engine,
+        factory=factory or default_browser_factory(settings),
+        policies=partial(policy_for, deadline=deadline),
+        ingestor=Ingestor(engine, universe_for(settings)) if STOCKS in domains else None,
+        sports=prepare_sports(settings, engine, report) if SPORTS in domains else None,
+    )
+    sports = parts.sports
+    for results in crawl_all(parts, platforms, settings.crawl_workers):
         record_results(report, results)
     if sports is not None:
         report.sports["discovery"] = sports_cycle.discover_names(

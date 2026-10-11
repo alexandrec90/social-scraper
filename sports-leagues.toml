@@ -14,6 +14,11 @@
 # Wikidata ids were looked up live on 2026-10-04. Subreddit names have not been checked
 # against Reddit: a wrong one costs a request per visit and shows up in
 # logs/scrape-run.json as "not found".
+#
+# `polymarket_tags` were checked live on 2026-10-10: each returned open events from
+# `gamma-api.polymarket.com/events?tag_slug=...` (EuroLeague, Eredivisie, Liga MX and the
+# national-team competitions returned none, so they have no tags). `hfboards_forums`
+# are the forum paths HFBoards' index listed on 2026-10-10.
 
 # --- hockey ---------------------------------------------------------------------------
 
@@ -29,6 +34,24 @@ x_queries = [
   '(NHL OR LNH) (injury OR lineup OR scratched OR "game-time decision") min_faves:20',
   '(LNH OR Canadien) (blessure OR alignement) lang:fr min_faves:10',
 ]
+bluesky_queries = ["NHL injury", "NHL lineup", "LNH"]
+polymarket_tags = ["nhl"]
+hfboards_forums = [
+  "national-hockey-league-talk.60",
+  "trade-rumors-free-agent-talk.3",
+  "sportsbook-hockey.171",
+  "boston-bruins.15", "buffalo-sabres.18", "detroit-red-wings.34", "florida-panthers.28",
+  "montreal-canadiens.16", "ottawa-senators.19", "tampa-bay-lightning.27",
+  "toronto-maple-leafs.17",
+  "carolina-hurricanes.26", "columbus-blue-jackets.31", "new-jersey-devils.20",
+  "new-york-islanders.22", "new-york-rangers.24", "philadelphia-flyers.21",
+  "pittsburgh-penguins.23", "washington-capitals.25",
+  "chicago-blackhawks.30", "colorado-avalanche.35", "dallas-stars.44", "minnesota-wild.39",
+  "nashville-predators.33", "st-louis-blues.32", "utah-mammoth.287", "winnipeg-jets.29",
+  "anaheim-ducks.41", "calgary-flames.37", "edmonton-oilers.38", "los-angeles-kings.42",
+  "san-jose-sharks.43", "seattle-kraken.275", "vancouver-canucks.36",
+  "vegas-golden-knights.257",
+]
 
 [[league]]
 key = "khl"
@@ -36,6 +59,7 @@ name = "KHL"
 sport = "hockey"
 wikidata = "Q190001"
 subreddits = ["KHL"]
+polymarket_tags = ["khl"]
 
 [[league]]
 key = "shl"
@@ -43,6 +67,7 @@ name = "SHL"
 sport = "hockey"
 wikidata = "Q392130"
 subreddits = ["hockey"]
+polymarket_tags = ["shl"]
 
 [[league]]
 key = "liiga"
@@ -50,6 +75,7 @@ name = "Liiga"
 sport = "hockey"
 wikidata = "Q456107"
 subreddits = ["Liiga"]
+polymarket_tags = ["liiga"]
 
 # --- football -------------------------------------------------------------------------
 
@@ -62,6 +88,9 @@ mise_o_jeu = ["AMERICAN_FOOTBAL|Etats-Unis / NFL"]
 subreddits = ["nfl"]
 team_subreddits = true
 x_queries = ['NFL (injury OR inactive OR "ruled out" OR questionable) min_faves:50']
+bluesky_queries = ["NFL injury", "NFL inactives"]
+polymarket_tags = ["nfl"]
+hfboards_forums = ["nfl.259"]
 
 [[league]]
 key = "cfl"
@@ -71,6 +100,7 @@ wikidata = "Q1032175"
 subreddits = ["CFL"]
 team_subreddits = true
 x_queries = ['(CFL OR LCF) (injury OR roster OR "ruled out") min_faves:10']
+polymarket_tags = ["cfl"]
 
 [[league]]
 key = "ncaaf"
@@ -79,6 +109,7 @@ sport = "american football"
 wikidata = "Q19673326"
 subreddits = ["CFB"]
 players = 2
+polymarket_tags = ["ncaaf", "cfb"]
 
 # --- basketball -----------------------------------------------------------------------
 
@@ -90,6 +121,8 @@ wikidata = "Q155223"
 subreddits = ["nba"]
 team_subreddits = true
 x_queries = ['NBA (injury OR "ruled out" OR questionable OR "load management") min_faves:50']
+bluesky_queries = ["NBA injury"]
+polymarket_tags = ["nba"]
 
 [[league]]
 key = "wnba"
@@ -97,6 +130,7 @@ name = "WNBA"
 sport = "basketball"
 wikidata = "Q2593221"
 subreddits = ["wnba"]
+polymarket_tags = ["wnba"]
 
 [[league]]
 key = "euroleague"
@@ -116,6 +150,9 @@ mise_o_jeu = ["BASEBALL|Etats-Unis / MLB"]
 subreddits = ["baseball", "mlb"]
 team_subreddits = true
 x_queries = ['MLB ("starting pitcher" OR lineup OR scratched OR "injured list") min_faves:30']
+bluesky_queries = ["MLB lineup", "MLB injured list"]
+polymarket_tags = ["mlb"]
+hfboards_forums = ["mlb.194"]
 
 # --- soccer ---------------------------------------------------------------------------
 
@@ -127,6 +164,8 @@ wikidata = "Q9448"
 subreddits = ["soccer", "PremierLeague"]
 team_subreddits = true
 x_queries = ['"Premier League" (injury OR "team news" OR lineup) min_faves:50']
+bluesky_queries = ['"Premier League" team news']
+polymarket_tags = ["epl"]
 
 [[league]]
 key = "laliga"
@@ -134,6 +173,7 @@ name = "La Liga"
 sport = "soccer"
 wikidata = "Q324867"
 subreddits = ["soccer", "LaLiga"]
+polymarket_tags = ["la-liga"]
 
 [[league]]
 key = "seriea"
@@ -141,6 +181,7 @@ name = "Serie A"
 sport = "soccer"
 wikidata = "Q15804"
 subreddits = ["soccer", "seriea"]
+polymarket_tags = ["serie-a"]
 
 [[league]]
 key = "bundesliga"
@@ -148,6 +189,7 @@ name = "Bundesliga"
 sport = "soccer"
 wikidata = "Q82595"
 subreddits = ["soccer", "Bundesliga"]
+polymarket_tags = ["bundesliga"]
 
 [[league]]
 key = "ligue1"
@@ -155,6 +197,7 @@ name = "Ligue 1"
 sport = "soccer"
 wikidata = "Q13394"
 subreddits = ["soccer", "Ligue1"]
+polymarket_tags = ["ligue-1"]
 
 [[league]]
 key = "eredivisie"
@@ -171,6 +214,7 @@ sport = "soccer"
 wikidata = "Q182994"
 subreddits = ["soccer", "PrimeiraLiga"]
 players = 3
+polymarket_tags = ["primeira-liga"]
 
 [[league]]
 key = "mls"
@@ -180,6 +224,7 @@ wikidata = "Q18543"
 mise_o_jeu = ["FOOTBALL|États-Unis / US Major League Soccer"]
 subreddits = ["MLS"]
 team_subreddits = true
+polymarket_tags = ["mls"]
 
 [[league]]
 key = "ligamx"
@@ -198,6 +243,7 @@ sport = "soccer"
 subreddits = ["championsleague"]
 covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
 x_queries = ['"Champions League" (lineup OR "team news" OR injury) min_faves:50']
+polymarket_tags = ["ucl"]
 
 [[league]]
 key = "uel"
@@ -205,6 +251,7 @@ name = "UEFA Europa League"
 sport = "soccer"
 subreddits = ["soccer"]
 covers = ["epl", "laliga", "seriea", "bundesliga", "ligue1", "eredivisie", "primeira"]
+polymarket_tags = ["uel"]
 
 # National-team soccer. National teams carry no "league" claim on Wikidata, so these
 # have no team list: their posts are crawled and stored, players resolve through the
@@ -235,6 +282,9 @@ sport = "tennis"
 athletes = { sport = "Q847", sex = "Q6581097", limit = 200 }
 subreddits = ["tennis"]
 x_queries = ['ATP (withdraws OR retired OR injury OR "walkover") min_faves:30']
+# Most tennis markets carry only the `tennis` tag (100 open events, against 9 for `atp`
+# and 2 for `wta`), so both tours list it: such a market is about both.
+polymarket_tags = ["atp", "tennis"]
 
 [[league]]
 key = "wta"
@@ -242,6 +292,7 @@ name = "WTA Tour"
 sport = "tennis"
 athletes = { sport = "Q847", sex = "Q6581072", limit = 200 }
 subreddits = ["tennis", "WTA"]
+polymarket_tags = ["wta", "tennis"]
 
 [[league]]
 key = "golf"
@@ -249,6 +300,7 @@ name = "Golf (PGA Tour, DP World, LIV)"
 sport = "golf"
 athletes = { sport = "Q5377", limit = 150 }
 subreddits = ["golf", "PGATour"]
+polymarket_tags = ["golf", "pga"]
 
 [[league]]
 key = "mma"
@@ -257,6 +309,7 @@ sport = "mma"
 athletes = { sport = "Q114466", limit = 200 }
 subreddits = ["MMA", "ufc"]
 x_queries = ['UFC (weigh-in OR "missed weight" OR "pulls out" OR replacement) min_faves:50']
+polymarket_tags = ["ufc", "mma"]
 
 [[league]]
 key = "boxing"
@@ -264,6 +317,7 @@ name = "Boxing"
 sport = "boxing"
 athletes = { sport = "Q32112", limit = 150 }
 subreddits = ["Boxing"]
+polymarket_tags = ["boxing"]
 
 [[league]]
 key = "f1"
@@ -272,12 +326,14 @@ sport = "motorsport"
 athletes = { sport = "Q1968", limit = 60 }
 subreddits = ["formula1"]
 x_queries = ['F1 (grid penalty OR qualifying OR "power unit") min_faves:100']
+polymarket_tags = ["f1", "formula1"]
 
 [[league]]
 key = "nascar"
 name = "NASCAR Cup Series"
 sport = "motorsport"
 subreddits = ["NASCAR"]
+polymarket_tags = ["nascar"]
 
 # --- esports --------------------------------------------------------------------------
 # No entity source: Wikidata's esports rosters are thin. Crawled for their subreddits
@@ -288,9 +344,11 @@ key = "lol"
 name = "League of Legends esports"
 sport = "esports"
 subreddits = ["leagueoflegends", "lolesports"]
+polymarket_tags = ["league-of-legends", "lol"]
 
 [[league]]
 key = "cs2"
 name = "Counter-Strike 2 esports"
 sport = "esports"
 subreddits = ["GlobalOffensive"]
+polymarket_tags = ["cs2", "counter-strike"]

@@ -19,7 +19,17 @@ from social_scraper.archive import store
 from social_scraper.browser import TIMED_OUT, PlaywrightBrowser
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.fetch import LaunchTimedOut, PageResult
-from social_scraper.models import REDDIT, X
+from social_scraper.apiclient import ApiClient
+from social_scraper.models import (
+    API_PLATFORMS,
+    BLUESKY,
+    HFBOARDS,
+    POLYMARKET,
+    REDDIT,
+    STOCKTWITS,
+    TRADINGVIEW,
+    X,
+)
 from social_scraper.runner import (
     RunReport,
     default_browser_factory,
@@ -235,6 +245,153 @@ def test_run_platform_surfaces_scraper_errors(settings, engine):
     ingestor = runner.Ingestor(engine, Universe({}))
     result = run_platform(settings, X, engine, ingestor, lambda p: browser)
     assert "challenged" in result["error"]
+
+
+@pytest.mark.parametrize("platform", [STOCKTWITS, TRADINGVIEW, HFBOARDS, BLUESKY, POLYMARKET])
+def test_policy_for_reads_each_platforms_own_settings(settings, platform):
+    tuned = settings.model_copy(
+        update={
+            f"{platform}_min_delay_s": 1.5,
+            f"{platform}_max_delay_s": 2.5,
+            f"{platform}_hourly_budget": 7,
+            f"{platform}_daily_budget": 70,
+            f"{platform}_active_hours": "9-17",
+        }
+    )
+    policy = policy_for(tuned, platform)
+    assert policy.platform == platform
+    assert (policy.min_delay_s, policy.max_delay_s) == (1.5, 2.5)
+    assert (policy.hourly_budget, policy.daily_budget) == (7, 70)
+    assert policy.active_hours == (9, 17)
+
+
+def test_default_browser_factory_reads_apis_without_a_browser(settings):
+    for platform in API_PLATFORMS:
+        client = default_browser_factory(settings)(platform)
+        assert isinstance(client, ApiClient) and client.hosts == runner.API_HOSTS[platform]
+    assert isinstance(default_browser_factory(settings)(STOCKTWITS), PlaywrightBrowser)
+
+
+def parts_for(settings, engine, factory, ingestor=None, sports=None) -> runner.CycleParts:
+    return runner.CycleParts(settings, engine, factory, policy_for, ingestor, sports)
+
+
+def test_crawl_platform_runs_only_the_domains_a_platform_serves(settings, engine, monkeypatch):
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(runner, "run_platform", lambda s, p, *a: seen.append(("stocks", p)) or {})
+    monkeypatch.setattr(
+        runner.sports_cycle, "run_platform", lambda s, p, *a: seen.append(("sports", p)) or {}
+    )
+    parts = parts_for(settings, engine, None, ingestor=object(), sports=object())
+    assert set(runner.crawl_platform(parts, STOCKTWITS)) == {STOCKTWITS}
+    assert set(runner.crawl_platform(parts, HFBOARDS)) == {f"{HFBOARDS}:sports"}
+    assert set(runner.crawl_platform(parts, BLUESKY)) == {BLUESKY, f"{BLUESKY}:sports"}
+    no_sports = parts_for(settings, engine, None, ingestor=object())
+    assert runner.crawl_platform(no_sports, HFBOARDS) == {}
+    assert seen == [
+        ("stocks", STOCKTWITS),
+        ("sports", HFBOARDS),
+        ("stocks", BLUESKY),
+        ("sports", BLUESKY),
+    ]
+
+
+def test_crawl_platform_hands_polymarket_both_domains(settings, engine, monkeypatch):
+    got = {}
+
+    def fake(s, eng, factory, policies, leagues, universe):
+        got.update(leagues=leagues, universe=universe)
+        return {"markets": 0}
+
+    monkeypatch.setattr(runner.polymarket_cycle, "run_platform", fake)
+    universe = Universe({})
+    parts = parts_for(settings, engine, None, ingestor=runner.Ingestor(engine, universe))
+    assert runner.crawl_platform(parts, POLYMARKET) == {POLYMARKET: {"markets": 0}}
+    assert got == {"leagues": None, "universe": universe}
+
+
+def test_crawl_all_runs_platforms_side_by_side_and_keeps_their_order(settings, engine, monkeypatch):
+    import threading
+
+    barrier = threading.Barrier(3, timeout=10)
+    threads: dict[str, str] = {}
+
+    def crawl(parts, platform):
+        threads[platform] = threading.current_thread().name
+        barrier.wait()  # only returns once three crawls are running at the same time
+        return {platform: {"ok": True}}
+
+    monkeypatch.setattr(runner, "crawl_platform", crawl)
+    parts = parts_for(settings, engine, None)
+    out = runner.crawl_all(parts, (REDDIT, X, STOCKTWITS), workers=3)
+    assert [list(r) for r in out] == [[REDDIT], [X], [STOCKTWITS]]
+    assert all(name.startswith("crawl") for name in threads.values())
+
+
+def test_crawl_all_with_one_worker_stays_in_this_thread(settings, engine, monkeypatch):
+    import threading
+
+    names = []
+    monkeypatch.setattr(
+        runner,
+        "crawl_platform",
+        lambda parts, p: names.append(threading.current_thread().name) or {p: {}},
+    )
+    runner.crawl_all(parts_for(settings, engine, None), (REDDIT, X), workers=1)
+    assert names == [threading.current_thread().name] * 2
+
+
+def test_crawl_all_lets_an_unexpected_error_fail_the_cycle(settings, engine, monkeypatch):
+    def crawl(parts, platform):
+        if platform == X:
+            raise RuntimeError("bug")
+        return {platform: {}}
+
+    monkeypatch.setattr(runner, "crawl_platform", crawl)
+    with pytest.raises(RuntimeError, match="bug"):
+        runner.crawl_all(parts_for(settings, engine, None), (REDDIT, X), workers=2)
+
+
+def test_run_cycle_crawls_new_platforms_in_parallel(settings, file_engine):
+    engine = file_engine
+    settings.symbol_universe_max_age_hours = 1e9
+    settings = settings.model_copy(
+        update={
+            "crawl_workers": 3,
+            "watchlist": "NVDA",
+            "stocktwits_min_delay_s": 0,
+            "stocktwits_max_delay_s": 0,
+            "stocktwits_active_hours": "",
+            "polymarket_stock_tags": "",
+        }
+    )
+    stream = {
+        "response": {"status": 200},
+        "cursor": {"more": False},
+        "messages": [
+            {
+                "id": 5,
+                "body": "$NVDA breaking out",
+                "created_at": "2026-10-10T12:00:00Z",
+                "user": {"id": 1, "followers": 10, "official": False},
+                "symbols": [{"symbol": "NVDA"}],
+                "entities": {"sentiment": {"basic": "Bullish"}},
+            }
+        ],
+    }
+    trending = {"response": {"status": 200}, "symbols": [{"symbol": "NVDA"}]}
+    st = FakeBrowser(
+        {
+            "https://api.stocktwits.com/api/2/streams/": PageResult(200, "u", data=stream),
+            "https://api.stocktwits.com/api/2/trending/": PageResult(200, "u", data=trending),
+        }
+    )
+    browsers = {REDDIT: reddit_browser(), STOCKTWITS: st}
+    report = run_cycle(settings, engine, (REDDIT, STOCKTWITS, POLYMARKET), factory=browsers.get)
+    assert report.ok, report.errors
+    assert report.platforms[STOCKTWITS]["ingest"]["stored"] == 1
+    assert report.platforms[REDDIT]["ingest"]["stored"] >= 1
+    assert "no Polymarket tags" in report.platforms[POLYMARKET]["skipped"]
 
 
 def test_policy_for_carries_the_cycle_deadline(settings):

@@ -1,11 +1,12 @@
 from datetime import timedelta
 
+import pytest
 from conftest import NOW, Clock
 from sqlalchemy import select
 
 from social_scraper.db import schema
 from social_scraper.models import AuthorInfo, Engagement, Post, stable_hash
-from social_scraper.pipeline import Ingestor, IngestStats, PostIngestor, build_row
+from social_scraper.pipeline import INGEST_LOCK, Ingestor, IngestStats, PostIngestor, build_row
 
 
 def post(external_id="p1", body="Loading $NVDA calls, email me a@b.co", **over):
@@ -36,6 +37,19 @@ def test_build_row_hashes_scrubs_extracts_and_scores(universe):
     assert row["raw"] == {"permalink": "/r/x/1"}
     assert row["score"] == 10 and row["upvote_ratio"] == 0.9
     assert row["flair"] == "YOLO"
+
+
+def test_build_row_keeps_the_labels_the_new_platforms_carry(universe):
+    raw = {"sentiment": "bullish", "direction": "short", "interval": "240", "user_id": "9"}
+    row, _ = build_row(post(raw=raw), universe)
+    assert row["raw"] == {"sentiment": "bullish", "direction": "short", "interval": "240"}
+
+
+def test_ingest_releases_its_lock_even_when_the_batch_fails(engine, universe):
+    with pytest.raises(Exception):  # noqa: B017 - any database error, it is the lock under test
+        Ingestor(engine, universe).ingest([post(created_at=None)])
+    assert not INGEST_LOCK.locked()
+    assert Ingestor(engine, universe).ingest([post()]).stored == 1
 
 
 def test_build_row_truncates_long_fields(universe):

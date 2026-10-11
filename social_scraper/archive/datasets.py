@@ -16,6 +16,8 @@ separate datasets, so no sports row ever lands in a stock one.
 | social_scraper_sports_engagement      | one post at one observation  | platform, observed date|
 | social_scraper_sports_entities        | one team or athlete          | single file            |
 | social_scraper_sports_entity_leagues  | one (entity, league)         | single file            |
+| social_scraper_polymarket_markets     | one prediction market        | platform, created date |
+| social_scraper_polymarket_prices      | one market at one observation| platform, observed date|
 
 `posts` keeps data-lake's `social_posts` column names (`platform`, `channel`,
 `external_id`, `created_at`, `author_hash`, `title`, `body`, `score`, `num_comments`,
@@ -252,7 +254,78 @@ SPORTS_ENTITY_LEAGUES = DatasetSpec(
 )
 
 SPORTS = (SPORTS_POSTS, SPORTS_MENTIONS, SPORTS_ENGAGEMENT, SPORTS_ENTITIES, SPORTS_ENTITY_LEAGUES)
-ALL = (*STOCK, *SPORTS)
+
+# --- Polymarket ---------------------------------------------------------------------------
+# Markets and their prices, for both domains (`domains` on each market). A market is
+# partitioned by the day it was created, which never changes, so a market whose state
+# moves (closed, resolved, a game's score) is re-merged into the same file.
+
+POLYMARKET_MARKETS = DatasetSpec(
+    name=f"{PREFIX}_polymarket_markets",
+    ts_column="created_at",
+    key_columns=("market_id",),
+    schema=pa.schema(
+        [
+            ("platform", pa.string()),
+            ("market_id", pa.string()),
+            ("event_id", pa.string()),
+            ("event_slug", pa.string()),
+            ("event_title", pa.string()),
+            ("question", pa.string()),
+            ("slug", pa.string()),
+            ("domains", pa.list_(pa.string())),
+            ("tags", pa.list_(pa.string())),
+            ("leagues", pa.list_(pa.string())),
+            ("symbols", pa.list_(pa.string())),
+            ("outcomes", pa.list_(pa.string())),
+            ("sports_market_type", pa.string()),
+            ("line", pa.float64()),
+            ("game_id", pa.string()),
+            ("teams", pa.string()),
+            ("score", pa.string()),
+            ("period", pa.string()),
+            ("live", pa.bool_()),
+            ("ended", pa.bool_()),
+            ("start_time", TS),
+            ("end_date", TS),
+            ("created_at", TS),
+            ("active", pa.bool_()),
+            ("closed", pa.bool_()),
+            ("winner", pa.int32()),
+            ("first_seen_at", TS),
+            ("updated_at", TS),
+        ]
+    ),
+    partition_of=_dated("polymarket_markets", "created_at"),
+)
+
+POLYMARKET_PRICES = DatasetSpec(
+    name=f"{PREFIX}_polymarket_prices",
+    ts_column="observed_at",
+    key_columns=("market_id", "observed_at"),
+    schema=pa.schema(
+        [
+            ("platform", pa.string()),
+            ("market_id", pa.string()),
+            ("observed_at", TS),
+            ("prices", pa.list_(pa.float64())),
+            ("last_trade_price", pa.float64()),
+            ("best_bid", pa.float64()),
+            ("best_ask", pa.float64()),
+            ("spread", pa.float64()),
+            ("volume", pa.float64()),
+            ("volume_24hr", pa.float64()),
+            ("liquidity", pa.float64()),
+            ("score", pa.string()),
+            ("period", pa.string()),
+            ("live", pa.bool_()),
+        ]
+    ),
+    partition_of=_dated("polymarket_prices", "observed_at"),
+)
+
+POLYMARKET = (POLYMARKET_MARKETS, POLYMARKET_PRICES)
+ALL = (*STOCK, *SPORTS, *POLYMARKET)
 # Datasets whose rows carry free text, so a credential pasted into a post could ride along.
 TEXT = (POSTS, SPORTS_POSTS)
 
@@ -264,6 +337,9 @@ def to_lake_row(spec: DatasetSpec, db_row: dict[str, Any]) -> dict[str, Any]:
         row["fetched_at"] = row.get("last_seen_at")
         raw = row.get("raw")
         row["extra"] = json.dumps(raw, sort_keys=True) if raw else None
+    if spec is POLYMARKET_MARKETS and row.get("teams") is not None:
+        # A list of small objects; JSON text keeps the schema flat.
+        row["teams"] = json.dumps(row["teams"], sort_keys=True)
     out = {}
     for field in spec.schema:
         value = row.get(field.name)

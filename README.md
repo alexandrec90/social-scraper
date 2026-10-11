@@ -1,6 +1,7 @@
 # Social Scraper
 
-Browser-driven social ingestion (Reddit, X) into data-lake
+Browser-driven social ingestion (Reddit, X, StockTwits, TradingView, HFBoards, Bluesky,
+Polymarket) into data-lake
 
 Generated from [devkit](https://github.com/alexandrec90/devkit)'s project
 template. The agent harness in `scripts/hooks/` is vendored from there — see
@@ -8,9 +9,12 @@ template. The agent harness in `scripts/hooks/` is vendored from there — see
 
 ## What it does
 
-Collects stock-related sentiment material from Reddit and X without API keys, by
-driving a real Chrome through Playwright, slowly enough that the accounts involved stay
-healthy, and publishes it to the pooled data lake for ibkr_trader.
+Collects stock-related sentiment material from Reddit, X, StockTwits, TradingView and
+Bluesky, and prediction-market prices from Polymarket, without API keys -- by driving a
+real Chrome through Playwright where a site has no open API, slowly enough that the
+accounts involved stay healthy -- and publishes it to the pooled data lake for
+ibkr_trader. None of the added platforms needs an account or a key (see
+[Platforms](#platforms)).
 
 - **Reddit** -- a fixed set of subreddits (`REDDIT_SUBREDDITS`). Per subreddit and cycle:
   new submissions, the subreddit-wide newest-comments stream (where the daily-thread
@@ -23,6 +27,13 @@ healthy, and publishes it to the pooled data lake for ibkr_trader.
   accounts' timelines are read. Accounts whose timelines turn out not to be about
   markets are dropped; anyone a tracked account retweets or quotes becomes a candidate.
   Search needs a signed-in profile; timelines do not.
+- **StockTwits, TradingView, Bluesky** -- per cycle, a few symbols (the watchlist, then
+  whatever is trending everywhere): a StockTwits symbol stream, with each author's own
+  Bullish/Bearish label in `extra.sentiment`; a symbol's newest TradingView ideas, each
+  `extra.direction` long or short; a Bluesky `$TICKER` search, kept only where the post
+  writes a listed `$TICKER` or `#TICKER` (Bluesky is general-topic).
+- **Polymarket** -- open prediction markets under the stock tags (`stocks`, `earnings`,
+  `fed`, ...): what each asks, the tickers it names, and its prices over time.
 - **Symbols are discovered, not listed** -- every `$CASHTAG`, X-tagged symbol, and
   upper-case word that is a real listed security (NASDAQ Trader's directory of every
   US-listed security, refreshed weekly, plus `SYMBOL_EXTRA_FILES`) is recorded. A
@@ -63,11 +74,52 @@ reaches what ibkr_trader reads. No LLM is involved.
   leagues' generic queries. Accounts are scored as for stocks, plus: an organisation's
   account (X's affiliate label or a Business/Government check) scores higher, and one
   whose own tweets keep selling picks is dropped. The leagues' own accounts are seeds.
+- **HFBoards** -- the hockey forum: each league's `hfboards_forums` (the NHL's lists all
+  32 team boards, the main NHL board, trade rumours and the sportsbook board), two
+  forums a cycle, the least recently read first; in each, the newest page of up to three
+  threads with new posts. Quotes are stripped from a post, so it carries no one else's
+  words or name.
+- **Bluesky** -- the day's most-mentioned teams and athletes, and each league's
+  `bluesky_queries`, as for X.
+- **Polymarket** -- every open market under a league's `polymarket_tags`: season
+  futures, and games, with the teams, moneyline/totals/spread prices, the live score and
+  period, and, once it is over, the result (`winner`). This is the one source of
+  *event* data here -- schedules, scores, results and implied probabilities; the rest is
+  chatter about the events.
 
 Both domains draw on the same Reddit and X budgets: the defaults are sized for stocks
 alone, so raise `REDDIT_DAILY_BUDGET` / `X_DAILY_BUDGET` (or lower the per-cycle pages)
 when turning sports on. `sports-sync` refreshes every league from Wikidata at once
 instead of the cycle's two at a time.
+
+## Platforms
+
+| Platform | How it is read | Domains | Account or key |
+| --- | --- | --- | --- |
+| Reddit | listing JSON, through Chrome | stocks, sports | optional (`login reddit`) |
+| X | GraphQL and server-streamed tweets, through Chrome | stocks, sports | search needs `login x` |
+| StockTwits | `api.stocktwits.com/api/2/streams/symbol/<SYM>.json`, through Chrome | stocks | none |
+| TradingView | `/symbols/<SYM>/ideas/?component-data-only=1` (JSON), through Chrome | stocks | none |
+| HFBoards | forum and thread HTML (XenForo; no JSON), through Chrome | sports | none |
+| Bluesky | `api.bsky.app` `searchPosts`, plain HTTPS | stocks, sports | none |
+| Polymarket | `gamma-api.polymarket.com/events`, plain HTTPS | stocks, sports | none |
+
+Measured 2026-10-10. StockTwits, TradingView and HFBoards have no open API -- HFBoards
+answers a plain HTTP client with 403 -- so they go through Chrome like Reddit and X, each
+in its own profile. Bluesky's public AppView and Polymarket's Gamma API answer any
+client, so they are read with plain HTTPS (`apiclient.py`), no browser.
+`public.api.bsky.app` refuses `searchPosts` signed out; `api.bsky.app` serves it.
+
+**Privacy.** A Bluesky post's URI and link contain its author's DID, so a Bluesky row's
+`external_id` is the hash of its URI and it carries no `url`. Polymarket rows carry no
+wallet address. Authors are hashed on every platform, as before -- StockTwits on its
+numeric user id, so live rows join the NYU archive's.
+
+**Platforms run side by side.** Each has its own throttle, so `CRAWL_WORKERS` (default
+3) of them are crawled at once, each in its own thread and browser: a cycle lasts as long
+as its slowest platform rather than all of them added up, which seven platforms need --
+Reddit and X alone filled 20-25 minutes of a 30-minute cycle. `SCRAPE_PLATFORMS` narrows
+what `scrape all` crawls.
 
 ## Staying unbanned
 
@@ -75,12 +127,17 @@ Every page load goes through one throttle per platform (`social_scraper/throttle
 
 | Guard | Reddit default | X default |
 | --- | --- | --- |
-| Jittered gap between page loads | 6-14 s | 35-90 s |
-| Hourly / daily budget (persisted in Postgres, survives restarts) | 240 / 2000 | 20 / 150 |
-| Active hours (local time) | always | 08:00-23:00 |
-| Page loads per cycle | all subreddits | 8, with slow jittered scrolls |
-| Rate limit (429, "try reloading") | back off 15 min, doubling, capped at 6 h | same |
-| Challenge (captcha, locked account, network block) | stop for 12 h | same |
+| Jittered gap between page loads | 15-40 s | 60-180 s |
+| Hourly / daily budget (persisted in Postgres, survives restarts) | 90 / 1000 | 8 / 90 |
+| Active hours (local time) | 06:00-23:59 | 08:00-22:59 |
+| Page loads per cycle | all subreddits | 3, with slow jittered scrolls |
+| Rate limit (429, "try reloading") | back off 30 min, doubling, capped at 12 h | same |
+| Challenge (captcha, locked account, network block) | stop for 24 h, doubling to 96 h | same |
+
+The added platforms have the same guards with their own defaults (`config.py`,
+`.env.example`): StockTwits 6-15 s apart, 30/h and 400/day; TradingView 10-30 s, 12/h,
+150/day; HFBoards 8-20 s, 30/h, 450/day; Bluesky 2-6 s, 40/h, 800/day; Polymarket
+1-3 s, 150/h, 2500/day. A Cloudflare interstitial ("Just a moment...") is a challenge.
 
 Pages are read from the data the site loads for itself -- Reddit's listing JSON, X's
 GraphQL responses and server-streamed first page -- never scraped from the DOM. Each
@@ -113,7 +170,7 @@ your personal one.
 
 | Command | What it does |
 | --- | --- |
-| `scrape [reddit\|x\|all] [--no-export] [--now]` | one cycle; report in `logs/scrape-run.json` |
+| `scrape [PLATFORM\|all] [--no-export] [--now]` | one cycle (`all` is `SCRAPE_PLATFORMS`); report in `logs/scrape-run.json` |
 | `run [reddit\|x\|all] [--cycles N]` | repeat forever (or N times) |
 | `status` | budgets used, pauses, row counts, trending symbols, X accounts |
 | `export [--full]` | copy new rows to the lake; `--full` resends every row |
@@ -201,8 +258,9 @@ bot label is `extra.bot`. Report in `logs/x-import.json`. Every importer shares
 
 ### StockTwits, Bluesky and Hacker News
 
-Three more free archives of people talking about stocks, none crawled live, each with
-its own `platform` in the lake and `channel=archive`:
+Three more free archives of people talking about stocks, each with its own `platform`
+in the lake and `channel=archive` (StockTwits and Bluesky are now crawled live as well;
+Hacker News is not):
 
 | Command | Archive | Download | What is kept |
 | --- | --- | --- | --- |
@@ -254,6 +312,13 @@ The catalog is verified against data-lake's own `DatasetManifest.from_dict`.
 | `social_scraper_sports_engagement` | sports post at one observation | platform, external_id, observed_at | `.../sports_engagement/platform=*/dt=<observed>/` |
 | `social_scraper_sports_entities` | team or athlete (Wikidata QID) | entity_id | `.../sports_entities/` |
 | `social_scraper_sports_entity_leagues` | (entity, league) | entity_id, league | `.../sports_entity_leagues/` |
+| `social_scraper_polymarket_markets` | prediction market, with `domains`, `leagues`, `symbols`, game state, `winner` | market_id | `.../polymarket_markets/platform=polymarket/dt=<created>/` |
+| `social_scraper_polymarket_prices` | market at one observation (prices, bid/ask, volume, live score) | market_id, observed_at | `.../polymarket_prices/platform=polymarket/dt=<observed>/` |
+
+Posts from the added platforms land in the same post datasets as Reddit's and X's, with
+their own `platform` (`stocktwits`, `tradingview`, `bluesky` in the stock ones;
+`hfboards`, `bluesky` in the sports ones). The Polymarket datasets are neither domain's:
+a market's `domains` says which it is for, so nothing ibkr_trader reads changes shape.
 
 Sports entities ship without their subreddit or X handle: an athlete's handle
 identifies a person, and the lake takes no identifier unhashed.
@@ -297,16 +362,22 @@ Regenerate the `.env` block for any checkout with
 
 ```text
 social_scraper/
-  cli.py, runner.py       commands; one cycle across platforms + the run report
+  cli.py, runner.py       commands; one cycle across platforms (in parallel) + the report
   browser.py              Playwright transport (the only code that touches Chrome)
+  apiclient.py            plain-HTTPS transport for the public APIs (Bluesky, Polymarket)
   fetch.py                the Browser protocol scrapers are written (and tested) against
+  feeds.py                what the newer crawlers share: one throttled load, failure rules
   throttle.py             pacing, budgets, active hours, circuit breaker
   reddit/                 listing parser + incremental subreddit crawler; dumps.py
                           backfills history from Pushshift / Arctic Shift dumps
   x/                      GraphQL/SSR tweet parser, account discovery, crawler;
                           tweet_dumps.py backfills history from tweet CSV datasets
-  stocktwits/, bluesky/,  archive importers only (dumps.py each): these platforms are
-  hackernews/             never crawled
+  stocktwits/             live symbol streams (scraper.py); dumps.py the NYU archive
+  tradingview/            symbol ideas
+  hfboards/               XenForo forum and thread parser + crawler (sports)
+  bluesky/                live searches (live.py); dumps.py the Zenodo archive
+  polymarket/             Gamma events parser, market store, crawl
+  hackernews/             archive importer only (dumps.py): never crawled
   backfill.py             what every archive importer shares: spool, lake write, report
   symbols/                NASDAQ symbol universe + mention extraction
   sports/                 the sports domain: league list, Wikidata sync, matcher, crawl plans

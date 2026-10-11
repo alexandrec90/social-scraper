@@ -68,7 +68,7 @@ def test_to_lake_row_maps_posts_and_normalises_time():
 
 def test_sports_datasets_are_separate_and_shaped_like_the_stock_ones():
     assert set(datasets.SPORTS).isdisjoint(datasets.STOCK)
-    assert datasets.ALL == (*datasets.STOCK, *datasets.SPORTS)
+    assert datasets.ALL == (*datasets.STOCK, *datasets.SPORTS, *datasets.POLYMARKET)
     assert datasets.TEXT == (POSTS, datasets.SPORTS_POSTS)
     row = {"platform": "reddit", "created_at": NOW, "observed_at": NOW}
     assert datasets.SPORTS_POSTS.partition_of(row) == (
@@ -78,6 +78,30 @@ def test_sports_datasets_are_separate_and_shaped_like_the_stock_ones():
     assert datasets.SPORTS_ENTITIES.partition_of({}) == "social_scraper/sports_entities"
     assert {"entities", "leagues"} <= set(datasets.SPORTS_POSTS.schema.names)
     assert "symbols" not in datasets.SPORTS_POSTS.schema.names
+
+
+def test_polymarket_datasets_are_their_own_and_partition_like_the_others():
+    assert set(datasets.POLYMARKET).isdisjoint({*datasets.STOCK, *datasets.SPORTS})
+    assert not set(datasets.POLYMARKET) & set(datasets.TEXT)
+    row = {"platform": "polymarket", "created_at": NOW, "observed_at": NOW}
+    assert datasets.POLYMARKET_MARKETS.partition_of(row).startswith(
+        "social_scraper/polymarket_markets/platform="
+    )
+    assert datasets.POLYMARKET_PRICES.partition_of(row).endswith("/dt=2026-09-28")
+    assert datasets.POLYMARKET_MARKETS.key_columns == ("market_id",)
+
+
+def test_polymarket_market_rows_carry_teams_as_json_and_no_addresses():
+    db_row = {
+        "market_id": "m1",
+        "teams": [{"name": "Red Wings", "abbreviation": "det"}],
+        "created_at": NOW,
+        "submitted_by": "0xabc",
+    }
+    out = to_lake_row(datasets.POLYMARKET_MARKETS, db_row)
+    assert json.loads(out["teams"]) == [{"abbreviation": "det", "name": "Red Wings"}]
+    assert "submitted_by" not in out
+    assert to_lake_row(datasets.POLYMARKET_MARKETS, {"teams": None})["teams"] is None
 
 
 def test_sports_entities_never_carry_a_handle_or_subreddit():

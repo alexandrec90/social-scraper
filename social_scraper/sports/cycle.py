@@ -1,9 +1,10 @@
 """The sports domain's part of a cycle: prepare once, crawl each platform, discover.
 
 `prepare` reads the league list, refreshes stale leagues from Wikidata and builds the
-matcher; `run_platform` crawls one platform in its own browser session, after the stock
-domain's, under the same per-platform throttle (so one budget covers both domains);
-`discover_names` spends a few Wikidata lookups on names that keep coming up.
+matcher; `run_platform` crawls one platform (Reddit, X, HFBoards, Bluesky) in its own
+browser session, after the stock domain's, under the same per-platform throttle (so one
+budget covers both domains); `discover_names` spends a few Wikidata lookups on names
+that keep coming up. Polymarket's sports markets are `polymarket/`'s, not a crawl here.
 """
 
 from __future__ import annotations
@@ -20,13 +21,16 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from social_scraper.bluesky import live as bluesky_live
 from social_scraper.browser import TIMED_OUT
 from social_scraper.config import Settings
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper import launch
+from social_scraper.feeds import FeedRunStats
 from social_scraper.fetch import Browser, LaunchTimedOut
-from social_scraper.models import REDDIT
+from social_scraper.hfboards import scraper as hfboards_scraper
+from social_scraper.models import BLUESKY, HFBOARDS, REDDIT, X
 from social_scraper.reddit.scraper import RedditOptions, RedditRunStats, RedditScraper
 from social_scraper.sports import discover, registry
 from social_scraper.sports.leagues import League, load_leagues, subreddit_leagues
@@ -148,6 +152,53 @@ def crawl_x(
     return SportsXScraper(browser, throttle, ingestor, engine, plan).run()
 
 
+def crawl_hfboards(
+    settings: Settings,
+    ctx: SportsContext,
+    engine: Engine,
+    browser: Browser,
+    throttle: Throttle,
+    now: datetime,
+) -> FeedRunStats:
+    return hfboards_scraper.crawl_sports(
+        settings, ctx.leagues, ctx.matcher, engine, browser, throttle
+    )
+
+
+def crawl_bluesky(
+    settings: Settings,
+    ctx: SportsContext,
+    engine: Engine,
+    browser: Browser,
+    throttle: Throttle,
+    now: datetime,
+) -> FeedRunStats:
+    return bluesky_live.crawl_sports(settings, ctx.leagues, ctx.matcher, engine, browser, throttle)
+
+
+CRAWLS: dict[str, Callable[..., Any]] = {
+    REDDIT: crawl_reddit,
+    X: crawl_x,
+    HFBOARDS: crawl_hfboards,
+    BLUESKY: crawl_bluesky,
+}
+
+
+def nothing_to_do(settings: Settings, platform: str, ctx: SportsContext) -> str | None:
+    """Why `platform` has no sports crawl this cycle by configuration, or None."""
+    if platform == REDDIT and settings.sports_reddit_subs_per_cycle <= 0:
+        return "SPORTS_REDDIT_SUBS_PER_CYCLE is 0"
+    if platform == X and settings.sports_x_pages_per_cycle <= 0:
+        return "SPORTS_X_PAGES_PER_CYCLE is 0"
+    if platform == HFBOARDS and not any(lg.hfboards_forums for lg in ctx.leagues):
+        return "no league lists `hfboards_forums`"
+    if platform == HFBOARDS and settings.hfboards_forums_per_cycle <= 0:
+        return "HFBOARDS_FORUMS_PER_CYCLE is 0"
+    if platform == BLUESKY and settings.bluesky_sports_searches_per_cycle <= 0:
+        return "BLUESKY_SPORTS_SEARCHES_PER_CYCLE is 0"
+    return None
+
+
 def run_platform(
     settings: Settings,
     platform: str,
@@ -158,17 +209,15 @@ def run_platform(
 ) -> dict[str, Any]:
     """Crawl one platform for sports; everything that goes wrong lands in the dict."""
     throttle = Throttle(policy_for(settings, platform), DbThrottleStore(engine))
-    if platform == REDDIT and settings.sports_reddit_subs_per_cycle <= 0:
-        return {"skipped": "SPORTS_REDDIT_SUBS_PER_CYCLE is 0"}
-    if platform != REDDIT and settings.sports_x_pages_per_cycle <= 0:
-        return {"skipped": "SPORTS_X_PAGES_PER_CYCLE is 0"}
+    idle = nothing_to_do(settings, platform, ctx)
+    if idle:
+        return {"skipped": idle}
     try:
         throttle.check()
         with factory(platform) as browser:
             now = datetime.now(UTC)
             launch.started(engine, platform, now)
-            crawl = crawl_reddit if platform == REDDIT else crawl_x
-            stats = crawl(settings, ctx, engine, browser, throttle, now)
+            stats = CRAWLS[platform](settings, ctx, engine, browser, throttle, now)
     except ThrottleStop as exc:
         return {"skipped": str(exc)}
     except LaunchTimedOut as exc:

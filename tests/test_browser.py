@@ -321,6 +321,34 @@ class SlowPage(FakePage):
         raise PlaywrightTimeoutError(f"Page.goto: Timeout {timeout}ms exceeded.")
 
 
+class HtmlPage(FakePage):
+    def __init__(self, response, html="<html><body>forum</body></html>", fail=False, **kw):
+        super().__init__(response, **kw)
+        self._html, self._fail = html, fail
+
+    def content(self):
+        if self._fail:
+            raise PlaywrightError("Target closed")
+        return self._html
+
+
+def test_get_html_returns_the_document_and_its_text():
+    page = HtmlPage(FakeResponse("u", 200), text="forum")
+    r = make(page).get_html("https://forums.hfboards.com/forums/x.1/")
+    assert r.status == 200 and r.html.startswith("<html>") and r.text == "forum"
+    assert r.final_url == "https://forums.hfboards.com/forums/x.1/" and r.data is None
+
+
+def test_get_html_with_an_unreadable_document_is_empty_not_a_raise():
+    r = make(HtmlPage(FakeResponse("u", 503), fail=True)).get_html("u")
+    assert r.status == 503 and r.html == ""
+
+
+def test_a_timed_out_html_load_is_a_result():
+    r = make(SlowPage()).get_html("https://forums.hfboards.com/")
+    assert r.timed_out and r.status is None
+
+
 def test_a_timed_out_json_load_is_a_result_not_a_raise():
     """2026-10-08: the raise ended the platform's crawl and failed the scheduled scrape."""
     r = make(SlowPage()).get_json("https://www.reddit.com/r/x/new.json")

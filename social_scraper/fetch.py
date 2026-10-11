@@ -29,6 +29,8 @@ class PageResult:
     payloads: list[Payload] = field(default_factory=list)
     # Visible text excerpt: how a captcha or login wall is recognised.
     text: str = ""
+    # The document's HTML, for a page that has no JSON to read (`get_html`).
+    html: str = ""
     # The load got no answer within the browser's navigation timeout. Returned rather
     # than raised, so the scraper records it against the throttle and goes on to the next
     # page: raised, it ended the whole platform's crawl and failed the cycle (2026-10-08,
@@ -39,6 +41,10 @@ class PageResult:
 class Browser(Protocol):
     def get_json(self, url: str) -> PageResult:
         """Navigate to a JSON URL and parse the document."""
+        ...
+
+    def get_html(self, url: str) -> PageResult:
+        """Navigate to a page and return its HTML: a forum has no JSON to read."""
         ...
 
     def capture(

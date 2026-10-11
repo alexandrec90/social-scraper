@@ -7,6 +7,7 @@ contact data, never tickers), and the stored text is the scrubbed copy.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,10 +22,30 @@ from social_scraper.stance import score_stance
 from social_scraper.symbols.extract import Mention, extract_mentions, validated_symbols
 from social_scraper.symbols.universe import Universe
 
-# Raw payload fields worth keeping; anything else in `Post.raw` is dropped.
+# Raw payload fields worth keeping; anything else in `Post.raw` is dropped. `sentiment`
+# is the author's own Bullish/Bearish label (StockTwits), `direction` an idea's Long or
+# Short and `interval` its chart timeframe (TradingView).
 RAW_KEEP = frozenset(
-    {"permalink", "domain", "is_self", "over_18", "stickied", "link_title", "conversation_id"}
+    {
+        "permalink",
+        "domain",
+        "is_self",
+        "over_18",
+        "stickied",
+        "link_title",
+        "conversation_id",
+        "sentiment",
+        "direction",
+        "interval",
+    }
 )
+
+# Held for every ingest transaction, stock or sports. Platforms crawl in parallel
+# threads (`runner.crawl_all`), and two batches bumping the same symbols (or entities)
+# in different orders deadlock on Postgres, which aborts one of them. A batch is a few
+# milliseconds of a crawl that spends its time in throttle sleeps, so taking turns
+# costs nothing.
+INGEST_LOCK = threading.Lock()
 
 
 @dataclass
@@ -93,7 +114,7 @@ class Ingestor:
         stats = IngestStats(seen=len(batch))
         now = self.clock()
         unique = {(p.platform, p.external_id): p for p in batch}
-        with self.engine.begin() as conn:
+        with INGEST_LOCK, self.engine.begin() as conn:
             for post in unique.values():
                 row, found = build_row(post, self.universe)
                 repository.upsert_post(conn, row, now)

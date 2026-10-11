@@ -17,7 +17,7 @@ from sqlalchemy.engine import Engine
 
 from social_scraper.db import repository, schema
 from social_scraper.models import REDDIT, Post
-from social_scraper.pipeline import RAW_KEEP, IngestStats
+from social_scraper.pipeline import INGEST_LOCK, RAW_KEEP, IngestStats
 from social_scraper.privacy import scrub_text
 from social_scraper.sports import discover, registry
 from social_scraper.sports.matcher import EntityMention, Matcher
@@ -80,7 +80,7 @@ class SportsIngestor:
         stats = IngestStats(seen=len(batch))
         now = self.clock()
         unique = {(p.platform, p.external_id): p for p in batch}
-        with self.engine.begin() as conn:
+        with INGEST_LOCK, self.engine.begin() as conn:
             for post in unique.values():
                 row, found, leagues = build_row(post, self.matcher, self.context)
                 if not leagues:

@@ -260,6 +260,23 @@ class PlaywrightBrowser:
             text="" if data is not None else self._visible_text(),
         )
 
+    def get_html(self, url: str) -> PageResult:
+        from playwright.sync_api import Error as PlaywrightError
+
+        resp = self._goto(url)
+        if resp is NO_ANSWER:
+            return PageResult(status=None, final_url=url, timed_out=True)
+        try:
+            html = self._page.content()
+        except PlaywrightError:
+            html = ""
+        return PageResult(
+            status=resp.status if resp is not None else None,
+            final_url=self._page.url,
+            html=html,
+            text=self._visible_text(),
+        )
+
     def capture(
         self,
         url: str,
