@@ -177,6 +177,12 @@ UNATTENDED_ENV = {
     "GIT_HTTP_LOW_SPEED_TIME": "120",
 }
 
+# The label this run is filed under, told to the child so what it publishes can name
+# the job that started it. This wrapper's record lands in the `logs/` of the machine it
+# ran on, and nowhere else: release/v0.11.58 was cut at 2026-10-11 06:00 UTC by a run
+# that left none on the machine that read the ledger, so nothing could say who started it.
+JOB_ENV = "DEVKIT_JOB"
+
 # Windows only. This wrapper has two kinds of caller and the flag is for the unattended
 # one: a scheduled task runs it under `pythonw.exe`, which has no console, and Windows
 # answers that by allocating a brand new console **window** for every console child. The
@@ -446,12 +452,19 @@ def archive_artifact(
     return f"{LOGS_DIR}/{ARCHIVE_DIR}/{path.name}"
 
 
-def child_env(base: dict[str, str] | None = None, unattended: bool = False) -> dict[str, str]:
+def child_env(
+    base: dict[str, str] | None = None, unattended: bool = False, title: str = ""
+) -> dict[str, str]:
     """The child's environment, with colour, UTF-8 and unbuffered output forced unless
-    the caller decided -- and, for an `unattended` child, no prompts (`UNATTENDED_ENV`)."""
+    the caller decided -- and, for an `unattended` child, no prompts (`UNATTENDED_ENV`).
+
+    `title` is set as `JOB_ENV` unconditionally: an outer wrapper's label is not the job
+    that ran, the innermost one is."""
     env = dict(os.environ if base is None else base)
     for key, value in (COLOR_ENV | (UNATTENDED_ENV if unattended else {})).items():
         env.setdefault(key, value)
+    if title:
+        env[JOB_ENV] = title
     return env
 
 
@@ -540,7 +553,7 @@ def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> i
 
     started = time.time()
     if run is None:
-        code, output = stream(command, child_env(unattended=always))
+        code, output = stream(command, child_env(unattended=always, title=title))
     else:
         code, output = run(command)
 

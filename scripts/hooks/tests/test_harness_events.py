@@ -372,6 +372,82 @@ class TestLedgerPaths:
         assert events.ledger_paths() == []
 
 
+class TestPool:
+    """The pointer that moves this machine's shard into a folder another machine shares.
+
+    Without it the shards could only live in the checkout's whole `logs/`, which no two
+    machines can share -- so a second machine's defects sat where no fix pass read them.
+    """
+
+    def _point(self, root, target):
+        (root / "logs").mkdir(parents=True, exist_ok=True)
+        (root / "logs" / "ledger-pool").write_text(f"{target}\n", encoding="utf-8")
+
+    def test_no_pointer_is_no_pool(self, tmp_path):
+        assert events.pool_named(tmp_path) is None
+        assert events.pool_dir(tmp_path) is None
+
+    def test_the_shard_is_written_into_the_pool(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        pool = tmp_path / "shared"
+        pool.mkdir()
+        self._point(tmp_path / "devkit", pool)
+        assert events.ledger_path(tmp_path / "devkit") == pool / "harness-events-desktop.log"
+
+    def test_another_machines_shard_in_the_pool_is_read(self, tmp_path, monkeypatch):
+        """The defect this exists for: a row the laptop filed is on the desktop's backlog."""
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        pool = tmp_path / "shared"
+        pool.mkdir()
+        (pool / "harness-events-laptop.log").write_text("x\n", encoding="utf-8")
+        root = tmp_path / "devkit"
+        self._point(root, pool)
+        assert pool / "harness-events-laptop.log" in events.ledger_paths(root)
+
+    def test_local_history_is_still_read_once_pooled(self, tmp_path, monkeypatch):
+        """The legacy file stays behind on every machine, and rows written while the pool
+        was offline stay local until the next `--set`: neither may drop off the backlog."""
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        pool = tmp_path / "shared"
+        pool.mkdir()
+        root = tmp_path / "devkit"
+        self._point(root, pool)
+        (root / "logs" / "harness-events.log").write_text("x\n", encoding="utf-8")
+        (root / "logs" / "harness-events-desktop.log").write_text("x\n", encoding="utf-8")
+        found = events.ledger_paths(root)
+        assert root / "logs" / "harness-events.log" in found
+        assert root / "logs" / "harness-events-desktop.log" in found
+        assert pool / "harness-events-desktop.log" in found
+
+    def test_an_unreachable_pool_writes_locally(self, tmp_path, monkeypatch):
+        """A synced folder not mounted yet must not lose the row `record` was asked for."""
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        root = tmp_path / "devkit"
+        self._point(root, tmp_path / "offline")
+        assert events.pool_named(root) == tmp_path / "offline"
+        assert events.pool_dir(root) is None
+        assert events.ledger_path(root) == root / "logs" / "harness-events-desktop.log"
+
+    def test_a_relative_or_blank_address_is_no_address(self, tmp_path):
+        self._point(tmp_path, "shared")
+        assert events.pool_named(tmp_path) is None
+        self._point(tmp_path, "   ")
+        assert events.pool_named(tmp_path) is None
+
+    def test_record_lands_in_the_pool(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DEVKIT_HOST", "desktop")
+        pool = tmp_path / "shared"
+        pool.mkdir()
+        root = tmp_path / "devkit"
+        self._point(root, pool)
+        assert events.record("agent-report", (("project", "devkit"),), root=root) == (
+            pool / "harness-events-desktop.log"
+        )
+        assert "event=agent-report" in (pool / "harness-events-desktop.log").read_text(
+            encoding="utf-8"
+        )
+
+
 class TestRecord:
     def test_appends_one_line_per_call(self, tmp_path, monkeypatch):
         monkeypatch.delenv(events.ADAPTER_ENV, raising=False)

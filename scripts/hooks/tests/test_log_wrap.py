@@ -168,6 +168,25 @@ def test_always_runs_the_command_with_the_unattended_environment(monkeypatch, tm
     assert "GIT_TERMINAL_PROMPT" not in seen["clicked"]
 
 
+def test_the_child_is_told_which_job_it_runs_as(monkeypatch, tmp_path):
+    """Release v0.11.58 was cut by a run that left its record on another machine, so
+    nothing here could say who started it: the child is told its label, to name in
+    what it publishes. An outer wrapper's label is overwritten -- the innermost ran it."""
+    seen: dict[str, dict] = {}
+
+    def fake_stream(command, env=None):
+        seen[command[0]] = env or {}
+        return 0, "ok"
+
+    monkeypatch.setenv(lw.JOB_ENV, "Outer")
+    monkeypatch.setattr(lw, "stream", fake_stream)
+    lw.main(["--always", "Scheduled: Devkit Release", "--", "scheduled"], root=tmp_path)
+    lw.main(["Clicked", "--", "clicked"], root=tmp_path)
+    assert seen["scheduled"][lw.JOB_ENV] == "Scheduled: Devkit Release"
+    assert seen["clicked"][lw.JOB_ENV] == "Clicked"
+    assert lw.child_env({lw.JOB_ENV: "Outer"})[lw.JOB_ENV] == "Outer"
+
+
 # --- capping ------------------------------------------------------------------
 
 
