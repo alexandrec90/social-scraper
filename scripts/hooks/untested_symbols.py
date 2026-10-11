@@ -69,7 +69,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import harness_config
-from code_text import code_only
+from code_text import code_only, top_level_scopes
 
 REPO_ROOT = (Path(__file__).parent / "../..").resolve()
 CFG = harness_config.load(REPO_ROOT)
@@ -274,10 +274,6 @@ def shadowed_names(text: str) -> frozenset[str]:
     return frozenset(defined - reached)
 
 
-# A top-level `def`, `class` or decorator opens a scope; the text before the first is the
-# module's own. A statement at column 0 between two functions joins the one above it,
-# which can only leave a name unbound, never bind it to the wrong module.
-_SCOPE_RE = re.compile(r"^(?=@|(?:async[ \t]+)?(?:def|class)\b)", re.MULTILINE)
 # `name = loader("dir/file.py", ...)`: a name bound to one module by its path.
 _LOADED_RE = re.compile(
     r"""^[ \t]*(\w+)[ \t]*(?::[^=\n]*)?=[ \t]*[\w.]+\(\s*[rRuU]?["'][^"'\n]*?([^"'/\\\n]+\.py)["']""",
@@ -343,9 +339,13 @@ def attributes_by_module(text: str) -> dict[str, frozenset[str]]:
     loaded by path. A receiver bound by `import` names its modules too, and each link of a
     chain belongs to the receiver's modules and the links before it -- `typer.py` for
     `main`, which no project module is, while `pkg.mod.alpha` still reaches `mod.py`.
+
+    7e14d6d3: the module's scope is every top-level statement that is not a definition,
+    wherever it sits (`top_level_scopes`), so a load written below a helper still binds.
     """
-    scopes = _SCOPE_RE.split(text)
-    module_level = _loaded(scopes[0])
+    module, functions = top_level_scopes(text)
+    scopes = [module, *functions]
+    module_level = _loaded(module)
     owned: dict[str, set[str]] = {}
     free = set(_CALL_RE.findall(text))
     for rest_of_line in _FROM_IMPORT_RE.findall(text):

@@ -63,7 +63,6 @@ scripts/run-tests.py::filter_output
 scripts/run-tests.py::frontend_run
 scripts/run-tests.py::frontend_sources
 scripts/run-tests.py::frontend_tier
-scripts/run-tests.py::main
 scripts/run-tests.py::rerun_in_tree_venv
 scripts/run-tests.py::run_pytest
 scripts/run-tests.py::run_vitest

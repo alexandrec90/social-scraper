@@ -16,6 +16,7 @@ its gate. Tested in `scripts/hooks/tests/test_code_text.py`.
 from __future__ import annotations
 
 import io
+import re
 import tokenize
 
 
@@ -67,3 +68,55 @@ def code_only(text: str) -> str:
             blank(token)
         previous = token.type
     return "".join(lines)
+
+
+# Only the fallback for text the tokenizer cannot finish: a top-level `def`, `class` or
+# decorator opens a scope, and a statement after a function joins it.
+_SCOPE_RE = re.compile(r"^(?=@|(?:async[ \t]+)?(?:def|class)\b)", re.MULTILINE)
+_OPENS_SCOPE = frozenset({"@", "def", "class", "async"})
+_DEPTH = {tokenize.INDENT: 1, tokenize.DEDENT: -1}
+_NOT_A_STATEMENT = _NOT_CODE | _DEPTH.keys() | {tokenize.NEWLINE, tokenize.ENDMARKER}
+
+
+def _statement_starts(tokens: list[tokenize.TokenInfo]) -> list[tuple[int, bool]]:
+    """The line index of each statement that opens at indentation zero, and whether it
+    opens a definition; a decorator and the definition under it are one start."""
+    starts = [(0, False)]
+    depth, at_start, decorated = 0, True, False
+    for token in tokens:
+        depth += _DEPTH.get(token.type, 0)
+        at_start = at_start or token.type == tokenize.NEWLINE
+        if not at_start or token.type in _NOT_A_STATEMENT:
+            continue
+        at_start = False
+        opens = token.string in _OPENS_SCOPE
+        if depth == 0 and not (decorated and opens):
+            starts.append((token.start[0] - 1, opens))
+        decorated = depth == 0 and token.string == "@"
+    return starts
+
+
+def top_level_scopes(text: str) -> tuple[str, list[str]]:
+    """`text` split into its module-level code and each top-level `def` or `class`,
+    decorators included, as exact slices of its lines.
+
+    7e14d6d3: splitting at every top-level `def` put `up = load_script("db-upgrade.py")`,
+    written below `def load_script`, inside that function, so the module-level binding
+    of `up` was never seen and every `up.x` vouched for every module the file named. Read
+    with the tokenizer, every statement that opens at indentation zero and is not a
+    definition is the module's, wherever it sits; a multi-line signature's `):` is a
+    continuation, never a statement. Text the tokenizer cannot finish falls back to the
+    old split, which can only leave a name unbound.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError):
+        head, *tail = _SCOPE_RE.split(text)
+        return head, tail
+    lines = io.StringIO(text).readlines()
+    starts = _statement_starts(tokens)
+    ends = [line for line, _ in starts[1:]] + [len(lines)]
+    blocks = [
+        (opens, "".join(lines[line:end])) for (line, opens), end in zip(starts, ends, strict=True)
+    ]
+    return "".join(b for opens, b in blocks if not opens), [b for opens, b in blocks if opens]
