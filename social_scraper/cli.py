@@ -2,16 +2,18 @@
 
 init-db               create the operational tables
 login reddit|x        open a visible browser to sign in once; the profile keeps it
-scrape [reddit|x|all] one cycle, then export (skip with --no-export); first waits a
-                      random 0-20% of CYCLE_MINUTES, for schedulers -- --now skips it
+scrape [PLATFORM|all] one cycle, then export (skip with --no-export); first waits a
+                      random 0-20% of CYCLE_MINUTES, for schedulers -- --now skips it.
+                      PLATFORM: reddit, x, stocktwits, tradingview, hfboards, bluesky,
+                      polymarket; all is SCRAPE_PLATFORMS
 run                   cycle forever every CYCLE_MINUTES (or --cycles N)
                       scrape and run take --headed: show Chrome despite BROWSER_HEADLESS
                       and BROWSER_MINIMIZED
 export [--full]       copy new rows to the lake (the local tree, and the bucket when
                       ARCHIVE_BACKEND=s3); --full re-sends every row, which is how a
                       newly configured bucket gets the history
-status               budgets, pauses, row counts, trending symbols, X accounts (and the
-                      sports equivalents when DOMAINS includes sports)
+status               budgets, pauses, row counts, trending symbols, X accounts, Polymarket
+                      markets (and the sports equivalents when DOMAINS includes sports)
 lake [--days N]       what the lake holds, per symbol and day (DuckDB lens)
 universe              refresh the symbol directory and print its size
 reddit-import PATH... backfill the lake from Pushshift / Arctic Shift dump files (or
@@ -66,7 +68,8 @@ from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.export import export_to_lake
 from social_scraper.backfill import ArchiveFilter, ImportReport
 from social_scraper.hackernews import dumps as hn_dumps
-from social_scraper.models import PLATFORMS, REDDIT, X
+from social_scraper.models import LOGIN_PLATFORMS, PLATFORMS, REDDIT, X
+from social_scraper.polymarket import store as polymarket_store
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
     FIRED_AT_ENV,
@@ -104,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init-db")
     login = sub.add_parser("login")
-    login.add_argument("platform", choices=PLATFORMS)
+    login.add_argument("platform", choices=LOGIN_PLATFORMS)
     for name in ("scrape", "run"):
         cmd = sub.add_parser(name)
         cmd.add_argument("platform", nargs="?", default="all", choices=(*PLATFORMS, "all"))
@@ -141,8 +144,10 @@ def utc_date(value: str) -> datetime:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
-def platforms_of(choice: str) -> tuple[str, ...]:
-    return PLATFORMS if choice == "all" else (choice,)
+def platforms_of(choice: str, enabled: tuple[str, ...] = PLATFORMS) -> tuple[str, ...]:
+    """The platforms a `scrape`/`run` crawls: `enabled` (`SCRAPE_PLATFORMS`) for `all`,
+    else the one named, enabled or not -- naming it is asking for it."""
+    return enabled if choice == "all" else (choice,)
 
 
 def end_process(code: int) -> None:
@@ -211,7 +216,7 @@ def scrape_cycle(
     return run_cycle(
         settings,
         engine,
-        platforms_of(args.platform),
+        platforms_of(args.platform, settings.enabled_platforms),
         export=not args.no_export,
         deadline=deadline,
     )
@@ -246,7 +251,11 @@ def outcome_line(report: RunReport, path: Path) -> str:
 def cmd_run(settings: Settings, engine: Engine, args: argparse.Namespace) -> int:
     schema.create_all(engine)
     run_forever(
-        settings, engine, platforms_of(args.platform), cycles=args.cycles, export=not args.no_export
+        settings,
+        engine,
+        platforms_of(args.platform, settings.enabled_platforms),
+        cycles=args.cycles,
+        export=not args.no_export,
     )
     return 0
 
@@ -285,6 +294,8 @@ def cmd_status(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         t = schema.x_accounts
         rows = conn.execute(select(t.c.status, func.count()).group_by(t.c.status)).all()
         print("x accounts: " + ", ".join(f"{s} {n}" for s, n in rows))
+        for table, count in polymarket_store.counts(conn).items():
+            print(f"  {table}: {count}")
         if SPORTS in settings.enabled_domains:
             print("sports:")
             for table, count in sports_registry.counts(conn).items():

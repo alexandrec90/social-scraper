@@ -13,6 +13,8 @@ from typing import Literal
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from social_scraper.models import PLATFORMS
+
 DEFAULT_SUBREDDITS = (
     "wallstreetbets,stocks,investing,options,StockMarket,pennystocks,Daytrading,"
     "ValueInvesting,smallstreetbets,thetagang,CanadianInvestor"
@@ -124,6 +126,76 @@ class Settings(BaseSettings):
     x_min_followers: int = 500
     x_search_share: float = 0.4
 
+    # --- the platforms added beside Reddit and X ------------------------------------------
+    # Each has its own browser profile (or none, for an API), throttle, budgets and active
+    # hours, named `<platform>_*` like Reddit's and X's -- `runner.policy_for` reads them
+    # by that name. Budgets are a ceiling about twice what the per-cycle settings spend.
+
+    # StockTwits (`stocktwits/`): one symbol stream is one load of its JSON API through
+    # the browser, the 30 newest messages; trending symbols are read every few hours.
+    stocktwits_min_delay_s: float = 6.0
+    stocktwits_max_delay_s: float = 15.0
+    stocktwits_hourly_budget: int = 30
+    stocktwits_daily_budget: int = 400
+    stocktwits_active_hours: str = "6-24"
+    stocktwits_symbols_per_cycle: int = 6
+    stocktwits_trending_hours: float = 3.0
+
+    # TradingView (`tradingview/`): one symbol's ideas page as JSON, 24 ideas a page.
+    tradingview_min_delay_s: float = 10.0
+    tradingview_max_delay_s: float = 30.0
+    tradingview_hourly_budget: int = 12
+    tradingview_daily_budget: int = 150
+    tradingview_active_hours: str = "7-23"
+    tradingview_symbols_per_cycle: int = 3
+
+    # HFBoards (`hfboards/`, sports only): a forum's thread list, then the newest page of
+    # each thread with new posts. Which forums: the leagues' `hfboards_forums`.
+    hfboards_min_delay_s: float = 8.0
+    hfboards_max_delay_s: float = 20.0
+    hfboards_hourly_budget: int = 30
+    hfboards_daily_budget: int = 450
+    hfboards_active_hours: str = "7-24"
+    hfboards_forums_per_cycle: int = 2
+    hfboards_threads_per_forum: int = 3
+
+    # Bluesky (`bluesky/live.py`): `searchPosts` on the public AppView, no account.
+    bluesky_min_delay_s: float = 2.0
+    bluesky_max_delay_s: float = 6.0
+    bluesky_hourly_budget: int = 40
+    bluesky_daily_budget: int = 800
+    bluesky_active_hours: str = ""
+    bluesky_searches_per_cycle: int = 6
+    bluesky_sports_searches_per_cycle: int = 3
+
+    # Polymarket (`polymarket/`): market prices from the Gamma API, no account. Stock
+    # tags here; sports tags come from the leagues' `polymarket_tags`.
+    polymarket_min_delay_s: float = 1.0
+    polymarket_max_delay_s: float = 3.0
+    polymarket_hourly_budget: int = 150
+    polymarket_daily_budget: int = 2500
+    polymarket_active_hours: str = ""
+    polymarket_stock_tags: str = "stocks,earnings,equities,ipos,fed,economy"
+    # Tags read a cycle, the longest unread first (0 reads all). A page of the `nfl` tag
+    # was 33.6 MB at 100 events (2026-10-10): with ~40 tags, all of them every cycle was
+    # gigabytes a day. 12 reads each sports tag every 1.5-2 h, stock tags every cycle.
+    polymarket_tags_per_cycle: int = 12
+    polymarket_pages_per_tag: int = 1
+    # A market is stored only past this 24-hour volume (USD); 0 keeps any that traded.
+    # 9,472 of the nfl tag's 10,371 open markets had not traded that day.
+    polymarket_min_volume_24h: float = 0.0
+    # Events past their end, re-read by id until they resolve, at most this many a cycle.
+    polymarket_resolve_per_cycle: int = 40
+
+    # --- the cycle ------------------------------------------------------------------------
+    # The platforms `scrape all` crawls (comma-separated): a subset of models.PLATFORMS.
+    scrape_platforms: str = "reddit,x,stocktwits,tradingview,hfboards,bluesky,polymarket"
+    # Platforms crawled at once, each in its own thread with its own browser. Every
+    # platform has its own throttle, so running them side by side changes no pace; it is
+    # what lets seven fit a cycle that Reddit and X alone filled 20-25 minutes of. 1 runs
+    # them one after another; each browser is a Chrome, so mind the memory.
+    crawl_workers: int = 3
+
     # --- domains -------------------------------------------------------------------------
     # What a cycle collects: `stocks`, `sports`, or both (comma-separated). Both domains
     # draw on the same per-platform budgets above -- raise those when adding one.
@@ -203,6 +275,25 @@ class Settings(BaseSettings):
     @property
     def reddit_hours(self) -> tuple[int, int] | None:
         return parse_hours(self.reddit_active_hours)
+
+    def hours_of(self, platform: str) -> tuple[int, int] | None:
+        """`<PLATFORM>_ACTIVE_HOURS`, parsed."""
+        return parse_hours(getattr(self, f"{platform}_active_hours"))
+
+    @property
+    def enabled_platforms(self) -> tuple[str, ...]:
+        """`SCRAPE_PLATFORMS` in crawl order; an unknown name is a configuration error."""
+        names = {p.lower() for p in csv_list(self.scrape_platforms)}
+        unknown = sorted(names - set(PLATFORMS))
+        if unknown:
+            raise ValueError(
+                f"SCRAPE_PLATFORMS: unknown {', '.join(unknown)} (known: {', '.join(PLATFORMS)})"
+            )
+        return tuple(p for p in PLATFORMS if p in names)
+
+    @property
+    def polymarket_stock_tag_list(self) -> tuple[str, ...]:
+        return tuple(t.lower() for t in csv_list(self.polymarket_stock_tags))
 
     def profile_dir(self, platform: str) -> Path:
         """One browser profile per platform, so an X ban cannot touch the Reddit login."""

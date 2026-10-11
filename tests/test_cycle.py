@@ -1,6 +1,7 @@
 """The sports domain's part of a cycle (`sports/cycle.py`), with no network: the leagues
 here have no Wikidata ids, or a fake client answers for them."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -22,8 +23,9 @@ from sqlalchemy import select
 from social_scraper.browser import TIMED_OUT
 from social_scraper.db import repository, schema
 from social_scraper.db.throttle_store import DbThrottleStore
+from social_scraper.feeds import FeedRunStats
 from social_scraper.fetch import LaunchTimedOut, PageResult, Payload
-from social_scraper.models import REDDIT, X
+from social_scraper.models import BLUESKY, HFBOARDS, REDDIT, X
 from social_scraper.runner import policy_for
 from social_scraper.sports import cycle, registry
 from social_scraper.sports.cycle import VISITED_PREFIX, build_matcher, prepare, run_platform
@@ -215,6 +217,72 @@ def test_run_platform_skips_and_errors(engine, settings):
 
     result = run_platform(settings, REDDIT, engine, ctx, slow, policy_for)
     assert "error" not in result and "Timeout 30000ms" in result[TIMED_OUT]
+
+
+def test_hfboards_and_bluesky_are_skipped_when_configured_off(engine, settings):
+    ctx = prepare(settings, engine, NOW)
+
+    def never(platform):
+        raise AssertionError("browser must not launch")
+
+    # The test leagues list no HFBoards forum.
+    assert (
+        "hfboards_forums"
+        in run_platform(settings, HFBOARDS, engine, ctx, never, policy_for)["skipped"]
+    )
+    with_forum = replace(ctx, leagues=(replace(ctx.leagues[0], hfboards_forums=("nhl.1",)),))
+    assert cycle.nothing_to_do(settings, HFBOARDS, with_forum) is None
+    settings.hfboards_forums_per_cycle = 0
+    assert "HFBOARDS_FORUMS_PER_CYCLE" in cycle.nothing_to_do(settings, HFBOARDS, with_forum)
+    settings.bluesky_sports_searches_per_cycle = 0
+    assert "0" in run_platform(settings, BLUESKY, engine, ctx, never, policy_for)["skipped"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "crawl"), [(HFBOARDS, "hfboards_scraper"), (BLUESKY, "bluesky_live")]
+)
+def test_hfboards_and_bluesky_crawl_through_their_modules(
+    engine, settings, monkeypatch, platform, crawl
+):
+    ctx = prepare(settings, engine, NOW)
+    ctx = replace(ctx, leagues=(replace(ctx.leagues[0], hfboards_forums=("nhl.1",)),))
+    settings = settings.model_copy(
+        update={
+            f"{platform}_active_hours": "",
+            f"{platform}_min_delay_s": 0,
+            f"{platform}_max_delay_s": 0,
+        }
+    )
+    seen = {}
+
+    def fake(s, leagues, matcher, eng, browser, throttle):
+        seen.update(leagues=leagues, matcher=matcher, browser=browser)
+        return FeedRunStats(requests=2, errors=["one forum: HTTP 500"])
+
+    monkeypatch.setattr(getattr(cycle, crawl), "crawl_sports", fake)
+    browser = FakeBrowser()
+    result = run_platform(settings, platform, engine, ctx, lambda p: browser, policy_for)
+    assert seen == {"leagues": ctx.leagues, "matcher": ctx.matcher, "browser": browser}
+    assert result["requests"] == 2 and result["error"] == "one forum: HTTP 500"
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "module"),
+    [("crawl_hfboards", "hfboards_scraper"), ("crawl_bluesky", "bluesky_live")],
+)
+def test_the_crawl_wrappers_hand_the_context_on(engine, settings, monkeypatch, wrapper, module):
+    ctx = prepare(settings, engine, NOW)
+    got = {}
+    monkeypatch.setattr(
+        getattr(cycle, module),
+        "crawl_sports",
+        lambda s, leagues, matcher, eng, browser, throttle: (
+            got.update(leagues=leagues, matcher=matcher) or FeedRunStats()
+        ),
+    )
+    crawl = {"crawl_hfboards": cycle.crawl_hfboards, "crawl_bluesky": cycle.crawl_bluesky}[wrapper]
+    assert crawl(settings, ctx, engine, FakeBrowser(), None, NOW) == FeedRunStats()
+    assert got == {"leagues": ctx.leagues, "matcher": ctx.matcher}
 
 
 def test_a_sports_browser_that_will_not_start_is_a_skip_until_it_keeps_happening(engine, settings):

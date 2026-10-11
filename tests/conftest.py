@@ -29,9 +29,15 @@ NOW = datetime(2026, 9, 28, 15, 0, tzinfo=UTC)
 
 
 class IsolatedSettings(Settings):
-    """`Settings` that never reads the developer's `.env`."""
+    """`Settings` that never reads the developer's `.env`.
+
+    One crawl worker: the in-memory `engine` is a single SQLite connection every thread
+    would share, which SQLite refuses. A test of the parallel cycle opts in, on
+    `file_engine`.
+    """
 
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
+    crawl_workers: int = 1
 
 
 class Clock:
@@ -61,6 +67,18 @@ def sqlite_engine() -> Engine:
 @pytest.fixture
 def engine() -> Engine:
     return sqlite_engine()
+
+
+@pytest.fixture
+def file_engine(tmp_path) -> Iterator[Engine]:
+    """A SQLite file with a connection per thread: what a parallel cycle can share."""
+    eng = create_engine(
+        f"sqlite:///{tmp_path / 'scraper.sqlite'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    schema.create_all(eng)
+    yield eng
+    eng.dispose()
 
 
 # Postgres joins the matrix whenever DATABASE_URL points at one -- the PR gate's
@@ -158,6 +176,9 @@ class FakeBrowser:
         raise AssertionError(f"unexpected URL {url}")
 
     def get_json(self, url: str) -> PageResult:
+        return self._answer(url)
+
+    def get_html(self, url: str) -> PageResult:
         return self._answer(url)
 
     def capture(

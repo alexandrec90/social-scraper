@@ -13,6 +13,9 @@ and where its entities come from:
 | `subreddits`      | league/sport subreddits, always in the rotation                  |
 | `team_subreddits` | also rotate through each team's subreddit (Wikidata P3984)       |
 | `x_queries`       | generic X searches for this league                               |
+| `bluesky_queries` | generic Bluesky searches (plain words and quoted phrases)        |
+| `hfboards_forums` | HFBoards forums, as their URL's `slug.id` (`montreal-canadiens.16`) |
+| `polymarket_tags` | Polymarket tag slugs whose open markets are about this league    |
 | `players`         | athletes kept per team (default `SPORTS_PLAYERS_PER_TEAM`)       |
 | `extra`           | QIDs Wikidata's league query misses: always in the league        |
 | `covers`          | league keys whose entities play here too: a cup's clubs come     |
@@ -33,6 +36,9 @@ from typing import Any
 _KEY = re.compile(r"^[a-z0-9_]{1,32}$")
 _QID = re.compile(r"^Q\d+$")
 _SUBREDDIT = re.compile(r"^[A-Za-z0-9_]{2,21}$")
+# XenForo's forum path segment: the slug, a dot, the node id.
+_FORUM = re.compile(r"^[a-z0-9-]{1,96}\.\d{1,9}$")
+_TAG = re.compile(r"^[a-z0-9-]{1,64}$")
 
 
 class LeagueConfigError(ValueError):
@@ -62,6 +68,9 @@ class League:
     players: int | None = None
     extra: tuple[str, ...] = ()
     covers: tuple[str, ...] = ()
+    bluesky_queries: tuple[str, ...] = ()
+    hfboards_forums: tuple[str, ...] = ()
+    polymarket_tags: tuple[str, ...] = ()
 
     @property
     def context(self) -> frozenset[str]:
@@ -107,6 +116,18 @@ def _subreddits(raw: dict[str, Any], where: str) -> tuple[str, ...]:
     return subreddits
 
 
+def _matching(
+    raw: dict[str, Any], field: str, pattern: re.Pattern[str], where: str
+) -> tuple[str, ...]:
+    values = _strings(raw, field, where)
+    bad = [v for v in values if not pattern.match(v)]
+    if bad:
+        raise LeagueConfigError(
+            f"{where}: `{field}` must match {pattern.pattern}: {', '.join(bad)}"
+        )
+    return values
+
+
 def _identity(raw: dict[str, Any], where: str) -> str:
     """The league's `key`, once `key`, `name` and `sport` are known to be valid."""
     key = raw.get("key")
@@ -148,6 +169,9 @@ def parse_league(raw: dict[str, Any], index: int) -> League:
         players=players,
         extra=tuple(_qid(q, "extra", where) for q in _strings(raw, "extra", where)),
         covers=_strings(raw, "covers", where),
+        bluesky_queries=_strings(raw, "bluesky_queries", where),
+        hfboards_forums=_matching(raw, "hfboards_forums", _FORUM, where),
+        polymarket_tags=_matching(raw, "polymarket_tags", _TAG, where),
     )
 
 

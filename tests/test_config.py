@@ -5,6 +5,17 @@ import pytest
 from conftest import IsolatedSettings
 
 from social_scraper.config import Settings, csv_list, parse_hours
+from social_scraper.models import (
+    BLUESKY,
+    HFBOARDS,
+    PLATFORMS,
+    POLYMARKET,
+    STOCKTWITS,
+    TRADINGVIEW,
+)
+from social_scraper.sports.leagues import load_leagues
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def settings(**over) -> Settings:
@@ -100,6 +111,57 @@ def test_default_x_pace_fits_its_budgets():
     hourly = s.x_pages_per_cycle * cycles_per_hour
     assert hourly <= s.x_hourly_budget
     assert hourly * _active_hours_per_day(s.x_hours) <= s.x_daily_budget
+
+
+def _loads_per_cycle(s: Settings, platform: str) -> float:
+    """Page loads one cycle spends on `platform` at its defaults, both domains on."""
+    cycles_per_hour = 60 / s.cycle_minutes
+    if platform == STOCKTWITS:
+        return s.stocktwits_symbols_per_cycle + 1 / (s.stocktwits_trending_hours * cycles_per_hour)
+    if platform == TRADINGVIEW:
+        return s.tradingview_symbols_per_cycle
+    if platform == HFBOARDS:
+        return s.hfboards_forums_per_cycle * (1 + s.hfboards_threads_per_forum)
+    if platform == BLUESKY:
+        return s.bluesky_searches_per_cycle + s.bluesky_sports_searches_per_cycle
+    tags = {t for lg in load_leagues(REPO_ROOT / "sports-leagues.toml") for t in lg.polymarket_tags}
+    every = len(s.polymarket_stock_tag_list) + len(tags)
+    read = min(s.polymarket_tags_per_cycle or every, every)
+    lookups = -(-s.polymarket_resolve_per_cycle // 20)  # `cycle.IDS_PER_LOOKUP` ids a call
+    return read * s.polymarket_pages_per_tag + lookups
+
+
+@pytest.mark.parametrize("platform", [STOCKTWITS, TRADINGVIEW, HFBOARDS, BLUESKY, POLYMARKET])
+def test_default_pace_of_the_added_platforms_fits_their_budgets(platform):
+    s = settings()
+    hourly = _loads_per_cycle(s, platform) * 60 / s.cycle_minutes
+    assert hourly <= getattr(s, f"{platform}_hourly_budget")
+    assert hourly * _active_hours_per_day(s.hours_of(platform)) <= getattr(
+        s, f"{platform}_daily_budget"
+    )
+
+
+def test_scrape_platforms_default_to_all_in_crawl_order_and_reject_unknown_names():
+    assert settings().enabled_platforms == PLATFORMS
+    assert settings(scrape_platforms="Polymarket, reddit").enabled_platforms == (
+        "reddit",
+        "polymarket",
+    )
+    with pytest.raises(ValueError, match="myspace"):
+        _ = settings(scrape_platforms="reddit,myspace").enabled_platforms
+
+
+def test_hours_of_reads_each_platforms_window():
+    s = settings(hfboards_active_hours="7-24", bluesky_active_hours="")
+    assert s.hours_of("hfboards") == (7, 24) and s.hours_of("bluesky") is None
+    assert s.hours_of("x") == s.x_hours
+
+
+def test_polymarket_stock_tags_are_a_lower_case_list():
+    assert settings(polymarket_stock_tags="Stocks, EARNINGS,,").polymarket_stock_tag_list == (
+        "stocks",
+        "earnings",
+    )
 
 
 def test_the_lake_is_local_only_by_default():

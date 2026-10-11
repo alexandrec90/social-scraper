@@ -297,6 +297,31 @@ def test_reddit_import_reports_then_raises_when_it_cannot_start(
 def test_platforms_of():
     assert platforms_of("all") == PLATFORMS
     assert platforms_of("x") == ("x",)
+    # `all` is SCRAPE_PLATFORMS; a platform named outright runs even when it is not in it.
+    assert platforms_of("all", ("reddit", "polymarket")) == ("reddit", "polymarket")
+    assert platforms_of("hfboards", ("reddit",)) == ("hfboards",)
+
+
+def test_every_platform_can_be_scraped_but_only_reddit_and_x_logged_into():
+    parser = build_parser()
+    for platform in PLATFORMS:
+        assert parser.parse_args(["scrape", platform]).platform == platform
+    assert parser.parse_args(["login", "x"]).platform == "x"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["login", "stocktwits"])
+
+
+def test_scrape_all_reads_scrape_platforms(settings, engine, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "run_cycle",
+        lambda s, e, platforms, **kw: seen.setdefault("p", platforms) and RunReport("t"),
+    )
+    narrowed = settings.model_copy(update={"scrape_platforms": "bluesky,reddit"})
+    args = build_parser().parse_args(["scrape", "--no-export", "--now"])
+    cli.scrape_cycle(narrowed, engine, args, datetime.now(UTC))
+    assert seen["p"] == ("reddit", "bluesky")
 
 
 def scrape_args(platform="x", now=True):

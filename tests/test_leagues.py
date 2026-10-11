@@ -47,6 +47,28 @@ def test_parse_leagues_reads_every_field():
     assert nhl.context == frozenset({"nhl"})
 
 
+def test_parse_leagues_reads_the_bluesky_hfboards_and_polymarket_fields():
+    (nhl,) = parse_leagues(
+        TEAM_LEAGUE
+        + 'bluesky_queries = ["NHL injury"]\n'
+        + 'hfboards_forums = ["montreal-canadiens.16", "national-hockey-league-talk.60"]\n'
+        + 'polymarket_tags = ["nhl", "stanley-cup"]\n'
+    )
+    assert nhl.bluesky_queries == ("NHL injury",)
+    assert nhl.hfboards_forums == ("montreal-canadiens.16", "national-hockey-league-talk.60")
+    assert nhl.polymarket_tags == ("nhl", "stanley-cup")
+    (bare,) = parse_leagues('[[league]]\nkey = "k"\nname = "K"\nsport = "s"\n')
+    assert (bare.bluesky_queries, bare.hfboards_forums, bare.polymarket_tags) == ((), (), ())
+
+
+def test_the_committed_league_list_reaches_hfboards_and_polymarket():
+    leagues = {lg.key: lg for lg in load_leagues(REPO_ROOT / "sports-leagues.toml")}
+    assert len(leagues["nhl"].hfboards_forums) >= 32 + 3  # every team, and the main boards
+    assert "montreal-canadiens.16" in leagues["nhl"].hfboards_forums
+    assert leagues["nhl"].polymarket_tags == ("nhl",)
+    assert sum(bool(lg.polymarket_tags) for lg in leagues.values()) >= 20
+
+
 def test_athlete_league_and_defaults():
     (atp,) = parse_leagues(
         '[[league]]\nkey = "atp"\nname = "ATP"\nsport = "tennis"\n'
@@ -78,6 +100,12 @@ def test_athlete_league_and_defaults():
         ),
         ({"key": "x", "name": "n", "sport": "s", "athletes": {"sport": "Q1", "sex": "m"}}, "sex"),
         ({"key": "x", "name": "n", "sport": "s", "extra": ["Q1", "nope"]}, "extra"),
+        (
+            {"key": "x", "name": "n", "sport": "s", "hfboards_forums": ["montreal-canadiens"]},
+            "hfboards_forums",
+        ),
+        ({"key": "x", "name": "n", "sport": "s", "polymarket_tags": ["NHL"]}, "polymarket_tags"),
+        ({"key": "x", "name": "n", "sport": "s", "bluesky_queries": [""]}, "bluesky_queries"),
     ],
 )
 def test_parse_league_rejects_malformed_tables(raw, message):

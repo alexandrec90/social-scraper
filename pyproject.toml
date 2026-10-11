@@ -1,7 +1,7 @@
 [project]
 name = "social-scraper"
 version = "0.1.0"
-description = "Browser-driven social ingestion (Reddit, X) into data-lake"
+description = "Browser-driven social ingestion (Reddit, X, StockTwits, TradingView, HFBoards, Bluesky, Polymarket) into data-lake"
 requires-python = ">=3.12"
 dependencies = [
   "sqlalchemy>=2.0",

@@ -1,6 +1,7 @@
 # Social Scraper
 
-Browser-driven social ingestion (Reddit, X) into data-lake
+Browser-driven social ingestion (Reddit, X, StockTwits, TradingView, HFBoards, Bluesky,
+Polymarket) into data-lake
 
 ## Tech Stack
 
