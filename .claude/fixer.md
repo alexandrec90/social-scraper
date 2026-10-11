@@ -43,6 +43,11 @@ did not need to:
   for growth the change cannot avoid, and it needs the reason written down.
 - **Is the obstacle an instruction?** If it is one written for project sessions, the
   table above answers it.
+- **Is the fix another PR's merge?** That PR is open, in this repository or another,
+  and nothing short of merging it turns yours green. Merging is not a fixer's, and it is
+  none of the three blockers either: write `logs/fix-blocked.md` with a line
+  `Waits on: https://github.com/<owner>/<repo>/pull/<n>`, and the pass holds this
+  problem until that PR closes, then sends the next fixer.
 
 ## Report
 

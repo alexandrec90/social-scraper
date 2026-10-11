@@ -300,9 +300,9 @@ def test_source_dirs_honours_an_explicit_list():
 
 
 def test_source_files_finds_modules_at_any_depth(tmp_path):
-    write(tmp_path, "src/acme/deep/thing.py")
+    write(tmp_path, "src/acme/deep/acme_thing.py")
     assert us.source_files(tmp_path, config(sources=["src"])) == [
-        Path("src/acme/deep/thing.py"),
+        Path("src/acme/deep/acme_thing.py"),
     ]
 
 
@@ -445,17 +445,18 @@ def test_a_package_that_does_not_reexport_a_module_vouches_for_nothing_in_it(tmp
 
 def test_reexporting_package_names_the_package_whose_init_imports_the_module(tmp_path):
     write(tmp_path, "src/shop/__init__.py")
-    write(tmp_path, "src/shop/core.py")
+    write(tmp_path, "src/shop/acme_core.py")
     write(tmp_path, "src/shop/other.py")
-    write(tmp_path, "src/shop/overlay/__init__.py", "from .offers import Offer\n")
-    write(tmp_path, "src/shop/overlay/offers.py")
-    write(tmp_path, "src/loose/mod.py")
-    write(tmp_path, "src/broken/__init__.py", "from .mod import (\n")
-    write(tmp_path, "src/broken/mod.py")
-    assert us.reexporting_package(tmp_path, Path("src/shop/overlay/offers.py")) == "shop.overlay"
-    assert us.reexporting_package(tmp_path, Path("src/shop/core.py")) == ""
-    assert us.reexporting_package(tmp_path, Path("src/loose/mod.py")) == ""
-    assert us.reexporting_package(tmp_path, Path("src/broken/mod.py")) == ""
+    write(tmp_path, "src/shop/overlay/__init__.py", "from .acme_offers import Offer\n")
+    write(tmp_path, "src/shop/overlay/acme_offers.py")
+    write(tmp_path, "src/loose/acme_mod.py")
+    write(tmp_path, "src/broken/__init__.py", "from .acme_mod import (\n")
+    write(tmp_path, "src/broken/acme_mod.py")
+    offers = Path("src/shop/overlay/acme_offers.py")
+    assert us.reexporting_package(tmp_path, offers) == "shop.overlay"
+    assert us.reexporting_package(tmp_path, Path("src/shop/acme_core.py")) == ""
+    assert us.reexporting_package(tmp_path, Path("src/loose/acme_mod.py")) == ""
+    assert us.reexporting_package(tmp_path, Path("src/broken/acme_mod.py")) == ""
 
 
 def test_dotted_name_starts_at_the_outermost_package(tmp_path):
@@ -536,16 +537,16 @@ def test_a_module_level_load_after_a_helper_vouches_only_for_its_own_module(tmp_
     """7e14d6d3: `up = load_script("db-upgrade.py")` written below `def load_script`
     joined that function's scope, `up` was never bound, and `up.write_artifact` vouched
     for db-revision.py's same-named helper, which the file also loads."""
-    write(tmp_path, "src/db-upgrade.py", "def write_artifact():\n    pass\n")
-    write(tmp_path, "src/db-revision.py", "def write_artifact():\n    pass\n")
+    write(tmp_path, "src/acme-upgrade.py", "def write_artifact():\n    pass\n")
+    write(tmp_path, "src/acme-revision.py", "def write_artifact():\n    pass\n")
     tests = (
         "def load_script(name):\n    return load('src/' + name)\n\n\n"
-        "up = load_script('db-upgrade.py')\n\n\n"
+        "up = load_script('acme-upgrade.py')\n\n\n"
         "def test_it():\n    up.write_artifact()\n\n\n"
-        "def test_revision():\n    load_script('db-revision.py')\n"
+        "def test_revision():\n    load_script('acme-revision.py')\n"
     )
     write(tmp_path, "tests/test_db.py", tests)
-    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/db-revision.py::write_artifact"]
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/acme-revision.py::write_artifact"]
 
 
 @pytest.mark.parametrize(
@@ -1026,3 +1027,27 @@ def test_the_gate_certifies_only_what_it_actually_tests():
         "fixtures here vouch for modules this file does not test: use invented symbol "
         f"names — {sorted(vouched)}"
     )
+
+
+# A fixture's module is safe from every consumer's tree only when its name is invented.
+INVENTED_STEMS = frozenset({"acme", "other", "a", "b"})
+# A quoted path in the one position `module_pattern` reads as reaching a module.
+REACHING_PATH = re.compile(r"""[(/]\s*["'][^"']*?([\w.-]+)\.py["']""")
+
+
+def test_every_fixture_module_this_file_reaches_has_an_invented_name():
+    """The check above runs in each consumer against that consumer's own modules, so in
+    devkit it cannot see a fixture named like a consumer's file. `load_script(
+    'db-revision.py')` passed here and failed in carameli, which has that script: it put
+    this file in the script's corpus, and the gate's own `main` read as coverage of it.
+    A test file is never a source, so `test_*` names are free."""
+    code = us.code_only(Path(__file__).read_text(encoding="utf-8"))
+    own = {GATE.stem, CONFIG_MODULE.stem}
+    real = sorted(
+        stem
+        for stem in set(REACHING_PATH.findall(code))
+        if stem not in own
+        and not stem.startswith("test_")
+        and not INVENTED_STEMS & set(re.split(r"[-_]", stem))
+    )
+    assert not real, f"name these fixtures from {sorted(INVENTED_STEMS)}: {real}"

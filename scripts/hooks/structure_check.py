@@ -983,6 +983,23 @@ def run_record(reason: str) -> int | None:
     return None
 
 
+def failed_line(worse: list[Finding], stale: list, artifact: str, tightened: bool) -> str:
+    """The status line of a failing run.
+
+    After `--tighten` it says whose verdict it is: that run exits 1 while anything is
+    still worse, so a `--record` chained after it with `&&` never runs, and the line read
+    as `--record`'s own -- recording nothing, silently (6e2a36b2). Both flags share one
+    call, which records first and then tightens.
+    """
+    line = f"structure-check: {len(worse)} worse, {len(stale)} stale"
+    if tightened and worse:
+        line += (
+            " after --tighten, which only drops and lowers; record growth in the same call"
+            ' with --tighten --record --reason "<why>"'
+        )
+    return f"{line} -- see {artifact}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1036,9 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
     body = report(worse, stale, limits(CFG), advisory)
     path = write_artifact(REPO_ROOT, body)
     if worse or stale:
-        print(
-            f"structure-check: {len(worse)} worse, {len(stale)} stale -- see {path.relative_to(REPO_ROOT).as_posix()}"
-        )
+        print(failed_line(worse, stale, path.relative_to(REPO_ROOT).as_posix(), args.tighten))
         return 1
     sizes = len({f.path for f in advisory})
     warned = f"; warning: {sizes} module(s) past a size limit (advisory)" if sizes else ""
