@@ -256,15 +256,48 @@ def python_sections(scope: list[str], typed: list[str]) -> str:
     return sections
 
 
+def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
+    """This run's exit code under the tree's `.venv`, or None to carry on here.
+
+    Without it, the system interpreter lints *clean*: every linter is `-m` under an
+    interpreter that lacks it, so `_missing_module` skips them all -- it said "ruff: not
+    installed", "mypy: not installed", then "lint-all: clean" from a tree whose `.venv`
+    held both. The vendored `scripts/hooks/toolchain.py` runs this script again inside
+    that `.venv`; where this interpreter already has `module`, nothing changes.
+    """
+    hooks = REPO_ROOT / "scripts" / "hooks"
+    if not (hooks / "toolchain.py").is_file():
+        return None
+    sys.path.insert(0, str(hooks))
+    try:
+        import toolchain
+
+        rerun = toolchain.rerun_in_venv
+    except (ImportError, AttributeError):
+        return None
+    return rerun(
+        REPO_ROOT, module, Path(__file__).resolve(), sys.argv[1:] if argv is None else argv
+    )
+
+
+def selection(args: argparse.Namespace) -> tuple[bool, list[str]]:
+    """`(scoped, the files named)`: `--paths` and `--changed` are the same narrowing,
+    differing only in who names the files; everything downstream treats them identically."""
+    if args.paths:
+        return True, explicit_paths(args.paths)
+    if args.changed:
+        return True, changed_paths()
+    return False, []
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # After parsing, so `/ship`'s `--help` probe answers without installing anything.
+    rerun = rerun_in_tree_venv("ruff", argv)
+    if rerun is not None:
+        return rerun
 
-    # `--paths` and `--changed` are the same narrowing, differing only in who names the
-    # files; everything downstream treats them identically.
-    scoped = args.changed or bool(args.paths)
-    selected: list[str] = []
-    if scoped:
-        selected = explicit_paths(args.paths) if args.paths else changed_paths()
+    scoped, selected = selection(args)
     changed = selected if scoped else None
     targets = python_targets(selected)
     workflows = workflow_files(changed)
