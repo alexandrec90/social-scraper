@@ -200,8 +200,10 @@ def test_the_pull_links_the_venv_and_each_node_modules_a_manifest_names(tmp_path
     _seed(root, "pyproject.toml", VIRTUAL_PROJECT)
     for rel in ("package.json", "frontend/package.json"):
         _seed(root, rel, "{}")
+    linked = ".venv, node_modules, frontend/node_modules"
     assert ps.settings_pass(root) == [
-        f"(worktree links) {ps.SETTINGS_FILE}: .venv, node_modules, frontend/node_modules"
+        f"(worktree links) {ps.SETTINGS_FILE}: {linked}",
+        f"(worktree links ignored) {ps.GITIGNORE}: {linked}",
     ]
     assert _settings(root)["worktree"] == {
         "symlinkDirectories": [".venv", "node_modules", "frontend/node_modules"]
@@ -216,8 +218,71 @@ def test_a_project_that_installs_itself_builds_its_own_venv_but_links_node_modul
     root = _project(tmp_path, {"env": _env()})
     _seed(root, "pyproject.toml", EDITABLE_PROJECT)
     _seed(root, "package.json", "{}")
+    _seed(root, ps.GITIGNORE, "node_modules\n")
     assert ps.settings_pass(root) == [f"(worktree links) {ps.SETTINGS_FILE}: node_modules"]
     assert _settings(root)["worktree"] == {"symlinkDirectories": ["node_modules"]}
+
+
+def test_every_link_the_settings_name_is_ignored_as_a_link_not_a_directory(tmp_path):
+    """carameli #444: Claude Code linked `frontend/node_modules` into the tree, the
+    project ignored `node_modules/` -- directories only, and a link is a file to git --
+    so the fix pass's `git add -A` committed the link, an absolute path into the checkout."""
+    links = [".venv", "frontend/node_modules", "/web/node_modules/"]
+    root = _project(tmp_path, {"env": _env(), "worktree": {"symlinkDirectories": links}})
+    (root / ps.GITIGNORE).write_bytes(b"# Node\r\nnode_modules/\r\n.venv/\r\n/web/node_modules")
+    assert ps.settings_pass(root) == [
+        f"(worktree links ignored) {ps.GITIGNORE}: .venv, frontend/node_modules"
+    ]
+    text = (root / ps.GITIGNORE).read_bytes().decode("utf-8")
+    assert text.startswith("# Node\r\nnode_modules/\r\n.venv/\r\n/web/node_modules\n\n")
+    assert text.endswith("\n/.venv\n/frontend/node_modules\n")
+    assert ps.settings_pass(root) == [], "a second pull has nothing left to add"
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        (root / "frontend").mkdir()
+        (root / "frontend" / "node_modules").write_text("a link is a file to git")
+        ignored = subprocess.run(
+            ["git", "check-ignore", "-q", "frontend/node_modules"], cwd=root, check=False
+        )
+        assert ignored.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("lines", "missing"),
+    [
+        ("", ["frontend/node_modules"]),
+        ("node_modules/\nfrontend/node_modules/\n", ["frontend/node_modules"]),
+        ("node_modules\n", []),
+        ("**/node_modules\n", []),
+        ("frontend/node_modules\n", []),
+        ("  /frontend/node_modules  \n", []),
+        ("#frontend/node_modules\n", ["frontend/node_modules"]),
+    ],
+)
+def test_unignored_reads_only_patterns_that_match_a_link(lines, missing):
+    assert ps.unignored(lines, ["frontend/node_modules"]) == missing
+
+
+def test_a_project_with_no_ignore_file_gets_one(tmp_path):
+    assert ps.ignore_links(tmp_path, [".venv"]) == [".venv"]
+    assert (tmp_path / ps.GITIGNORE).read_text(encoding="utf-8") == "\n".join(
+        [*ps.LINKS_COMMENT, "/.venv", ""]
+    )
+    assert ps.ignore_links(tmp_path, []) == []
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        {"worktree": "no"},
+        {"worktree": {"symlinkDirectories": "no"}},
+        {"worktree": {"symlinkDirectories": [1, "", "/", "a/"]}},
+    ],
+)
+def test_worktree_links_reads_only_the_shape_claude_code_reads(settings):
+    expected = ["a"] if settings and "a/" in str(settings) else []
+    assert ps.worktree_links(settings) == expected
 
 
 @pytest.mark.parametrize(

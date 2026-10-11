@@ -532,6 +532,22 @@ def test_a_module_level_load_binds_its_name_in_every_test_that_does_not_rebind_i
     assert us.gaps(tmp_path, config(sources=["src"])) == ["src/other-tool.py::alpha"]
 
 
+def test_a_module_level_load_after_a_helper_vouches_only_for_its_own_module(tmp_path):
+    """7e14d6d3: `up = load_script("db-upgrade.py")` written below `def load_script`
+    joined that function's scope, `up` was never bound, and `up.write_artifact` vouched
+    for db-revision.py's same-named helper, which the file also loads."""
+    write(tmp_path, "src/db-upgrade.py", "def write_artifact():\n    pass\n")
+    write(tmp_path, "src/db-revision.py", "def write_artifact():\n    pass\n")
+    tests = (
+        "def load_script(name):\n    return load('src/' + name)\n\n\n"
+        "up = load_script('db-upgrade.py')\n\n\n"
+        "def test_it():\n    up.write_artifact()\n\n\n"
+        "def test_revision():\n    load_script('db-revision.py')\n"
+    )
+    write(tmp_path, "tests/test_db.py", tests)
+    assert us.gaps(tmp_path, config(sources=["src"])) == ["src/db-revision.py::write_artifact"]
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -618,6 +634,16 @@ def test_a_name_off_an_imported_project_module_still_vouches_for_it(tmp_path, re
         ("t = load('a.py')\nt.x()\nfrom m import x\n", {}),
         ("t: object = load('a.py')\nt.x()\n", {"x": {"a.py"}}),
         ("t = load('a.py')\nt == 1\nt.x()\n", {"x": {"a.py"}}),
+        # 7e14d6d3: a module-level load written after a function is still module-level
+        (
+            "def load(p):\n    pass\n\n\nt = load('a.py')\n\n\ndef f():\n    t.x()\n",
+            {"x": {"a.py"}},
+        ),
+        (
+            "@fixture\ndef load(p):\n    pass\nt = load('a.py')\ndef f():\n    t.x()\n",
+            {"x": {"a.py"}},
+        ),
+        ("def g(\n    p,\n):\n    pass\nt = load('a.py')\nt.x()\n", {"x": {"a.py"}}),
     ],
 )
 def test_attributes_by_module_reads_only_receivers_a_loader_bound(text, expected):
