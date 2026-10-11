@@ -6,11 +6,13 @@ ingest batch commits or rolls back as a unit.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import logging
+import time
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Table, and_, create_engine, func, select
+from sqlalchemy import Table, and_, create_engine, event, func, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import Connection, Engine
 
@@ -18,6 +20,8 @@ from social_scraper.db import schema
 from social_scraper.models import as_utc
 from social_scraper.symbols.extract import Mention
 from social_scraper.symbols.universe import Universe
+
+log = logging.getLogger(__name__)
 
 ENGAGEMENT_FIELDS = (
     "score",
@@ -47,8 +51,49 @@ POST_MUTABLE_FIELDS = (
 )
 
 
-def make_engine(url: str) -> Engine:
-    return create_engine(url, pool_pre_ping=True)
+# How a new connection rides out a database that is briefly gone. 2026-10-11 00:34 UTC
+# Docker Desktop crashed and was back within 15 s with the db restarted, but the one
+# connect the reddit crawl made inside that window hung for psycopg's default 130 s
+# `connect_timeout` and failed the platform's whole crawl (devkit ledger f5e12548). Short
+# attempts, retried for longer than a restart takes, carry a run through that; an outage
+# outlasting `CONNECT_PATIENCE` still fails it, as before.
+CONNECT_ATTEMPT_TIMEOUT = 10
+CONNECT_PATIENCE = 180
+CONNECT_RETRY_DELAY = 5
+
+
+def connect_patiently[T](
+    connect: Callable[[], T],
+    retryable: type[Exception],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> T:
+    """`connect()`, tried again every `CONNECT_RETRY_DELAY` seconds while it raises
+    `retryable` and `CONNECT_PATIENCE` has not passed; the last error once it has."""
+    deadline = clock() + CONNECT_PATIENCE
+    while True:
+        try:
+            return connect()
+        except retryable as exc:
+            if clock() >= deadline:
+                raise
+            log.warning("database connect failed, retrying in %ss: %s", CONNECT_RETRY_DELAY, exc)
+            sleep(CONNECT_RETRY_DELAY)
+
+
+def make_engine(url: str, sleep: Callable[[float], None] = time.sleep) -> Engine:
+    """The engine every command uses: stale pooled connections are pinged out, and a new
+    one waits out a short outage (`connect_patiently`) instead of failing the caller."""
+    engine = create_engine(url, pool_pre_ping=True)
+
+    @event.listens_for(engine, "do_connect")
+    def _patient(dialect, _record, cargs, cparams):
+        if dialect.name == "postgresql":
+            cparams.setdefault("connect_timeout", CONNECT_ATTEMPT_TIMEOUT)
+        retryable = dialect.loaded_dbapi.OperationalError
+        return connect_patiently(lambda: dialect.connect(*cargs, **cparams), retryable, sleep)
+
+    return engine
 
 
 def dialect_insert(conn: Connection, table: Table):

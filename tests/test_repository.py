@@ -1,11 +1,17 @@
 from datetime import timedelta
 
+import pytest
 from conftest import NOW, make_universe
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from social_scraper.db import repository, schema
 from social_scraper.db.repository import (
+    CONNECT_ATTEMPT_TIMEOUT,
+    CONNECT_PATIENCE,
+    CONNECT_RETRY_DELAY,
     clear_watermarks,
+    connect_patiently,
     dialect_insert,
     get_state,
     get_watermark,
@@ -42,6 +48,98 @@ def post_row(external_id="p1", **over):
 
 def test_make_engine_builds_an_engine():
     assert make_engine("sqlite://").dialect.name == "sqlite"
+
+
+class Clock:
+    """A monotonic clock that only moves when the code under test sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def flaky(failures, error=OSError):
+    """A connect that raises `error` `failures` times, then returns "conn"."""
+    calls = []
+
+    def connect():
+        calls.append(1)
+        if len(calls) <= failures:
+            raise error("db is restarting")
+        return "conn"
+
+    return connect, calls
+
+
+def test_connect_patiently_rides_out_a_short_outage():
+    clock = Clock()
+    connect, calls = flaky(2)
+    assert connect_patiently(connect, OSError, clock.sleep, clock) == "conn"
+    assert len(calls) == 3
+    assert clock.slept == [CONNECT_RETRY_DELAY, CONNECT_RETRY_DELAY]
+
+
+def test_connect_patiently_gives_up_once_its_patience_is_spent():
+    clock = Clock()
+    connect, calls = flaky(10_000)
+    with pytest.raises(OSError, match="restarting"):
+        connect_patiently(connect, OSError, clock.sleep, clock)
+    assert clock.now >= CONNECT_PATIENCE
+    assert len(calls) == CONNECT_PATIENCE // CONNECT_RETRY_DELAY + 1
+
+
+def test_connect_patiently_does_not_retry_an_error_it_was_not_told_to():
+    clock = Clock()
+    connect, calls = flaky(1, error=ValueError)
+    with pytest.raises(ValueError):
+        connect_patiently(connect, OSError, clock.sleep, clock)
+    assert len(calls) == 1
+    assert clock.slept == []
+
+
+def test_make_engine_retries_a_connect_the_database_refused(monkeypatch):
+    """The 2026-10-11 run: a connect inside a db restart fails, the next one serves."""
+    slept = []
+    engine = make_engine("sqlite://", sleep=slept.append)
+    dbapi = engine.dialect.loaded_dbapi
+    real = dbapi.connect
+    attempts = []
+
+    def connect(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise dbapi.OperationalError("db is restarting")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dbapi, "connect", connect)
+    with engine.connect() as conn:
+        assert conn.execute(select(1)).scalar_one() == 1
+    assert len(attempts) == 2
+    assert slept == [CONNECT_RETRY_DELAY]
+
+
+def test_make_engine_bounds_each_postgres_attempt(monkeypatch):
+    """Not psycopg's default 130 s: one hung attempt must not eat the whole patience."""
+    engine = make_engine("postgresql+psycopg://u:p@127.0.0.1:1/db", sleep=lambda _s: None)
+    dbapi = engine.dialect.loaded_dbapi
+    seen = []
+
+    def refuse(*args, **kwargs):
+        seen.append(kwargs)
+        raise dbapi.OperationalError("connection timeout expired")
+
+    monkeypatch.setattr(dbapi, "connect", refuse)
+    monkeypatch.setattr(repository, "CONNECT_PATIENCE", 0)
+    with pytest.raises(OperationalError):
+        engine.connect()
+    assert seen[0]["connect_timeout"] == CONNECT_ATTEMPT_TIMEOUT
 
 
 def test_dialect_insert_matches_backend(db):
