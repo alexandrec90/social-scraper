@@ -15,7 +15,6 @@
 # Module size -- `file_lines`, `imports`, `definitions` -- is advisory and never here.
 #
 # Regenerate only when adopting the gate: python scripts/hooks/structure_check.py --seed
-complexity::scripts/lint-all.py::main = 17
 dependency::pyproject.toml::boto3 = 1
 dependency::pyproject.toml::duckdb = 1
 dependency::pyproject.toml::moto = 1

@@ -32,6 +32,47 @@ def test_main_clears_the_artifact_when_explicit_paths_need_no_linter(tmp_path, m
     assert artifact.read_text(encoding="utf-8") == ""
 
 
+def test_main_hands_the_run_to_the_tree_venv_when_this_interpreter_has_no_ruff(monkeypatch):
+    """Run with the system Python, it said "ruff: not installed", "mypy: not installed"
+    and then "lint-all: clean" from a tree whose `.venv` held both."""
+    lint_all = _load_lint_all()
+    # By name, as main() imports it: from `scripts/hooks`, which is not on mypy's path.
+    monkeypatch.syspath_prepend(str(REPO_ROOT / "scripts" / "hooks"))
+    toolchain = importlib.import_module("toolchain")
+
+    calls = []
+
+    def rerun(root, module, script, argv):
+        calls.append((root, module, script, argv))
+        return 7
+
+    monkeypatch.setattr(toolchain, "rerun_in_venv", rerun)
+    monkeypatch.setattr(
+        lint_all, "python_sections", lambda *_a: (_ for _ in ()).throw(AssertionError)
+    )
+
+    assert lint_all.main(["--changed"]) == 7
+    assert calls == [(REPO_ROOT, "ruff", REPO_ROOT / "scripts" / "lint-all.py", ["--changed"])]
+
+
+def test_selection_narrows_to_the_named_paths_or_the_diff_and_otherwise_not_at_all(monkeypatch):
+    lint_all = _load_lint_all()
+    monkeypatch.setattr(lint_all, "explicit_paths", lambda paths: [f"named:{p}" for p in paths])
+    monkeypatch.setattr(lint_all, "changed_paths", lambda: ["diff.py"])
+    parser = lint_all.build_parser()
+
+    assert lint_all.selection(parser.parse_args(["--paths", "a.py"])) == (True, ["named:a.py"])
+    assert lint_all.selection(parser.parse_args(["--changed"])) == (True, ["diff.py"])
+    assert lint_all.selection(parser.parse_args([])) == (False, [])
+
+
+def test_rerun_in_tree_venv_carries_on_here_without_the_vendored_toolchain(tmp_path, monkeypatch):
+    lint_all = _load_lint_all()
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+
+    assert lint_all.rerun_in_tree_venv("ruff", []) is None
+
+
 def test_mypy_targets_keep_only_files_inside_the_mypy_scope():
     lint_all = _load_lint_all()
 
