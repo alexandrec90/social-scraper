@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.59",
+  "devkit_tag": "v0.11.60",
   "files": {
     ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -61,7 +61,7 @@
     "scripts/hooks/tests/test_sync_devkit.py": "5df436658779045510adfde021dc7a681cded38663b9d6f2c8ffc79da0d63c2a",
     "scripts/hooks/tests/test_task_branch.py": "3eca2aecddbda899f45f50de765cf3beb39f664c2dba61052bb5668cb29071a1",
     "scripts/hooks/tests/test_toolchain.py": "7b58f2e0733ea51a1cbde3488d5c1718eea4c40ba0f906a5e5875e7c669bc3ae",
-    "scripts/hooks/tests/test_untested_symbols.py": "2ee7ed4bdef7f0780f724263d8630df8737c258770968049691e53a707af4364",
+    "scripts/hooks/tests/test_untested_symbols.py": "cd8634f4241fbd7dab963fbbcedf95354d6a77f2e12e855b60eeeac05f8407f0",
     "scripts/hooks/tests/test_worktree_guard_launch.py": "9c49fbb7b27d0403f35d3b75660969cef672b223c75a7e3b04ea37e193f1e1f7",
     "scripts/hooks/tests/test_worktree_tiers.py": "555460acbda14f3fe5250ca340191b6166008fc757e61d8444fd23a131a83eb7",
     "scripts/hooks/toolchain.py": "f7dadb54ef32fb8390f1bf7f33f43028b4e846b67a3d11aab1ccd1cb487a9ab5",
