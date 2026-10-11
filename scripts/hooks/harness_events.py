@@ -30,7 +30,9 @@ Where the ledger lives decides who can write to it, and there are two callers:
 
 That checkout holds **one shard per machine** rather than one file: `record` appends to
 `harness-events-<host>.log` and the read half unions every `harness-events*.log` beside
-it. `HOST_ENV` above carries why, and why the host is not part of a defect's identity.
+it. `HOST_ENV` below carries why, and why the host is not part of a defect's identity.
+A machine that shares its ledger with another names the shared directory in
+`POOL_POINTER`, and its shard lives there instead.
 
 Event names and their fields belong to the writers; this module only owns the format.
 `record` never raises -- it is called from hooks on paths where they are already
@@ -73,6 +75,20 @@ LEDGER_GLOB = f"{LEDGER_STEM}*.log"
 # The unsharded name every row was written to before a machine had one of its own. Kept
 # readable forever -- the ledger is append-only, and that history is most of it.
 LEDGER = LEDGER_DIR / f"{LEDGER_STEM}.log"
+
+# The pooled directory's address, one line naming an absolute path, and the transport
+# the shards were designed for without anything to point at it. Sharding made a pooled
+# directory conflict-free, but the only directory the shards could live in was the
+# checkout's whole `logs/`, which no machine can share: it also holds every job's own
+# per-machine artifact. So a second machine ran for a while with its defects on a ledger
+# nothing here read, and the fix pass took that for an empty backlog.
+#
+# A file in `logs/` rather than an environment variable, because every writer is not
+# started the same way -- a scheduled job, a hook under either agent runtime, a CLI --
+# and an address only some of them see splits one machine's rows across two places. It
+# also cannot leak out of a test: a test's ledger root is a scratch directory with no
+# pointer in it. `scripts/ledger-pool.py` writes it and moves the shard across.
+POOL_POINTER = LEDGER_DIR / "ledger-pool"
 
 # The repo this copy is vendored into -- devkit itself, when nobody vendored it. Read by
 # `ledger_path` on the branch where `$DEVKIT_DIR` says nothing.
@@ -352,10 +368,39 @@ def ledger_root(root: Path | None = None) -> Path | None:
     return base
 
 
+def pool_named(base: Path) -> Path | None:
+    """The pooled directory `base`'s pointer names, reachable or not; None when unset.
+
+    A relative or blank address is no address: it would resolve against whatever
+    directory the writer happened to start in.
+    """
+    try:
+        named = (base / POOL_POINTER).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    path = Path(named) if named else None
+    return path if path is not None and path.is_absolute() else None
+
+
+def pool_dir(base: Path) -> Path | None:
+    """The pooled directory when it is set and reachable; None otherwise.
+
+    Unreachable -- a synced folder not mounted yet, a share that is offline -- degrades
+    to the checkout's own `logs/` rather than losing the row, for `record`'s reason.
+    """
+    named = pool_named(base)
+    try:
+        return named if named is not None and named.is_dir() else None
+    except OSError:
+        return None
+
+
 def ledger_path(root: Path | None = None) -> Path | None:
     """The shard this machine appends to, or None when it has no ledger at all."""
     base = ledger_root(root)
-    return None if base is None else base / LEDGER_DIR / ledger_name()
+    if base is None:
+        return None
+    return (pool_dir(base) or base / LEDGER_DIR) / ledger_name()
 
 
 def ledger_paths(root: Path | None = None) -> list[Path]:
@@ -363,18 +408,21 @@ def ledger_paths(root: Path | None = None) -> list[Path]:
 
     The write target is always in the list even before it exists, so a caller can report
     "nothing open" against a real path rather than against nothing. Everything else in
-    the list is whatever is present: the legacy unsharded file, and any other machine's
-    shard that a sync has dropped in beside it.
+    the list is whatever is present: the legacy unsharded file, any other machine's shard
+    in the pooled directory, and whatever the checkout's own `logs/` still holds -- the
+    history from before the pool, and rows written while it was unreachable.
 
     Never raises, for `record`'s reasons -- an unreadable `logs/` degrades to this
     machine's own shard rather than taking a hook down with it.
     """
     target = ledger_path(root)
-    if target is None:
+    base = ledger_root(root)
+    if target is None or base is None:
         return []
     found = {target}
-    with contextlib.suppress(OSError):
-        found.update(p for p in target.parent.glob(LEDGER_GLOB) if p.is_file())
+    for where in {target.parent, base / LEDGER_DIR}:
+        with contextlib.suppress(OSError):
+            found.update(p for p in where.glob(LEDGER_GLOB) if p.is_file())
     return sorted(found)
 
 
