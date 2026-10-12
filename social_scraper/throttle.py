@@ -18,7 +18,9 @@ Every page load goes through `Throttle.acquire()` first and reports back through
   interval keeps knocking on a door the platform has already closed. A success closes
   it and resets the escalation. To an anonymous crawler the first challenge is a notice
   and the one after a cooldown an error (`Throttle.notice`): the pause is the response,
-  and a block only needs a person once it has outlived one.
+  and a block only needs a person once it has outlived one. On every platform, X
+  included, a rate limit is a notice when it is the only failed load in
+  `RATE_LIMIT_WINDOW`: pacing that is wrong hits the limit again within the day.
 
 The store is a protocol so the rules are unit-tested against memory and run against
 Postgres (`db.throttle_store.DbThrottleStore`).
@@ -54,6 +56,12 @@ ERROR_STREAK = 3
 # `block_cooldown`, and only waiting lifts a block nobody is logged in to clear. A
 # challenge again on the first load after that cooldown is a block that held.
 CHALLENGE_STREAK = 2
+# How far back `Throttle.notice` looks for another failed load before a rate limit stops
+# being a notice. The breaker's streak is not enough: a success resets it, so a limit hit
+# once a cycle with good loads between would never be an error. On 2026-10-12 X served
+# one rate-limit page after some 120 clean loads in 30 hours, at 6 an hour against a
+# budget of 8, which failed the scrape although only waiting the backoff lifted it.
+RATE_LIMIT_WINDOW = timedelta(hours=24)
 # The page wants a sign-in. Not the platform pushing back -- our own state -- so it is
 # logged but leaves the circuit breaker alone; the scraper decides what to skip.
 LOGIN_REQUIRED = "login_required"
@@ -105,6 +113,7 @@ class Block:
 
 class ThrottleStore(Protocol):
     def count_since(self, platform: str, since: datetime) -> int: ...
+    def failures_since(self, platform: str, since: datetime) -> int: ...
     def last_request_at(self, platform: str) -> datetime | None: ...
     def log_request(
         self, platform: str, at: datetime, kind: str, status: int | None, ok: bool
@@ -122,6 +131,9 @@ class MemoryThrottleStore:
 
     def count_since(self, platform: str, since: datetime) -> int:
         return sum(1 for p, at, *_ in self.requests if p == platform and at >= since)
+
+    def failures_since(self, platform: str, since: datetime) -> int:
+        return sum(1 for p, at, *_, ok in self.requests if p == platform and at >= since and not ok)
 
     def last_request_at(self, platform: str) -> datetime | None:
         times = [at for p, at, *_ in self.requests if p == platform]
@@ -215,13 +227,20 @@ class Throttle:
         """Whether a failed load just recorded as `outcome` is a notice, not an error, for
         an anonymous crawl: a timeout while the platform is not `failing`, or a challenge
         before `CHALLENGE_STREAK` -- counted across runs, from the breaker's persisted
-        streak. A logged-in crawl (X) reads `failing` itself: a challenge there is an
-        account a person has to unlock, and waiting a cooldown to say so loses a day."""
-        failures = self.store.get_block(self.policy.platform).consecutive_failures
+        streak -- or a rate limit that is the only failed load in `RATE_LIMIT_WINDOW`. A
+        logged-in crawl (X) reads `failing` itself and asks this of a rate limit only: a
+        challenge there is an account a person has to unlock, and waiting a cooldown to
+        say so loses a day."""
+        p = self.policy.platform
+        failures = self.store.get_block(p).consecutive_failures
         if outcome == TIMED_OUT:
             return failures < ERROR_STREAK
         if outcome == CHALLENGED:
             return failures < CHALLENGE_STREAK
+        if outcome == RATE_LIMITED:
+            # This load is already logged, so it is the one failure a notice allows.
+            since = self.clock() - RATE_LIMIT_WINDOW
+            return failures <= 1 and self.store.failures_since(p, since) <= 1
         return False
 
     def record(self, outcome: str, kind: str, status: int | None = None, detail: str = "") -> None:

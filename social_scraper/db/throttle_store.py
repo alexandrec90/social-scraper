@@ -32,6 +32,17 @@ class DbThrottleStore:
                 ).scalar_one()
             )
 
+    def failures_since(self, platform: str, since: datetime) -> int:
+        t = schema.request_log
+        with self.engine.connect() as conn:
+            return int(
+                conn.execute(
+                    select(func.count()).where(
+                        and_(t.c.platform == platform, t.c.at >= since, t.c.ok.is_(False))
+                    )
+                ).scalar_one()
+            )
+
     def last_request_at(self, platform: str) -> datetime | None:
         t = schema.request_log
         with self.engine.connect() as conn:

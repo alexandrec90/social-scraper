@@ -121,15 +121,23 @@ def test_run_steps_errors_and_goes_on(engine, clock):
     assert stats.errors[0].startswith("a: error") and "unparseable" in stats.errors[1]
 
 
-@pytest.mark.parametrize(("status", "where"), [(429, "errors"), (403, "notices")])
-def test_run_steps_stops_at_a_rate_limit_or_challenge(engine, clock, status, where):
+@pytest.mark.parametrize("status", [429, 403])
+def test_run_steps_stops_at_a_first_rate_limit_or_challenge_as_a_notice(engine, clock, status):
     browser = FakeBrowser(
         {"https://a": PageResult(status, "a"), "https://b": PageResult(200, "b", data=[])}
     )
     c = crawler(browser, engine, clock)
     stats = c.run_steps([("a", loader(c, "https://a")), ("b", loader(c, "https://b"))])
-    assert browser.calls == ["https://a"] and len(getattr(stats, where)) == 1
-    assert len(stats.errors) + len(stats.notices) == 1
+    assert browser.calls == ["https://a"] and len(stats.notices) == 1 and stats.errors == []
+
+
+def test_a_rate_limit_after_another_failed_load_that_day_is_an_error(engine, clock):
+    browser = FakeBrowser({"https://a": PageResult(429, "a")})
+    c = crawler(browser, engine, clock)
+    c.throttle.record(RATE_LIMITED, "k", 429, "HTTP 429")
+    c.throttle.record(OK, "k", 200)
+    stats = c.run_steps([("a", loader(c, "https://a"))])
+    assert stats.notices == [] and "HTTP 429" in stats.errors[0]
 
 
 def test_a_challenge_again_after_the_cooldown_is_an_error(engine, clock):

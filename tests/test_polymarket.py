@@ -431,7 +431,8 @@ def test_crawl_stops_on_a_rate_limit(engine, clock):
     browser.default = ok([earnings_event()])
     plan = Plan(scope())
     stats = PolymarketCrawler(browser, throttle(clock, mem), engine, plan, clock=clock).run()
-    assert browser.calls == [tag_url("earnings", 0)] and stats.errors
+    # The day's only failed load: a notice, the backoff is the response.
+    assert browser.calls == [tag_url("earnings", 0)] and stats.notices and not stats.errors
     assert mem.get_block(POLYMARKET).blocked_until is not None
 
 

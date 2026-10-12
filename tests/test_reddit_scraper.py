@@ -174,7 +174,18 @@ def test_run_stops_on_wall_without_raising(engine, universe):
     s, _ = scraper(engine, universe, browser)
     stats = s.run(("wallstreetbets", "stocks"))
     assert len(browser.calls) == 1
-    assert stats.errors
+    # The day's only failed load: the backoff is the response (`Throttle.notice`).
+    assert stats.notices and not stats.errors
+
+
+def test_a_rate_limit_again_within_the_day_is_an_error(engine, universe):
+    browser = FakeBrowser()
+    browser.default = PageResult(429, "u")
+    s, _ = scraper(engine, universe, browser)
+    s.throttle.record(RATE_LIMITED, "listing:new", 429, "HTTP 429")
+    s.throttle.record(OK, "listing:new", 200)
+    stats = s.run(("wallstreetbets",))
+    assert len(browser.calls) == 1 and "HTTP 429" in stats.errors[0]
 
 
 CHALLENGE = PageResult(
