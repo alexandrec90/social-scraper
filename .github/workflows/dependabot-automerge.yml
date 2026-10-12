@@ -140,10 +140,12 @@ jobs:
     # A `workflow_dispatch` completion counts: a lock repair pushes with GITHUB_TOKEN,
     # which raises no usable `pull_request` event, and dispatches the gate on the PR's
     # branch instead. The script accepts that run only on the PR's own head branch.
+    # A `push` completion is the default branch's own gate: its move is what left every
+    # open PR's mergeability undecided, so the script sweeps them all (`DEFAULT_BRANCH`).
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
-      contains(fromJSON('["pull_request", "workflow_dispatch"]'), github.event.workflow_run.event)
+      contains(fromJSON('["pull_request", "workflow_dispatch", "push"]'), github.event.workflow_run.event)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -157,6 +159,7 @@ jobs:
           # head has moved by then, and a mismatch declines.
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         # The runner's own Python and no install step, for the same reason the failure
         # reporter uses it: the script is stdlib-only, and a merge that had to be
         # provisioned first would fail whenever provisioning does.
