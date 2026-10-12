@@ -217,7 +217,10 @@ class WorktreeConfig:
     the console, which reads as an application bug rather than as a box that was
     provisioned half-configured.
 
-    Ports are the only thing devkit knows generically, so this is a template map
+    A seeded value naming the source's published port on a local host (`127.0.0.1:5433`)
+    is moved onto the box's port without a template (`worktree.rebase_seeded_ports`);
+    this map is for the rest -- a value whose port is implied, or one that must differ in
+    shape. Ports are the only thing devkit knows generically, so this is a template map
     rather than a fixed key: `${NAME}` expands against the managed env devkit
     already writes -- `COMPOSE_PROJECT_NAME` and one `<SERVICE>_HOST_PORT` per
     service in the port registry. A template naming something else is left out

@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.60",
+  "devkit_tag": "v0.11.61",
   "files": {
     ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -17,7 +17,7 @@
     "scripts/hooks/codex-hook-schema.json": "bfefbcc8c6b9b0d0ad23f548efc6abd5e2787fb156df7729b1c3cbb42005bda5",
     "scripts/hooks/codex-session-start.py": "3164654523f8db77183a4590cc9a709430e0927f04a3c884d1db39d15f526c2c",
     "scripts/hooks/enforce-capped-bash.py": "d3cc8a3ab854dcd334ece04c60d6dbc5b3eeefdf96c98ff617e448e2391e1710",
-    "scripts/hooks/harness_config.py": "8a2f494bb5c4e32e48c373ee9f036a10d32ef040cf72a167f1f9cc49ab61650c",
+    "scripts/hooks/harness_config.py": "493c53b6c4c089443402fd316ca96268d32a57d8bf36d4dcbe818133a3d51a07",
     "scripts/hooks/harness_events.py": "8e823b7a4c659aceaf592f9ff866b3d02b1f6ce90146c5bde842e3a8543a2355",
     "scripts/hooks/invoke-capped.py": "012e385bf2f25e8cae8ed5c18712cc3b1689c682725692cd63f5a4b8506dfc55",
     "scripts/hooks/lint-fix.py": "aeb87769b3ff58fcaf4c355dec76491274db84fc32abd891c9920c1708cefe84",
