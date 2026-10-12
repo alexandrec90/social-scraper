@@ -378,7 +378,7 @@ def test_a_cloudflare_page_is_a_challenge_and_ends_the_run(engine):
     s = make_scraper(engine, browser, forums_per_cycle=2)
     stats = s.run()
     assert len(browser.calls) == 1  # the second forum is not knocked on
-    assert "challenge" in stats.errors[0]
+    assert "challenge" in stats.notices[0] and stats.errors == []
     assert s.throttle.store.get_block(HFBOARDS).blocked_until is not None
 
 
@@ -388,7 +388,7 @@ def test_a_403_wall_is_a_challenge(engine):
         403, BASE, html="<html>blocked</html>", text="Verify you are human"
     )
     stats = make_scraper(engine, browser).run()
-    assert "challenge" in stats.errors[0]
+    assert "challenge" in stats.notices[0] and stats.errors == []
 
 
 def test_a_rate_limit_ends_the_run(engine):

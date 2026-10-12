@@ -16,7 +16,9 @@ Every page load goes through `Throttle.acquire()` first and reports back through
   so -- and a challenge again on the first request after it doubles the cooldown
   (capped at `block_cooldown_max`), because on an always-on machine a fixed retry
   interval keeps knocking on a door the platform has already closed. A success closes
-  it and resets the escalation.
+  it and resets the escalation. To an anonymous crawler the first challenge is a notice
+  and the one after a cooldown an error (`Throttle.notice`): the pause is the response,
+  and a block only needs a person once it has outlived one.
 
 The store is a protocol so the rules are unit-tested against memory and run against
 Postgres (`db.throttle_store.DbThrottleStore`).
@@ -47,6 +49,11 @@ TIMED_OUT = "timed_out"
 # Failed loads in a row at which a plain error pauses the platform, and at which a
 # timed-out load stops being a notice.
 ERROR_STREAK = 3
+# Failed loads in a row at which a challenge on an anonymous crawl stops being a notice
+# (`Throttle.notice`). The first is one: the breaker has already paused the platform for
+# `block_cooldown`, and only waiting lifts a block nobody is logged in to clear. A
+# challenge again on the first load after that cooldown is a block that held.
+CHALLENGE_STREAK = 2
 # The page wants a sign-in. Not the platform pushing back -- our own state -- so it is
 # logged but leaves the circuit breaker alone; the scraper decides what to skip.
 LOGIN_REQUIRED = "login_required"
@@ -203,6 +210,19 @@ class Throttle:
         """Whether the last `ERROR_STREAK` loads on this platform all failed -- across
         runs, from the breaker's persisted count -- so a timeout is no longer a notice."""
         return self.store.get_block(self.policy.platform).consecutive_failures >= ERROR_STREAK
+
+    def notice(self, outcome: str) -> bool:
+        """Whether a failed load just recorded as `outcome` is a notice, not an error, for
+        an anonymous crawl: a timeout while the platform is not `failing`, or a challenge
+        before `CHALLENGE_STREAK` -- counted across runs, from the breaker's persisted
+        streak. A logged-in crawl (X) reads `failing` itself: a challenge there is an
+        account a person has to unlock, and waiting a cooldown to say so loses a day."""
+        failures = self.store.get_block(self.policy.platform).consecutive_failures
+        if outcome == TIMED_OUT:
+            return failures < ERROR_STREAK
+        if outcome == CHALLENGED:
+            return failures < CHALLENGE_STREAK
+        return False
 
     def record(self, outcome: str, kind: str, status: int | None = None, detail: str = "") -> None:
         """Log the request and move the circuit breaker according to `outcome`."""

@@ -1,3 +1,4 @@
+import random
 from datetime import timedelta
 
 import pytest
@@ -27,6 +28,13 @@ T0 = NOW.timestamp()
 
 def ok(data):
     return PageResult(200, "https://www.reddit.com/x.json", data=data)
+
+
+class InOrder(random.Random):
+    """Crawls the subreddits in the order given, for a test about which come after."""
+
+    def shuffle(self, x) -> None:
+        return None
 
 
 def scraper(engine, universe, browser, clock=None, **kw):
@@ -225,7 +233,45 @@ def test_warm_up_failure_is_reported(engine, universe):
     s, _ = scraper(engine, universe, browser)
     with pytest.raises(FetchFailed):
         s.warm_up("wallstreetbets")
-    assert "warm-up" in s.stats.errors[0]
+    assert "warm-up" in s.stats.notices[0] and s.stats.errors == []
+
+
+def test_warm_up_failure_after_a_held_block_is_an_error(engine, universe):
+    browser = FakeBrowser({BASE: PageResult(403, "u", text="blocked")})
+    s, store = scraper(engine, universe, browser)
+    store.set_block("reddit", Block(None, "challenged: HTTP 403", 1), NOW)
+    with pytest.raises(FetchFailed):
+        s.warm_up("wallstreetbets")
+    assert "warm-up" in s.stats.errors[0] and s.stats.notices == []
+
+
+def test_a_first_403_mid_run_is_a_notice_that_ends_the_run(engine, universe):
+    """2026-10-12: one anonymous 403 after 21 good loads paused Reddit for its cooldown,
+    as it should, and also failed the scheduled scrape -- for a block only waiting lifts."""
+    listing = ok(reddit_listing([reddit_submission("a", T0)]))
+    browser = FakeBrowser(
+        {
+            BASE + "new.json": listing,
+            BASE + "comments.json": listing,
+            BASE + "top.json": listing,
+        }
+    )
+    stocks = "https://www.reddit.com/r/stocks/"
+    browser.pages[stocks + "new.json"] = PageResult(403, "u", text="Forbidden")
+    s, store = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets", "stocks", "thetagang"), InOrder(), warm=False)
+    assert stats.errors == [] and len(stats.notices) == 1
+    assert "r/stocks/new: challenged: HTTP 403" in stats.notices[0]
+    assert not any("thetagang" in c for c in browser.calls)  # the run stopped there
+    assert store.get_block("reddit").blocked_until is not None
+
+
+def test_a_403_on_the_first_load_after_the_cooldown_is_an_error(engine, universe):
+    browser = FakeBrowser({BASE + "new.json": PageResult(403, "u", text="Forbidden")})
+    s, store = scraper(engine, universe, browser)
+    store.set_block("reddit", Block(None, "challenged: HTTP 403", 1), NOW)
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert stats.notices == [] and len(stats.errors) == 1 and "403" in stats.errors[0]
 
 
 def test_error_on_one_listing_continues_with_the_next(engine, universe):

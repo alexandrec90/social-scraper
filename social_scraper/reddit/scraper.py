@@ -184,7 +184,7 @@ class RedditScraper:
             raise FetchFailed(outcome, detail)
         detail = f"JavaScript challenge not cleared after {WARM_UP_ATTEMPTS} loads"
         self.throttle.record(CHALLENGED, "warm_up", None, detail)
-        self.stats.errors.append(f"warm-up r/{sub}: {detail}")
+        self._failed(f"warm-up r/{sub}: {detail}", CHALLENGED)
         raise FetchFailed(CHALLENGED, detail)
 
     def _guarded(self, sub: str, listing: str, **kwargs) -> None:
@@ -203,8 +203,9 @@ class RedditScraper:
 
     def _failed(self, line: str, outcome: str) -> bool:
         """Record a failed load: a notice when it timed out and the platform is not
-        failing (`Throttle.failing`), else an error. True when it was a notice."""
-        if outcome == TIMED_OUT and not self.throttle.failing():
+        failing, or was a first challenge (`Throttle.notice`), else an error. True when
+        it was a notice."""
+        if self.throttle.notice(outcome):
             self.stats.notices.append(line)
             return True
         self.stats.errors.append(line)

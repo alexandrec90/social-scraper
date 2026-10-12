@@ -263,20 +263,21 @@ def test_a_page_that_is_not_a_stream_is_an_error_and_the_run_goes_on(engine, uni
 
 
 @pytest.mark.parametrize(
-    "wall",
+    ("wall", "where"),
     [
-        PageResult(429, STREAM),
-        PageResult(403, STREAM, text="Forbidden"),
-        PageResult(200, STREAM, text="Just a moment... Verify you are human"),
+        (PageResult(429, STREAM), "errors"),
+        # A first challenge is a notice: the cooldown is the response (`Throttle.notice`).
+        (PageResult(403, STREAM, text="Forbidden"), "notices"),
+        (PageResult(200, STREAM, text="Just a moment... Verify you are human"), "notices"),
     ],
 )
-def test_a_wall_or_rate_limit_stops_the_run(engine, universe, wall):
+def test_a_wall_or_rate_limit_stops_the_run(engine, universe, wall, where):
     browser = FakeBrowser({STREAM: wall, st.TRENDING_URL: ok(trending())})
     scraper, store = make(
         engine, universe, browser, stocktwits_symbols_per_cycle=2, watchlist="AAPL,NVDA"
     )
     stats = scraper.run()
-    assert len(stats.errors) == 1
+    assert len(getattr(stats, where)) == 1 and len(stats.errors) + len(stats.notices) == 1
     assert len(browser.calls) == 2  # the second symbol never loaded
     assert store.get_block(STOCKTWITS).blocked_until is not None
 

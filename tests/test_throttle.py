@@ -204,6 +204,37 @@ def test_a_timeout_is_a_plain_error_and_failing_is_the_pause_streak():
     assert not t.failing()
 
 
+def test_a_first_challenge_is_a_notice_and_one_after_the_cooldown_an_error():
+    t, _, _ = make()
+    t.record(CHALLENGED, "k", 403)
+    assert t.notice(CHALLENGED)
+    # The first load after the cooldown is challenged again: the block held.
+    t.record(CHALLENGED, "k", 403)
+    assert not t.notice(CHALLENGED)
+    t.record(OK, "k", 200)
+    t.record(CHALLENGED, "k", 403)
+    assert t.notice(CHALLENGED)
+
+
+def test_a_challenge_on_top_of_another_failure_is_an_error():
+    t, _, _ = make()
+    t.record(ERROR, "k", 502)
+    t.record(CHALLENGED, "k", 403)
+    assert not t.notice(CHALLENGED)
+
+
+def test_notice_reads_timeouts_as_failing_does_and_nothing_else_as_one():
+    t, _, _ = make()
+    t.record(TIMED_OUT, "k", None)
+    assert t.notice(TIMED_OUT)
+    for _ in range(ERROR_STREAK - 1):
+        t.record(TIMED_OUT, "k", None)
+    assert not t.notice(TIMED_OUT)
+    fresh, _, _ = make()
+    fresh.record(RATE_LIMITED, "k", 429)
+    assert not fresh.notice(RATE_LIMITED) and not fresh.notice(ERROR)
+
+
 def test_success_closes_the_circuit():
     t, store, _ = make()
     t.record(ERROR, "k", 500)
