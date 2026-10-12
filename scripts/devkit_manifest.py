@@ -141,6 +141,10 @@ MANIFEST: tuple[str, ...] = (
     # worktree with no `.venv` is told before its commit-time gate refuses the commit.
     "scripts/hooks/toolchain.py",
     "scripts/hooks/tests/test_toolchain.py",
+    # The leases that stop a run moving a tier's shared path-source sibling under another
+    # run on another pin; `toolchain` takes one per run, devkit's `worktree_env` per cut.
+    "scripts/hooks/sibling_pins.py",
+    "scripts/hooks/tests/test_sibling_pins.py",
     # The vendoring tool itself, so a project can drift-check / pull / push, and the
     # path lists it reads -- this file. Cut out of the tool because every entry here
     # was a raise of its `file_lines` baseline; the tool cannot run without it, so a
