@@ -20,6 +20,7 @@ from conftest import REPO_ROOT, load_module
 
 tc = load_module("scripts/hooks/toolchain.py")
 hc = load_module("scripts/hooks/harness_config.py")
+sp = load_module("scripts/hooks/sibling_pins.py")
 
 PYPROJECT = '[project]\nname = "probe"\nversion = "0.1.0"\n'
 
@@ -657,3 +658,172 @@ def test_a_failed_resync_is_reported_and_the_run_carries_on_unstamped(tmp_path, 
     assert "exited 1" in capsys.readouterr().err
     assert not (root / ".venv" / tc.SYNC_STAMP).exists()
     assert tc.stale_dependency(root) == root / "uv.lock", "still stale, so the next run retries"
+
+
+# --- a shared sibling held at CI's pin: `align_path_sources` ----------------------------
+
+SOURCED = PYPROJECT + '[tool.uv.sources]\nlake = { path = "../lake", editable = true }\n'
+
+
+def _gate(ref: str, repository: str = "owner/lake") -> str:
+    return (
+        "jobs:\n  gate:\n    steps:\n      - uses: actions/checkout@v4\n"
+        f"        with:\n          repository: {repository}\n          ref: {ref}\n"
+    )
+
+
+def _git(cwd: Path, *args: str) -> str:
+    # No hooks: this machine's global `core.hooksPath` may provision a tree `worktree add` cuts.
+    hookless = cwd.parent / "no-hooks"
+    hookless.mkdir(exist_ok=True)
+    done = subprocess.run(
+        ["git", "-c", f"core.hooksPath={hookless}", "-c", "commit.gpgsign=false", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout.strip()
+
+
+def _shared_lake(tmp_path: Path, pin_back: int = 1) -> tuple[Path, Path, list[str]]:
+    """A tier: tree `proj` and the shared `lake` worktree beside it, detached at the newest
+    of three commits, with the tree's gate pinning `lake` `pin_back` commits before it."""
+    repo = tmp_path / "lake-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    shas = []
+    for n in range(3):
+        (repo / "pyproject.toml").write_text(f'[project]\nname = "lake{n}"\n', encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", f"c{n}")
+        shas.append(_git(repo, "rev-parse", "HEAD"))
+    sibling = tmp_path / "tier" / "lake"
+    _git(repo, "worktree", "add", "-q", "--detach", str(sibling), shas[-1])
+    gate = {".github/workflows/pr-gate.yml": _gate(shas[-1 - pin_back])}
+    root = _checkout(tmp_path / "tier", {"pyproject.toml": SOURCED, **gate})
+    return root, sibling, shas
+
+
+def test_pinned_ref_reads_the_pr_gate_first_and_never_an_expression(tmp_path):
+    root = _checkout(
+        tmp_path,
+        {
+            ".github/workflows/nightly.yml": _gate("main"),
+            ".github/workflows/pr-gate.yml": _gate("abc123"),
+            ".github/workflows/other.yml": _gate("${{ inputs.ref }}", "owner/other"),
+        },
+    )
+    assert tc.pinned_ref(root, "lake") == "abc123"
+    assert tc.pinned_ref(root, "LAKE") == "abc123", "matched as GitHub matches a repo name"
+    assert tc.pinned_ref(root, "other") == "", "an expression is no pin"
+    assert tc.pinned_ref(root, "absent") == ""
+
+
+def test_a_shared_sibling_another_tree_moved_is_put_back_at_this_trees_pin(tmp_path, capsys):
+    """0db0d931 / 941b7470: ibkr's shared `../data-lake` was left at a sibling tree's pin,
+    so `uv run` relocked `uv.lock` against it and mypy failed what CI passed."""
+    root, sibling, shas = _shared_lake(tmp_path)
+    assert tc.align_path_sources(root, env={}) == (sibling,)
+    assert _git(sibling, "rev-parse", "HEAD") == shas[1]
+    assert "the commit this tree's CI pins" in capsys.readouterr().err
+    assert tc.align_path_sources(root, env={}) == (), "at the pin: nothing to move"
+    assert capsys.readouterr().err == ""
+
+
+def test_a_branch_checked_out_in_the_sibling_is_a_tasks_own_and_stays(tmp_path, capsys):
+    root, sibling, shas = _shared_lake(tmp_path)
+    _git(sibling, "switch", "-q", "-c", "task")
+    assert tc.align_path_sources(root, env={}) == ()
+    assert _git(sibling, "rev-parse", "HEAD") == shas[2]
+    err = capsys.readouterr().err
+    assert "is on a branch" in err
+    assert "do not `uv lock` here" in err, "the session is warned before it relocks"
+
+
+def test_a_sibling_with_local_changes_is_never_moved(tmp_path, capsys):
+    root, sibling, _shas = _shared_lake(tmp_path)
+    (sibling / "pyproject.toml").write_text("edited\n", encoding="utf-8")
+    assert tc.align_path_sources(root, env={}) == ()
+    assert (sibling / "pyproject.toml").read_text(encoding="utf-8") == "edited\n"
+    assert "has local changes" in capsys.readouterr().err
+
+
+def test_a_pin_the_sibling_cannot_resolve_is_named_not_raised(tmp_path, capsys):
+    root, sibling, shas = _shared_lake(tmp_path)
+    (root / ".github" / "workflows" / "pr-gate.yml").write_text(_gate("f" * 40), "utf-8")
+    assert tc.align_path_sources(root, env={}) == ()
+    assert _git(sibling, "rev-parse", "HEAD") == shas[2]
+    assert f"CI pins lake to {'f' * 40}, which" in capsys.readouterr().err
+
+
+def test_a_sibling_that_is_a_checkout_of_its_own_is_a_persons_and_stays(tmp_path, capsys):
+    tier = tmp_path / "tier"
+    lake = tier / "lake"
+    lake.mkdir(parents=True)
+    _git(lake, "init", "-q")
+    (lake / "f").write_text("x", encoding="utf-8")
+    _git(lake, "add", "-A")
+    _git(lake, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c")
+    gate = {".github/workflows/pr-gate.yml": _gate("f" * 40)}
+    root = _checkout(tier, {"pyproject.toml": SOURCED, **gate})
+    assert tc.align_path_sources(root, env={}) == ()
+    assert capsys.readouterr().err == ""
+
+
+def test_align_sibling_says_whether_it_moved_and_nothing_when_there_was_nothing_to(tmp_path):
+    root, sibling, shas = _shared_lake(tmp_path)
+    moved, line = tc.align_sibling(root, sibling)
+    assert moved and shas[1][:7] in line
+    assert tc.align_sibling(root, sibling) == (False, "")
+    assert tc.align_sibling(root, tmp_path / "absent") == (False, ""), "no tree: nothing to do"
+
+
+def test_a_run_leases_the_sibling_at_its_pin(tmp_path):
+    root, sibling, shas = _shared_lake(tmp_path)
+    tc.align_path_sources(root, env={})
+    lease = sp.lease_dir(sibling) / f"{os.getpid()}{sp.LEASE_SUFFIX}"
+    assert lease.read_text(encoding="utf-8").splitlines() == [shas[1], str(root)]
+
+
+def test_a_sibling_another_run_holds_at_another_pin_is_not_moved_under_it(tmp_path, capsys):
+    """d32ffcc2: a provision in one tree moved data-lake d32d4d5 -> c0aa963 while a run
+    in another tree on d32d4d5's pin was checking its lock against it."""
+    root, sibling, shas = _shared_lake(tmp_path)
+    # The parent of this test process: a pid that is alive and is not this run's.
+    holder = sp.hold(sp.lease_dir(sibling), shas[2], tmp_path / "tree-123", os.getppid())
+    moved, line = tc.align_sibling(root, sibling, wait=0)
+    assert not moved and _git(sibling, "rev-parse", "HEAD") == shas[2]
+    assert "tree-123" in line and "do not `uv lock` here" in line
+    sp.release(holder)
+    moved, line = tc.align_sibling(root, sibling, wait=0)
+    assert moved and _git(sibling, "rev-parse", "HEAD") == shas[1]
+
+
+def test_ci_checks_its_own_pin_out_and_is_never_aligned(tmp_path):
+    root, sibling, shas = _shared_lake(tmp_path)
+    assert tc.align_path_sources(root, env={"CI": "true"}) == ()
+    assert _git(sibling, "rev-parse", "HEAD") == shas[2]
+
+
+def test_a_runner_aligns_the_sibling_before_anything_syncs(tmp_path):
+    root, sibling, shas = _shared_lake(tmp_path)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=run) is None
+    assert _git(sibling, "rev-parse", "HEAD") == shas[1]
+    assert run.calls == [], "no tree venv runs here, so nothing is this run's to sync"
+
+
+def test_a_moved_sibling_resyncs_the_tree_venv_that_runs(tmp_path, monkeypatch, capsys):
+    """The venv was installed from the sibling's metadata at the wrong commit, so a move
+    is as much a change to what it holds as a newer lock is."""
+    root = _checkout(tmp_path, LOCKED)
+    _venv(root, age=-60)
+    assert tc.stale_dependency(root) is None
+    moved = tmp_path / "lake"
+    monkeypatch.setattr(tc, "align_path_sources", lambda r, e: (moved,))
+    monkeypatch.setattr(tc, "runs_tree_venv", lambda r: r == root)
+    run = FakeRun(root)
+    assert tc.rerun_target(root, "json", env={}, run=run) is None
+    assert [cmd for cmd, _ in run.calls] == [["uv", "sync", "--all-extras", "--all-groups"]]
+    assert ".venv predates pyproject.toml; re-syncing it" in capsys.readouterr().err

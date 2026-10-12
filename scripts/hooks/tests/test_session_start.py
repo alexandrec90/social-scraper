@@ -20,6 +20,7 @@ argv to a log, which is what the assertions read.
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import stat
@@ -74,6 +75,53 @@ def _write_exec(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+HOOKS = REPO_ROOT / "scripts" / "hooks"
+# The modules the script runs by path; everything they import is found from these.
+ENTRY_HELPERS = ("harness_config.py", "toolchain.py")
+
+
+def hook_helpers(entries: tuple[str, ...] = ENTRY_HELPERS) -> set[str]:
+    """`entries` plus every sibling module under `scripts/hooks/` they import, transitively.
+
+    Read off the imports rather than listed: a hand-kept list went stale the day
+    `toolchain.py` gained `import sibling_pins`, and every report then died on an
+    ImportError that the tests read as an empty output.
+    """
+    found: set[str] = set()
+    pending = list(entries)
+    while pending:
+        name = pending.pop()
+        if name in found:
+            continue
+        found.add(name)
+        tree = ast.parse((HOOKS / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                modules = [node.module]
+            else:
+                continue
+            pending += [f"{m}.py" for m in modules if (HOOKS / f"{m}.py").is_file()]
+    return found
+
+
+def test_hook_helpers_follow_imports_transitively(tmp_path, monkeypatch):
+    for name, body in {
+        "a.py": "import b\nimport os\n",
+        "b.py": "from c import x\n",
+        "c.py": "import a\nx = 1\n",
+        "d.py": "",
+    }.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "HOOKS", tmp_path)
+    assert hook_helpers(("a.py",)) == {"a.py", "b.py", "c.py"}
+
+
+def test_hook_helpers_cover_what_toolchain_imports():
+    assert {"harness_config.py", "toolchain.py", "worktree_tiers.py"} <= hook_helpers()
+
+
 def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Path]:
     """A throwaway project plus a stub bin dir. Returns (project, log, env_file)."""
     project = tmp_path / "proj"
@@ -87,10 +135,8 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path, Pa
     # and the missing-toolchain ladder are exercised rather than faked -- plus every
     # vendored module those two import, or the report dies on an ImportError instead.
     (project / "scripts" / "hooks").mkdir(parents=True, exist_ok=True)
-    for helper in ("harness_config.py", "toolchain.py", "worktree_tiers.py"):
-        shutil.copy(
-            REPO_ROOT / "scripts" / "hooks" / helper, project / "scripts" / "hooks" / helper
-        )
+    for helper in hook_helpers():
+        shutil.copy(HOOKS / helper, project / "scripts" / "hooks" / helper)
 
     log = tmp_path / "calls.log"
     stub_bin = tmp_path / "bin"

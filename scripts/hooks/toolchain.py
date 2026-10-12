@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -60,6 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_config
+import sibling_pins
 import worktree_tiers
 
 # The Python toolchain, in the order the ladder reads them.
@@ -257,6 +259,160 @@ def missing_path_sources(root: Path) -> tuple[Gap, ...]:
     )
 
 
+# --- the sibling a path source names, held at the commit this tree's CI pins ----
+
+WORKFLOWS = Path(".github") / "workflows"
+# A step's start: a sequence item. Every key of one checkout step is read between two.
+STEP_START = re.compile(r"^\s*-\s", re.M)
+# `actions/checkout`'s two inputs that name another repo and where it stands.
+CHECKOUT_KEY = re.compile(r"^\s*(repository|ref)\s*:\s*(.*?)\s*(?:\s#.*)?$")
+# Variables git reads ahead of `-C`: a runner started by a pre-commit hook inherits
+# `GIT_INDEX_FILE` and would aim every sibling command at this tree's repository.
+GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def pinned_ref(root: Path, name: str) -> str:
+    """The ref `root`'s own CI checks its sibling repo `name` out at; "" if none pins it.
+
+    The same reading as devkit's `worktree_env.pinned_ref`, which cuts the sibling and is
+    installed alone, so it cannot import this; `tests/test_worktree_env.py` holds the two
+    to one answer. `pr-gate*` is read first, as a nightly may check the same repo out at
+    its default branch on purpose; a ref that is a workflow expression is no pin.
+    """
+    try:
+        files = sorted(
+            (root / WORKFLOWS).glob("*.y*ml"),
+            key=lambda path: (not path.name.startswith("pr-gate"), path.name),
+        )
+    except OSError:
+        return ""
+    for workflow in files:
+        try:
+            text = workflow.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for step in STEP_START.split(text):
+            keys: dict[str, str] = {}
+            for line in step.splitlines():
+                found = CHECKOUT_KEY.match(line)
+                if found:
+                    keys.setdefault(found.group(1), found.group(2).strip("'\""))
+            repo = keys.get("repository", "").rstrip("/").rsplit("/", 1)[-1]
+            ref = keys.get("ref", "")
+            if repo.lower() == name.lower() and ref and "${{" not in ref:
+                return ref
+    return ""
+
+
+def _git(where: Path, *args: str, timeout: float = 10) -> str:
+    """`git -C where <args>`'s stripped stdout; "" when it fails or cannot run."""
+    env = {k: v for k, v in os.environ.items() if k not in GIT_REPO_VARS}
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(where), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+# Spelled apart from any f-string: a doubled brace there reads as an unrendered template
+# tag to the generated-project check, which scans every vendored file.
+PEEL_COMMIT = "^{commit}"
+
+
+def _commit_of(where: Path, pin: str) -> str:
+    for ref in (f"origin/{pin}", pin):
+        found = _git(where, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT)
+        if found:
+            return found
+    return ""
+
+
+def _warning(target: Path) -> str:
+    have = _git(target, "rev-parse", "HEAD")
+    return f"do not `uv lock` here until it is: the lock would be resolved against {have[:7]}"
+
+
+def align_sibling(root: Path, target: Path, wait: float = sibling_pins.WAIT) -> tuple[bool, str]:
+    """Hold the sibling tree `target` at the commit `root`'s CI pins it to, for this run.
+
+    `(moved, line)`: whether it moved, and what to say -- "" when there is nothing to.
+    Only a linked worktree that is detached and clean is moved: that is the tree
+    devkit's `worktree_env` cut for every worktree of the tier to share. A checkout of
+    its own is a person's, and a branch checked out there is a task's. Once there, the
+    run leases it (`sibling_pins.claim`), and a move waits for every other run leasing it
+    at another commit -- it is the one tree for the whole tier, so moving it under a
+    running one is what broke that run (d32ffcc2).
+    """
+    if not (target / ".git").is_file():
+        return False, ""
+    pin = pinned_ref(root, target.name)
+    if not pin:
+        return False, ""
+    want = _commit_of(target, pin)
+    if not want:
+        _git(target, "fetch", "--quiet", "origin", timeout=60)
+        want = _commit_of(target, pin)
+    have = _git(target, "rev-parse", "HEAD")
+    if not want:
+        return False, f"CI pins {target.name} to {pin}, which {target} lacks; {_warning(target)}"
+    if want != have and _git(target, "symbolic-ref", "-q", "HEAD"):
+        return False, f"{target} is on a branch, not at CI's pin {pin}; {_warning(target)}"
+    if want != have and _git(target, "status", "--porcelain", "--untracked-files=no"):
+        return False, (
+            f"{target} has local changes, so it is not at CI's pin {pin}; {_warning(target)}"
+        )
+
+    def move() -> bool:
+        _git(target, "checkout", "--quiet", "--detach", want, timeout=60)
+        return _git(target, "rev-parse", "HEAD") == want
+
+    shared = sibling_pins.Sibling(target, want, lambda: _git(target, "rev-parse", "HEAD"), move)
+    done = sibling_pins.claim(shared, root, sibling_pins.Pace(wait=wait))
+    if done.blocked:
+        holders = "; ".join(lease.line for lease in done.blocked)
+        return False, f"{target} is held by {holders}, not at CI's pin {pin}; {_warning(target)}"
+    if done.held is None:
+        return False, f"could not move {target} to CI's pin {pin}; {_warning(target)}"
+    if not done.moved:
+        return False, ""
+    return True, f"moved {target} from {have[:7]} to {want[:7]}, the commit this tree's CI pins"
+
+
+def align_path_sources(root: Path, env: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    """Hold every sibling a path source names at this tree's CI pin; the ones moved.
+
+    ibkr_trader's `.claude/worktrees` all resolve `../data-lake` to one shared tree, and
+    `worktree_env` moved it to a tree's pin only when that tree was cut -- so cutting a
+    tree off an older branch moved it back under every other, and a later `uv run` there
+    relocked `uv.lock` against the wrong data-lake and failed mypy that CI passed
+    (0db0d931, 941b7470). Run before anything syncs, every run re-checks it, and holds
+    a lease on it for as long as this process lives, so a run in another tree on another
+    pin waits rather than moving it under this one (`sibling_pins`, d32ffcc2). What
+    could not be put right is said on stderr, never raised. CI checks the pin out itself.
+    """
+    environ = os.environ if env is None else env
+    if environ.get("CI"):
+        return ()
+    moved: list[Path] = []
+    for rel in path_sources(root):
+        target = Path(os.path.normpath(root / rel))
+        did, line = align_sibling(root, target)
+        if line:
+            print(f"toolchain: {line}", file=sys.stderr)
+        if did:
+            moved.append(target)
+    return tuple(moved)
+
+
 def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> tuple[Gap, ...]:
     """Every gap in this checkout's toolchain. Empty when it is provisioned.
 
@@ -374,14 +530,16 @@ def runs_tree_venv(root: Path, prefix: str | None = None) -> bool:
         return False
 
 
-def resync_if_stale(root: Path, run: Runner = subprocess.run) -> bool:
+def resync_if_stale(root: Path, run: Runner = subprocess.run, moved: Sequence[Path] = ()) -> bool:
     """Re-sync `root`'s existing `.venv` when a dependency file changed since its install.
 
-    True when a sync ran clean. A failed one is printed and the runner carries on, to
-    fail as it would have; the import caches are dropped so a package the sync just
-    added is importable by the interpreter that asked for it.
+    `moved` -- siblings `align_path_sources` just moved -- counts as such a change: their
+    metadata is part of what `.venv` was installed from. True when a sync ran clean. A
+    failed one is printed and the runner carries on, to fail as it would have; the
+    import caches are dropped so a package the sync just added is importable by the
+    interpreter that asked for it.
     """
-    stale = stale_dependency(root)
+    stale = stale_dependency(root) or next((m / "pyproject.toml" for m in moved), None)
     if stale is None or not venv_python(root).is_file():
         return False
     synced = provision_python(root, run=run, stale=stale)
@@ -405,14 +563,17 @@ def rerun_target(
     Whichever way the run goes, a tree `.venv` it is about to use -- this interpreter, or
     the re-run's -- is re-synced first when its lock moved on since (`stale_dependency`):
     `.venv/Scripts/python.exe scripts/run-tests.py` after a merge that added a package
-    used to fail on the import until someone ran `uv sync` by hand.
+    used to fail on the import until someone ran `uv sync` by hand. Before either, a
+    shared sibling a path source names is put back at this tree's CI pin
+    (`align_path_sources`), since the sync resolves against it.
     """
     environ = os.environ if env is None else env
     if environ.get(RERUN_ENV):
         return None
+    moved = align_path_sources(root, environ)
     lacking = not has_module(module)
     if (lacking or runs_tree_venv(root)) and not environ.get("CI"):
-        resync_if_stale(root, run)
+        resync_if_stale(root, run, moved)
     if not lacking:
         return None
     target = venv_python(root)
