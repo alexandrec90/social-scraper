@@ -463,6 +463,40 @@ def test_timeouts_in_a_row_are_an_error_and_end_the_cycle(engine, universe):
     assert len(stats.notices) == ERROR_STREAK - 1
 
 
+RATE_LIMIT_PAGE = PageResult(200, "https://x.com/bob", text="Something went wrong. Try reloading.")
+
+
+def rate_limited_after_a_search(engine, universe):
+    """A cycle whose search reads and whose every profile is X's rate-limit page."""
+    with engine.begin() as conn:
+        accounts.add_seeds(conn, ["alice", "bob", "carol"], NOW)
+    browser = FakeBrowser({"https://x.com/search": page(x_tweet_classic("1", "$NVDA", ALICE))})
+    browser.default = RATE_LIMIT_PAGE
+    s = scraper(engine, universe, browser, pages=4, search_share=0.25, watchlist=("NVDA",))
+    return s, browser
+
+
+def test_one_rate_limit_page_after_clean_loads_is_a_notice_that_ends_the_cycle(engine, universe):
+    """2026-10-12 20:12 UTC: a search and a profile read, the next profile was X's
+    rate-limit page, and the scrape failed although the breaker had paused X."""
+    s, browser = rate_limited_after_a_search(engine, universe)
+    stats = s.run()
+    assert stats.errors == [] and stats.searches == 1
+    assert len(stats.notices) == 1 and "rate-limit page" in stats.notices[0]
+    assert len(browser.calls) == 2  # the search, then the one profile X refused
+    assert s.throttle.store.get_block("x").blocked_until is not None
+
+
+def test_a_second_rate_limit_within_the_day_fails_the_cycle(engine, universe):
+    s, _ = rate_limited_after_a_search(engine, universe)
+    # An earlier cycle's rate limit, and a success since that reset the breaker's streak.
+    s.throttle.record(RATE_LIMITED, "timeline", 200, "rate-limit page")
+    s.throttle.record(OK, "timeline", 200)
+    stats = s.run()
+    assert len(stats.errors) == 1 and "rate-limit page" in stats.errors[0]
+    assert stats.notices == []
+
+
 def test_run_stats_start_empty():
     stats = scraper_mod.XRunStats()
     assert stats.requests == 0 and stats.errors == [] and stats.ingest.stored == 0

@@ -395,7 +395,8 @@ def test_a_rate_limit_ends_the_run(engine):
     browser = FakeBrowser()
     browser.default = PageResult(429, BASE)
     stats = make_scraper(engine, browser, forums_per_cycle=2).run()
-    assert len(browser.calls) == 1 and "HTTP 429" in stats.errors[0]
+    # The day's only failed load: a notice, the backoff is the response.
+    assert len(browser.calls) == 1 and "HTTP 429" in stats.notices[0] and not stats.errors
 
 
 def test_an_unparseable_forum_is_an_error_and_the_run_goes_on(engine):

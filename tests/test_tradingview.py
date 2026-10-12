@@ -214,8 +214,9 @@ def test_non_ideas_payload_is_an_error_and_the_run_goes_on(engine, universe):
 @pytest.mark.parametrize(
     ("result", "outcome", "where"),
     [
-        (PageResult(429, "u"), RATE_LIMITED, "errors"),
-        # A first challenge is a notice: the cooldown is the response (`Throttle.notice`).
+        # The day's only failed load, and a first challenge, are notices: the pause is
+        # the response (`Throttle.notice`).
+        (PageResult(429, "u"), RATE_LIMITED, "notices"),
         (PageResult(403, "u"), CHALLENGED, "notices"),
         (
             PageResult(200, "u", text="Just a moment... Verify you are human"),

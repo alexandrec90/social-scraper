@@ -231,8 +231,53 @@ def test_notice_reads_timeouts_as_failing_does_and_nothing_else_as_one():
         t.record(TIMED_OUT, "k", None)
     assert not t.notice(TIMED_OUT)
     fresh, _, _ = make()
-    fresh.record(RATE_LIMITED, "k", 429)
-    assert not fresh.notice(RATE_LIMITED) and not fresh.notice(ERROR)
+    fresh.record(ERROR, "k", 502)
+    assert not fresh.notice(ERROR)
+
+
+def test_the_only_failed_load_of_the_day_being_a_rate_limit_is_a_notice():
+    # 2026-10-12: one X rate-limit page after a day of clean loads failed the scrape.
+    clock = Clock(NOW)
+    t, _, _ = make(clock)
+    t.record(OK, "k", 200)
+    t.record(RATE_LIMITED, "k", 200, "rate-limit page")
+    assert t.notice(RATE_LIMITED)
+
+
+def test_a_rate_limit_again_after_the_backoff_is_an_error():
+    t, _, _ = make()
+    t.record(RATE_LIMITED, "k", 429)
+    t.record(RATE_LIMITED, "k", 429)
+    assert not t.notice(RATE_LIMITED)
+
+
+def test_a_rate_limit_each_cycle_with_good_loads_between_is_an_error():
+    # A success resets the breaker's streak; the day's failures still see the pattern.
+    clock = Clock(NOW)
+    t, store, _ = make(clock)
+    t.record(RATE_LIMITED, "k", 429)
+    clock.now += timedelta(hours=1)
+    t.record(OK, "k", 200)
+    t.record(RATE_LIMITED, "k", 429)
+    assert store.get_block("x").consecutive_failures == 1
+    assert not t.notice(RATE_LIMITED)
+
+
+def test_a_rate_limit_after_a_failure_outside_the_window_is_a_notice():
+    clock = Clock(NOW)
+    t, _, _ = make(clock)
+    t.record(ERROR, "k", 502)
+    t.record(OK, "k", 200)
+    clock.now += throttle_mod.RATE_LIMIT_WINDOW + timedelta(minutes=1)
+    t.record(RATE_LIMITED, "k", 429)
+    assert t.notice(RATE_LIMITED)
+
+
+def test_a_rate_limit_on_top_of_another_failed_load_is_an_error():
+    t, _, _ = make()
+    t.record(TIMED_OUT, "k", None)
+    t.record(RATE_LIMITED, "k", 429)
+    assert not t.notice(RATE_LIMITED)
 
 
 def test_success_closes_the_circuit():

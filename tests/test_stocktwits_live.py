@@ -265,8 +265,9 @@ def test_a_page_that_is_not_a_stream_is_an_error_and_the_run_goes_on(engine, uni
 @pytest.mark.parametrize(
     ("wall", "where"),
     [
-        (PageResult(429, STREAM), "errors"),
-        # A first challenge is a notice: the cooldown is the response (`Throttle.notice`).
+        # The day's only failed load, and a first challenge, are notices: the pause is
+        # the response (`Throttle.notice`).
+        (PageResult(429, STREAM), "notices"),
         (PageResult(403, STREAM, text="Forbidden"), "notices"),
         (PageResult(200, STREAM, text="Just a moment... Verify you are human"), "notices"),
     ],
