@@ -23,7 +23,9 @@ recover is *why* the change was made, so that is the only thing it is asked for.
      write it for the reader who did not watch the work.
 3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
    you the wrong way -- add one line per thing to `logs/friction.md`, keeping the lines
-   already there: another session in this tree may have written them. The pass files
+   already there: another session in this tree may have written them. Write each
+   quoting the harness words you saw, not your paraphrase of them: the line is filed as
+   written, and the session sent at it has nothing else. The pass files
    each on the harness-defect ledger, where the devkit session fixes it. End a line whose
    cause you fixed in this tree with `fixed on this branch`: the pass files it as settled
    by this branch, and reopens it only if the branch never merges.
