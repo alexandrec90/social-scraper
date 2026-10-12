@@ -326,6 +326,27 @@ def test_branch_mode_asks_the_api_for_that_branch_rather_than_scanning():
     assert listings, run.calls
 
 
+def test_a_gate_completed_on_the_default_branch_sweeps_every_open_pr():
+    """devkit #629, 2026-10-12: its gate went green 40 seconds after #635 moved `main`,
+    `mergeable` was still undecided after every re-read, and it sat for the hourly pass.
+    What strands a PR is the base moving, and the base's own gate completing is the next
+    moment the answer is decided -- so that completion sweeps, rather than looking for
+    PRs whose head is `main`. The gated commit is `main`'s, never any PR's head."""
+    run = FakeRun(world(prs=[pr(head={"sha": SHA, "ref": "agent/x"})]))
+    main_tip = "0" * 40
+    code = merger.main(env(HEAD_BRANCH="main", RUN_HEAD_SHA=main_tip, DEFAULT_BRANCH="main"), run)
+    assert code == 0
+    assert len(run.merges()) == 1, run.calls
+    assert not [c for c in run.calls if any("head=owner:main" in a for a in c)]
+
+
+def test_without_a_default_branch_a_main_completion_stays_branch_mode():
+    """An older workflow copy passes no `DEFAULT_BRANCH`: the run keeps its old meaning."""
+    run = FakeRun(world())
+    merger.main(env(HEAD_BRANCH="main", RUN_HEAD_SHA=SHA), run)
+    assert [c for c in run.calls if any("head=owner:main" in a for a in c)]
+
+
 # --- failure handling -------------------------------------------------------------
 
 

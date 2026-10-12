@@ -227,9 +227,14 @@ def candidates(env: dict[str, str], repo: str, run) -> tuple[list[dict], str]:
 
     Branch mode is the `workflow_run` path: the event names a branch, and only that
     branch's PR is in scope. Sweep mode is the scheduled retry, where every open
-    open PR is a candidate because there is no event to narrow it.
+    PR is a candidate because there is no event to narrow it -- and so is a gate that
+    completed on the default branch (`DEFAULT_BRANCH`): the base moving is what leaves
+    every open PR's `mergeable` undecided at its own gate's completion, and the base's
+    gate finishing is the next moment it is decided (devkit #629 waited an hour on it).
     """
     branch = env.get("HEAD_BRANCH", "").strip()
+    if branch and branch == env.get("DEFAULT_BRANCH", "").strip():
+        return open_prs(repo, run), f"sweep after {branch!r} moved"
     if branch:
         return prs_for_branch(repo, branch, run), f"branch {branch!r}"
     return open_prs(repo, run), "sweep"
@@ -252,7 +257,8 @@ def main(env: dict[str, str] | None = None, run=None, sleep=time.sleep) -> int:
         print(f"No open {AUTOMERGE_LABEL!r}-labelled PRs for {scope}; nothing to do.")
         return 0
 
-    gated_sha = env.get("RUN_HEAD_SHA", "").strip()
+    # Only branch mode has a gated commit of the PR's: a sweep's run gated the base.
+    gated_sha = "" if scope.startswith("sweep") else env.get("RUN_HEAD_SHA", "").strip()
     merged = 0
     for pr in considered:
         number = pr.get("number")

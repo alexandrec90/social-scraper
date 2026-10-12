@@ -257,6 +257,23 @@ def test_the_merge_job_is_gated_by_label_not_by_author():
     )
 
 
+def test_a_gate_on_the_default_branch_reaches_the_merge_job_as_a_sweep():
+    """The default branch's gate runs on `push`, and each completion follows the base
+    moving -- which is what leaves every open PR's `mergeable` undecided at its own gate's
+    completion. The merge job must wake for it and know it is the default branch, or a
+    green PR waits for the hourly pass (devkit #629, 2026-10-12)."""
+    text = _read(WORKFLOWS_DIR / AUTOMERGE)
+    merge_if = re.search(r"merge:\n(?:.*\n)*?    if: >-\n((?:      .*\n)+)", text)
+    assert merge_if and '"push"' in merge_if.group(1), (
+        f"{AUTOMERGE}'s merge job does not admit a `push` gate run, so the default "
+        "branch's own gate completion never sweeps the PRs its move left undecided."
+    )
+    assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in text, (
+        f"{AUTOMERGE} does not tell merge-dependabot-prs.py the default branch, so it "
+        "reads a completion there as a PR branch with no PR."
+    )
+
+
 def test_dependency_update_prs_are_assigned_to_someone():
     """Otherwise they are visible in no aggregate view, in any repo.
 
