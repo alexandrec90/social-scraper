@@ -139,6 +139,11 @@ The added platforms have the same guards with their own defaults (`config.py`,
 150/day; HFBoards 8-20 s, 30/h, 450/day; Bluesky 2-6 s, 40/h, 800/day; Polymarket
 1-3 s, 150/h, 2500/day. A Cloudflare interstitial ("Just a moment...") is a challenge.
 
+Every platform but X is read anonymously, and on those a first challenge is a notice in
+the run report, not a failed cycle: the pause is the whole response, and nobody can lift the
+block sooner. A challenge again on the first load after the pause fails the cycle. On X
+the first one fails it, because a locked account waits for a person to unlock it.
+
 Pages are read from the data the site loads for itself -- Reddit's listing JSON, X's
 GraphQL responses and server-streamed first page -- never scraped from the DOM. Each
 platform has its own browser profile under `data/browser-profiles/`, so a problem on

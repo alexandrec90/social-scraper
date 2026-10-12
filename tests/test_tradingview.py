@@ -212,20 +212,25 @@ def test_non_ideas_payload_is_an_error_and_the_run_goes_on(engine, universe):
 
 
 @pytest.mark.parametrize(
-    ("result", "outcome"),
+    ("result", "outcome", "where"),
     [
-        (PageResult(429, "u"), RATE_LIMITED),
-        (PageResult(403, "u"), CHALLENGED),
-        (PageResult(200, "u", text="Just a moment... Verify you are human"), CHALLENGED),
+        (PageResult(429, "u"), RATE_LIMITED, "errors"),
+        # A first challenge is a notice: the cooldown is the response (`Throttle.notice`).
+        (PageResult(403, "u"), CHALLENGED, "notices"),
+        (
+            PageResult(200, "u", text="Just a moment... Verify you are human"),
+            CHALLENGED,
+            "notices",
+        ),
     ],
 )
-def test_wall_or_rate_limit_ends_the_run(engine, universe, result, outcome):
+def test_wall_or_rate_limit_ends_the_run(engine, universe, result, outcome, where):
     nvda = tv.ideas_url("NVDA")
     browser = FakeBrowser({AAPL_URL: result, nvda: ok(tv_payload(tv_idea(5)))})
     crawler, store, _ = make(engine, universe, browser)
     stats = crawler.run(["AAPL", "NVDA"])
     assert browser.calls == [AAPL_URL]
-    assert stats.errors and not stored(engine)
+    assert getattr(stats, where) and not stored(engine)
     block = store.get_block(TRADINGVIEW)
     assert block.blocked_until is not None and block.reason.startswith(outcome)
 

@@ -19,6 +19,7 @@ from social_scraper.throttle import (
     OK,
     RATE_LIMITED,
     TIMED_OUT,
+    Block,
     MemoryThrottleStore,
     Policy,
     Throttle,
@@ -120,14 +121,23 @@ def test_run_steps_errors_and_goes_on(engine, clock):
     assert stats.errors[0].startswith("a: error") and "unparseable" in stats.errors[1]
 
 
-@pytest.mark.parametrize("status", [429, 403])
-def test_run_steps_stops_at_a_rate_limit_or_challenge(engine, clock, status):
+@pytest.mark.parametrize(("status", "where"), [(429, "errors"), (403, "notices")])
+def test_run_steps_stops_at_a_rate_limit_or_challenge(engine, clock, status, where):
     browser = FakeBrowser(
         {"https://a": PageResult(status, "a"), "https://b": PageResult(200, "b", data=[])}
     )
     c = crawler(browser, engine, clock)
     stats = c.run_steps([("a", loader(c, "https://a")), ("b", loader(c, "https://b"))])
-    assert browser.calls == ["https://a"] and len(stats.errors) == 1
+    assert browser.calls == ["https://a"] and len(getattr(stats, where)) == 1
+    assert len(stats.errors) + len(stats.notices) == 1
+
+
+def test_a_challenge_again_after_the_cooldown_is_an_error(engine, clock):
+    browser = FakeBrowser({"https://a": PageResult(403, "a")})
+    c = crawler(browser, engine, clock)
+    c.throttle.store.set_block(c.platform, Block(None, "challenged: HTTP 403", 1), NOW)
+    stats = c.run_steps([("a", loader(c, "https://a"))])
+    assert stats.notices == [] and "challenged" in stats.errors[0]
 
 
 def test_a_timeout_is_a_notice_until_the_platform_keeps_failing(engine, clock):
