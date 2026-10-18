@@ -204,6 +204,12 @@ hours, budget spent, circuit breaker open). It first waits a random 0-20% of
 cycle, counted from the scheduler's fire when devkit names it (`DEVKIT_FIRED_AT`) and
 from the command's own start otherwise, so a run ends before the next fire is due.
 
+The scheduled collector runs on one PC at a time, and moves to the other one with its
+database: run devkit's `collectors.py move social-scraper --to HOST`, which calls
+`scripts/handoff.py` to carry the dump through the lake bucket. Browser logins do not
+travel, so redo `login x` on the receiving PC. See
+[`docs/operations/collector-handoff.md`](docs/operations/collector-handoff.md).
+
 ## Backfilling Reddit history
 
 The crawler only sees what a listing still shows, so on its own the lake starts the day
@@ -395,7 +401,9 @@ social_scraper/
   db/                     operational tables (Postgres; SQLite in tests)
   export.py, archive/     lake writer, catalog, local/S3 stores, DuckDB read lens
 tests/                    tests (SQLite always; Postgres too when DATABASE_URL is one)
-scripts/                  project scripts (Python, each with tests)
+scripts/                  project scripts (Python, each with tests); handoff.py moves the
+                          collector's database to the other PC
+docs/operations/          runbooks (collector-handoff.md)
 scripts/hooks/            vendored agent harness — edit upstream in devkit
 .devkit.toml              the per-project harness seam (NOT vendored)
 docker-compose.yml        the local stack

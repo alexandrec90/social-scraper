@@ -216,14 +216,21 @@ class S3Store:
 
     def lock_path(self, key: str) -> Path:
         # S3 has no lock primitive, so the lock is a machine-local file named for the
-        # bucket object: every writer on this machine -- the one data PC -- takes turns.
-        # Writers on two machines would not; nothing runs that way today.
+        # bucket object: every writer on this machine takes turns. Writers on two machines
+        # would not. The collector runs on one PC at a time, and moves between the two
+        # only through `scripts/handoff.py` (docs/operations/collector-handoff.md), which
+        # is what keeps that true.
         digest = hashlib.sha256(f"{self.name}/{key}".encode()).hexdigest()[:32]
         return Path(tempfile.gettempdir()) / "social-scraper-locks" / (digest + LOCK_SUFFIX)
 
 
-def make_s3_client(settings: Settings) -> Any:
-    """A boto3 S3 client from the `ARCHIVE_S3_*` settings. Makes no request."""
+def make_s3_client(settings: Settings, config: Any = None) -> Any:
+    """A boto3 S3 client from the `ARCHIVE_S3_*` settings. Makes no request.
+
+    `config` is a `botocore.config.Config` for a caller with a bound of its own --
+    `scripts/handoff.py pending` has two minutes, which botocore's default timeouts and
+    retries can spend on one unreachable endpoint.
+    """
     secret = settings.archive_s3_secret_access_key.get_secret_value()
     try:
         return boto3.client(
@@ -232,6 +239,7 @@ def make_s3_client(settings: Settings) -> Any:
             region_name=settings.archive_s3_region or None,
             aws_access_key_id=settings.archive_s3_access_key_id or None,
             aws_secret_access_key=secret or None,
+            config=config,
         )
     except (BotoCoreError, ValueError) as exc:  # ValueError: a malformed endpoint URL
         raise StoreError(f"cannot build the S3 client: {exc}") from exc
