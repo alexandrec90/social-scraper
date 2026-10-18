@@ -282,6 +282,13 @@ def test_make_s3_client_uses_the_r2_settings(aws_env, monkeypatch):
     assert (creds.access_key, creds.secret_key) == ("fake-id", "fake-secret")
 
 
+def test_make_s3_client_applies_a_callers_config(aws_env):
+    from botocore.config import Config
+
+    client = make_s3_client(s3_settings(), Config(connect_timeout=5, read_timeout=7))
+    assert (client.meta.config.connect_timeout, client.meta.config.read_timeout) == (5, 7)
+
+
 def test_make_s3_client_rejects_a_malformed_endpoint(aws_env):
     with pytest.raises(StoreError, match="S3 client"):
         make_s3_client(s3_settings(archive_s3_endpoint_url="not a url"))

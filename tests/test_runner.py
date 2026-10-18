@@ -132,6 +132,19 @@ def test_run_cycle_scrapes_exports_and_reports(settings, engine):
     assert (settings.archive_root / "_catalog" / "social_scraper_posts.json").exists()
 
 
+def test_a_machine_not_yet_logged_into_x_still_runs_a_green_cycle(settings, engine):
+    # What a collector moved to another PC meets until `login x` is redone there: browser
+    # profiles do not travel (`scripts/handoff.py`), and X answers search with its login
+    # wall. The scheduled verdict must stay ok -- a notice naming the fix, not an error.
+    settings.symbol_universe_max_age_hours = 1e9
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/i/flow/login")
+    report = run_cycle(settings, engine, (X,), factory=lambda p: browser, export=False)
+    assert report.ok, report.errors
+    assert "error" not in report.platforms[X]
+    assert any("`uv run social-scraper login x`" in n for n in report.platforms[X]["notices"])
+
+
 def test_run_platform_skips_a_paused_platform_without_a_browser(settings, engine):
     DbThrottleStore(engine).set_block(
         X, Block(datetime.now(UTC) + timedelta(hours=1), "captcha", 1), datetime.now(UTC)
