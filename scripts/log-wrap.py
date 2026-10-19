@@ -195,6 +195,10 @@ JOB_ENV = "DEVKIT_JOB"
 # so a wrapped script does not have to know about any of this.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# Seconds `head_stamp` waits on git before filing no `head_at=`: it runs ahead of the job,
+# so a git that hangs must not hold the job back.
+GIT_TIMEOUT = 10
+
 
 def split_argv(argv: list[str]) -> tuple[str, list[str]] | None:
     """`(title, command)` from `<title...> -- <command...>`, or None when malformed.
@@ -552,6 +556,7 @@ def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> i
     title, command, always = parsed
 
     started = time.time()
+    head = head_stamp(root or Path.cwd())
     if run is None:
         code, output = stream(command, child_env(unattended=always, title=title))
     else:
@@ -580,7 +585,9 @@ def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> i
         archived = archive_artifact(root or Path.cwd(), name, body)
         artifact = archived or artifact_ref(name, kept=kept is not None)
         source = cause_source(output, root or Path.cwd())
-        failure = Failure(failure_message(title, always), command, code, artifact, source, started)
+        failure = Failure(
+            failure_message(title, always), command, code, artifact, source, started, head
+        )
         record_failure(failure, root)
     return code
 
@@ -610,6 +617,12 @@ class Failure:
     started, so a run that began before a fix merged and failed after it is the defect
     the fix was waiting on, not a recurrence (`fix_verify.covered`). 1fad5675: a 04:00Z
     scrape failed at 04:13Z on code from before social-scraper #68 merged at 04:04Z.
+
+    `head_at` (`head_stamp`) is when the checkout the job ran from was last committed to,
+    filed as `head_at=`: a run that began after a fix merged still ran the code before it
+    until that checkout pulled the merge. d7b9c8c4: the Worktree Reconcile begun at
+    05:15Z, five minutes after devkit #659 merged, ran from a devkit checkout two commits
+    behind and failed exactly as #659 had stopped it failing.
     """
 
     message: str
@@ -618,6 +631,7 @@ class Failure:
     artifact: str
     output: str = ""
     started: float | None = None
+    head_at: str = ""
 
 
 def record_failure(failure: Failure, root: Path | None = None) -> None:
@@ -660,6 +674,7 @@ def record_failure(failure: Failure, root: Path | None = None) -> None:
             ("cause", cause or "-"),
             *((("said", said),) if said and said != cause else ()),
             *((("started", started_stamp(started)),) if started is not None else ()),
+            *((("head_at", failure.head_at),) if failure.head_at else ()),
         ),
         root=root,
     )
@@ -668,6 +683,29 @@ def record_failure(failure: Failure, root: Path | None = None) -> None:
 def started_stamp(started: float) -> str:
     """`started` as the ledger spells a moment: UTC ISO 8601 to the second."""
     return _dt.datetime.fromtimestamp(started, _dt.UTC).isoformat(timespec="seconds")
+
+
+def head_stamp(root: Path) -> str:
+    """When HEAD of the checkout at `root` was committed, spelled as `started_stamp`
+    spells a moment; "" when `root` is no checkout or git cannot say in `GIT_TIMEOUT`.
+
+    Read before the job runs, since a job may pull its own checkout (`worktree.py
+    reconcile` does). A merge is committed when it merges, so a HEAD committed before a
+    fix merged is a checkout without it (`fix_verify.ran_from`)."""
+    try:
+        done = subprocess.run(
+            ["git", "log", "-1", "--format=%cI", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+        when = _dt.datetime.fromisoformat(done.stdout.strip()) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    return when.astimezone(_dt.UTC).isoformat(timespec="seconds") if when else ""
 
 
 if __name__ == "__main__":

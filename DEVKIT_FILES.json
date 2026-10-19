@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.65",
+  "devkit_tag": "v0.11.66",
   "files": {
     ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -42,7 +42,7 @@
     "scripts/hooks/tests/test_hook_execution_contract.py": "833f23fc9ee40dc863b9a98e01e5205d38fcf9d2a8fc714eaca549c9e9100fcb",
     "scripts/hooks/tests/test_invoke_capped.py": "ce50d6a670ab0e0a65d12ca1e2cf878064e587993a5136488efc43e93deb3a4d",
     "scripts/hooks/tests/test_lint_fix.py": "deb89c25df49464aacf13e128ca82e01e1f0aa50fa50d46eb186caf7e0343ae9",
-    "scripts/hooks/tests/test_log_wrap.py": "beed0dcf9db7339193fd8ba2c968172e477ae50caa47090f2ed66a846e730c81",
+    "scripts/hooks/tests/test_log_wrap.py": "2146b163ecf417af075566fa4c06acd989802fa5b09ccd192ecf51f769aea9f2",
     "scripts/hooks/tests/test_merge_dependabot_prs.py": "64a6ce4288c9b76789ed235253faea89bdee038c2d183fa8be9f146fd8510f4c",
     "scripts/hooks/tests/test_project_dependabot.py": "b4985e046ab5b51be192ae0ca9804f56c87a7789604556dc971a1278bf0369e9",
     "scripts/hooks/tests/test_project_settings.py": "888d9a463628930c4e61240dc328a632b8804e7a335f5935b24c18fc7d0eb69a",
@@ -70,7 +70,7 @@
     "scripts/hooks/untested_symbols.py": "3d1cb609109beb5781f853746111832b3150861289f69a17f2aff3aca29202cb",
     "scripts/hooks/worktree-guard-launch.py": "7c34894440410860abf967df118f3b58feeca323ae54e6659c409497b88c5911",
     "scripts/hooks/worktree_tiers.py": "11dd71d6e92a0dacf2488c3cc4c937911b60bda4a99e5d2383a64b452d0fc9f5",
-    "scripts/log-wrap.py": "9d612d249bdc14033af9015a17e0f584694c9c42296d792910ea2c655be914f3",
+    "scripts/log-wrap.py": "761c8878b06c61d848f2ace210c8f250394d498a78a6cbc6d8a085cc6ca34270",
     "scripts/merge-dependabot-prs.py": "a083311d8b21c0c55125319bf3cbc798383fd62d5d82acc6ff7b9c2d8e3e16c6",
     "scripts/project_dependabot.py": "0fe464c160e25c8a16712ffd545399542fd4fc5ce617050fc2aef5642b92ef5f",
     "scripts/project_settings.py": "8075019039398c06af41e5cca1a818a38e0c21570b0306b31667324e21a18fca",

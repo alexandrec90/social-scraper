@@ -813,6 +813,40 @@ def test_a_failure_records_when_its_run_began_beside_when_it_ended(tmp_path, mon
     [fields] = _fields(ledger)
     assert fields["started"] == "2026-10-09T04:00:01+00:00"
     assert lw.started_stamp(began) == fields["started"]
+    assert "head_at" not in fields, "no checkout: no commit time invented"
+
+
+def test_a_failure_records_when_the_checkout_it_ran_from_was_committed(tmp_path, monkeypatch):
+    """d7b9c8c4: a reconcile begun five minutes after the fix merged ran from a checkout
+    that had not pulled it yet. `head_at=` is read before the job runs -- a job may pull
+    its own checkout -- and is what lets `fix_verify.covered` see the code predated it."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_DATE": "2026-10-19T01:00:33-04:00",
+    }
+    # No hooks: this machine's global `core.hooksPath` may refuse a commit to the default branch.
+    hookless = tmp_path.parent / f"{tmp_path.name}-no-hooks"
+    hookless.mkdir()
+    git = ["git", "-c", f"core.hooksPath={hookless}", "-c", "commit.gpgsign=false"]
+    commit = [*git, "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "x"]
+    subprocess.run([*git, "init", "-q", str(tmp_path)], check=True, env=env)
+    subprocess.run(commit, check=True, env=env)
+    ledger = _ledger(tmp_path, monkeypatch)
+
+    def pulls_itself(_command):
+        later = {**env, "GIT_COMMITTER_DATE": "2026-10-19T05:20:00+00:00"}
+        subprocess.run(commit, check=True, env=later)
+        return 1, "E: boom"
+
+    lw.main(["--always", "N", "--", "x"], run=pulls_itself, root=tmp_path)
+
+    assert _fields(ledger)[0]["head_at"] == "2026-10-19T05:00:33+00:00"
+    assert lw.head_stamp(tmp_path) == "2026-10-19T05:20:00+00:00"
+    assert lw.head_stamp(tmp_path / "missing") == ""
 
 
 def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
