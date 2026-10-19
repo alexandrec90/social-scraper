@@ -1,11 +1,14 @@
-"""CI container images must not come from Docker Hub anonymously.
+"""CI container images must not come from a registry whose anonymous quota is per IP.
 
-A GitHub-hosted runner pulls from Docker Hub unauthenticated, on a shared IP, so the
-pull budget is spent by strangers: the PR gate went red on `main` (2026-10-09, run
-37991214249) with `toomanyrequests` while pulling `postgres:18` for its service
-container, before a single test ran. Naming a registry host -- ECR Public's mirror of
-the Docker Official Images, `public.ecr.aws/docker/library/...` -- takes the pull off
-that budget.
+A GitHub-hosted runner pulls unauthenticated, on a shared IP, so the pull budget is
+spent by strangers: the PR gate went red on `main` (2026-10-09, run 37991214249) with
+`toomanyrequests` while pulling `postgres:18` from Docker Hub for its service container,
+before a single test ran.
+
+ECR Public, the first replacement, has the same shape: #90's gate failed every attempt
+over eight hours on 2026-10-18 (run 39137365237) with `toomanyrequests: Data limit
+exceeded` pulling `public.ecr.aws/docker/library/postgres:18`. `mirror.gcr.io`, Google's
+pull-through cache of the Docker Official Images, is what the workflows name now.
 """
 
 import re
@@ -59,10 +62,13 @@ def test_workflows_define_images() -> None:
     assert workflow_images()
 
 
-def test_workflow_images_avoid_docker_hub() -> None:
-    hub = [
+PER_IP_QUOTA = (None, "docker.io", "registry-1.docker.io", "public.ecr.aws")
+
+
+def test_workflow_images_avoid_a_per_ip_quota() -> None:
+    quota = [
         f"{name}: {image}"
         for name, image in workflow_images()
-        if registry_host(image) in (None, "docker.io", "registry-1.docker.io")
+        if registry_host(image) in PER_IP_QUOTA
     ]
-    assert not hub, f"pulled anonymously from Docker Hub in CI: {hub}"
+    assert not quota, f"pulled anonymously from a per-IP quota in CI: {quota}"
