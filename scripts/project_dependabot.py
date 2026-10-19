@@ -8,11 +8,15 @@ on the very pull that delivered the test -- the upgrade rehearsal caught exactly
 adopting this tree into a project rendered at the release before. So the pull makes one
 pass over this file, the way `project_settings.py` makes one over the settings.
 
-It **adds `versioning-strategy: increase-if-necessary` to each `uv` or `pip` entry that
-names no strategy**, and does nothing else. A strategy the project wrote itself is its
-decision and is kept, whatever its value; if that value raises floors, the contract
-test says so, with the fix. The edit is textual, one inserted line per entry, so the
-file's comments, order and line endings survive: a YAML round-trip would lose all
+It **adds `versioning-strategy: lockfile-only` to each `uv` or `pip` entry that names no
+strategy, and rewrites `increase-if-necessary` -- the value devkit itself rendered until
+Dependabot's uv updater was seen ignoring it -- to the same**, and does nothing else. Under
+`increase-if-necessary` that updater still rewrote data-lake's `pyarrow>=17` as
+`pyarrow>=26.0.0` and `boto3>=1.43.110` as `boto3>=1.43.114`, both releases its floor
+already allowed, and ibkr_trader, whose mlflow caps `pyarrow<26`, stopped resolving. Any
+other strategy the project wrote itself is its decision and is kept; if that value raises
+floors, the contract test says so, with the fix. The edit is textual, one line per entry,
+so the file's comments, order and line endings survive: a YAML round-trip would lose all
 three, and there is no YAML parser in the standard library anyway.
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
@@ -26,13 +30,16 @@ import re
 from pathlib import Path
 
 DEPENDABOT_FILE = ".github/dependabot.yml"
-# The ecosystems whose default strategy rewrites a `pyproject.toml` floor, and the
-# strategy the template gives them. Kept in step with the contract test's own sets.
+# The ecosystems whose updater rewrites a `pyproject.toml` floor, and the strategy the
+# template gives them. Kept in step with the contract test's own sets.
 FLOOR_RAISING_ECOSYSTEMS = frozenset({"uv", "pip"})
-FLOOR_KEEPING_STRATEGY = "increase-if-necessary"
+FLOOR_KEEPING_STRATEGY = "lockfile-only"
+# Strategies devkit once rendered itself that turned out to raise floors anyway, so a
+# project holding one holds devkit's mistake rather than a decision of its own.
+RETIRED_STRATEGIES = frozenset({"increase-if-necessary"})
 
 _HEAD = re.compile(r"(\s*-\s*)package-ecosystem:\s*['\"]?([\w-]+)")
-_STRATEGY = re.compile(r"versioning-strategy\s*:")
+_STRATEGY = re.compile(r"versioning-strategy\s*:\s*['\"]?([\w-]+)")
 
 
 def _is_code(line: str) -> bool:
@@ -40,22 +47,22 @@ def _is_code(line: str) -> bool:
     return bool(line.strip()) and not line.lstrip().startswith("#")
 
 
-def unset_python_entries(lines: list[str]) -> list[tuple[int, str, int]]:
-    """`(head line index, ecosystem, key column)` per Python entry naming no strategy.
+def python_entries(lines: list[str]) -> list[tuple[int, str, int, int | None]]:
+    """`(head line index, ecosystem, key column, strategy line index)` per Python entry.
 
     An entry is its `- package-ecosystem:` line and every code line indented past the
     dash; a sibling item or a top-level key ends it. The strategy counts only at the
     entry's own key column, so a same-named key nested under `groups:` is not taken
-    for it.
+    for it; an entry naming none has `None` for its strategy line.
     """
-    found: list[tuple[int, str, int]] = []
+    found: list[tuple[int, str, int, int | None]] = []
     entry: tuple[int, str, int] | None = None
     dash = 0
-    has_strategy = False
+    strategy: int | None = None
 
     def close() -> None:
-        if entry is not None and entry[1] in FLOOR_RAISING_ECOSYSTEMS and not has_strategy:
-            found.append(entry)
+        if entry is not None and entry[1] in FLOOR_RAISING_ECOSYSTEMS:
+            found.append((*entry, strategy))
 
     for index, line in enumerate(lines):
         if not _is_code(line):
@@ -63,9 +70,10 @@ def unset_python_entries(lines: list[str]) -> list[tuple[int, str, int]]:
         indent = len(line) - len(line.lstrip())
         if head := _HEAD.match(line):
             close()
-            entry, dash, has_strategy = (index, head.group(2), head.end(1)), indent, False
+            entry, dash, strategy = (index, head.group(2), head.end(1)), indent, None
         elif entry is not None and indent > dash:
-            has_strategy |= indent == entry[2] and bool(_STRATEGY.match(line.lstrip()))
+            if strategy is None and indent == entry[2] and _STRATEGY.match(line.lstrip()):
+                strategy = index
         else:
             close()
             entry = None
@@ -73,13 +81,36 @@ def unset_python_entries(lines: list[str]) -> list[tuple[int, str, int]]:
     return found
 
 
-def with_floor_keeping(text: str) -> tuple[str, list[str]]:
-    """`(text, ecosystems given a strategy)`: the strategy line added where it is missing.
+def unset_python_entries(lines: list[str]) -> list[tuple[int, str, int]]:
+    """`(head line index, ecosystem, key column)` per Python entry naming no strategy."""
+    return [entry[:3] for entry in python_entries(lines) if entry[3] is None]
 
-    Inserted directly under the entry's head, at the column of its other keys, with the
-    head's own line ending. A file with nothing to add comes back as the same string.
+
+def retired_strategy_lines(lines: list[str]) -> list[tuple[int, str]]:
+    """`(strategy line index, ecosystem)` per Python entry on a `RETIRED_STRATEGIES` value."""
+    retired: list[tuple[int, str]] = []
+    for _head, ecosystem, _column, strategy in python_entries(lines):
+        if strategy is None:
+            continue
+        match = _STRATEGY.match(lines[strategy].lstrip())
+        if match and match.group(1) in RETIRED_STRATEGIES:
+            retired.append((strategy, ecosystem))
+    return retired
+
+
+def with_floor_keeping(text: str) -> tuple[str, list[str]]:
+    """`(text, ecosystems changed)`: the strategy added where missing, retired ones replaced.
+
+    An added line goes directly under the entry's head, at the column of its other keys,
+    with the head's own line ending; a replaced one keeps its indent, quoting and any
+    trailing comment. A file with nothing to change comes back as the same string.
     """
     lines = text.splitlines(keepends=True)
+    retired = retired_strategy_lines(lines)
+    for index, _ecosystem in retired:
+        old = lines[index]
+        if value := _STRATEGY.search(old):  # always: retired_strategy_lines matched it
+            lines[index] = old[: value.start(1)] + FLOOR_KEEPING_STRATEGY + old[value.end(1) :]
     missing = unset_python_entries(lines)
     for index, _ecosystem, column in reversed(missing):
         head = lines[index]
@@ -88,9 +119,10 @@ def with_floor_keeping(text: str) -> tuple[str, list[str]]:
         lines.insert(
             index + 1, f"{' ' * column}versioning-strategy: {FLOOR_KEEPING_STRATEGY}{ending}"
         )
-    if not missing:
+    if not missing and not retired:
         return text, []
-    return "".join(lines), [ecosystem for _index, ecosystem, _column in missing]
+    changed = sorted([*retired, *((index, ecosystem) for index, ecosystem, _ in missing)])
+    return "".join(lines), [ecosystem for _index, ecosystem in changed]
 
 
 def dependabot_pass(root: Path) -> list[str]:

@@ -443,7 +443,7 @@ def test_pull_gives_a_python_dependabot_entry_the_floor_keeping_strategy(
 
     assert sh.main(["--pull", "--src", str(src), "--allow-untagged"]) == 0
     text = (repo / ".github/dependabot.yml").read_text(encoding="utf-8")
-    assert "    versioning-strategy: increase-if-necessary\n" in text
+    assert "    versioning-strategy: lockfile-only\n" in text
     assert (
         "(floor-keeping versioning-strategy) .github/dependabot.yml: uv" in capsys.readouterr().out
     )

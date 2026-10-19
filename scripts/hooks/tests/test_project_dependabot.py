@@ -69,9 +69,9 @@ def test_a_project_rendered_before_the_strategy_passes_the_contract_after_the_pu
 def test_the_line_lands_under_the_head_at_the_entrys_key_column():
     text, added = pd.with_floor_keeping(RENDERED_BEFORE)
     assert added == ["uv"]
-    assert "  - package-ecosystem: uv\n    versioning-strategy: increase-if-necessary\n" in text
+    assert "  - package-ecosystem: uv\n    versioning-strategy: lockfile-only\n" in text
     # Everything else is the project's own and comes back untouched, comments included.
-    assert text.replace("    versioning-strategy: increase-if-necessary\n", "") == RENDERED_BEFORE
+    assert text.replace("    versioning-strategy: lockfile-only\n", "") == RENDERED_BEFORE
 
 
 def test_a_second_pass_changes_nothing(tmp_path):
@@ -84,7 +84,7 @@ def test_a_second_pass_changes_nothing(tmp_path):
 
 def test_a_strategy_the_project_chose_is_kept_whatever_it_is():
     """Its decision, as with a settings key: the contract test names a bad one."""
-    for strategy in ("lockfile-only", "increase"):
+    for strategy in ("lockfile-only", "increase", "widen"):
         text = RENDERED_BEFORE.replace(
             "    directory: /\n", f"    versioning-strategy: {strategy}\n    directory: /\n", 1
         )
@@ -101,7 +101,7 @@ def test_every_python_entry_is_given_one_and_nothing_else_is():
     )
     updated, added = pd.with_floor_keeping(text)
     assert added == ["pip", "uv"]
-    assert updated.count("versioning-strategy: increase-if-necessary") == 2
+    assert updated.count("versioning-strategy: lockfile-only") == 2
     assert _floor_raisers(updated) == []
 
 
@@ -125,16 +125,70 @@ def test_line_endings_survive(tmp_path):
     pd.dependabot_pass(root)
     text = _read(root)
     assert "\n" not in text.replace("\r\n", "")
-    assert "    versioning-strategy: increase-if-necessary\r\n" in text
+    assert "    versioning-strategy: lockfile-only\r\n" in text
 
 
 def test_an_entry_on_the_files_last_line_without_a_newline_still_gets_one():
     text, added = pd.with_floor_keeping("updates:\n  - package-ecosystem: uv")
     assert added == ["uv"]
-    assert (
-        text
-        == "updates:\n  - package-ecosystem: uv\n    versioning-strategy: increase-if-necessary\n"
+    assert text == "updates:\n  - package-ecosystem: uv\n    versioning-strategy: lockfile-only\n"
+
+
+# What every consumer held on 2026-10-19: the strategy devkit itself rendered, under which
+# Dependabot's uv updater rewrote data-lake's `pyarrow>=17` as `pyarrow>=26.0.0`.
+RENDERED_RETIRED = RENDERED_BEFORE.replace(
+    "      - owner\n",
+    "      - owner\n    # Bump uv.lock, never the pyproject floors.\n"
+    "    versioning-strategy: increase-if-necessary\n",
+    1,
+)
+
+
+def test_the_strategy_devkit_once_rendered_is_rewritten_to_the_floor_keeping_one(tmp_path):
+    root = _project(tmp_path, RENDERED_RETIRED)
+    assert _floor_raisers(_read(root)) == ["uv (increase-if-necessary)"]
+
+    notes = pd.dependabot_pass(root)
+
+    assert notes == [f"(floor-keeping versioning-strategy) {pd.DEPENDABOT_FILE}: uv"]
+    text = _read(root)
+    assert _floor_raisers(text) == []
+    # One value changed in place: the comment above it and every other line survive.
+    assert text == RENDERED_RETIRED.replace("increase-if-necessary", "lockfile-only")
+    assert pd.dependabot_pass(root) == [], "a second pull has nothing to change"
+
+
+def test_a_retired_value_keeps_its_quoting_trailing_comment_and_line_ending():
+    text = "updates:\r\n  - package-ecosystem: pip\r\n    versioning-strategy: 'increase-if-necessary'  # x\r\n"
+    updated, changed = pd.with_floor_keeping(text)
+    assert changed == ["pip"]
+    assert updated == text.replace("increase-if-necessary", "lockfile-only")
+
+
+def test_a_retired_value_off_a_python_entry_or_under_groups_is_not_touched():
+    text = (
+        "updates:\n"
+        "  - package-ecosystem: github-actions\n    versioning-strategy: increase-if-necessary\n"
+        "  - package-ecosystem: uv\n    versioning-strategy: lockfile-only\n"
+        "    groups:\n      g:\n        versioning-strategy: increase-if-necessary\n"
     )
+    assert pd.retired_strategy_lines(text.splitlines(keepends=True)) == []
+    assert pd.with_floor_keeping(text) == (text, [])
+
+
+def test_entries_are_reported_in_file_order_whether_added_or_rewritten():
+    text = (
+        "updates:\n"
+        "  - package-ecosystem: pip\n    directory: /docs\n"
+        "  - package-ecosystem: uv\n    versioning-strategy: increase-if-necessary\n"
+    )
+    lines = text.splitlines(keepends=True)
+    assert pd.python_entries(lines) == [(1, "pip", 4, None), (3, "uv", 4, 4)]
+    assert pd.retired_strategy_lines(lines) == [(4, "uv")]
+    updated, changed = pd.with_floor_keeping(text)
+    assert changed == ["pip", "uv"]
+    assert updated.count("versioning-strategy: lockfile-only") == 2
+    assert "increase-if-necessary" not in updated
 
 
 def test_an_absent_or_undecodable_file_is_left_alone(tmp_path):

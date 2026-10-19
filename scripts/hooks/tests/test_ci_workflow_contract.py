@@ -308,8 +308,11 @@ def test_dependency_update_prs_are_assigned_to_someone():
     )
 
 
-# Strategies that move the lock without raising a `>=` floor the code never needed.
-FLOOR_KEEPING = frozenset({"increase-if-necessary", "lockfile-only", "widen"})
+# Strategies that move the lock without raising a `>=` floor the code never needed. Only
+# the one whose definition forbids touching the manifest: Dependabot's uv updater raised
+# data-lake's `pyarrow>=17` to `pyarrow>=26.0.0` under `increase-if-necessary`, whose
+# documentation says it leaves a floor that already allows the release alone.
+FLOOR_KEEPING = frozenset({"lockfile-only"})
 FLOOR_RAISING_ECOSYSTEMS = frozenset({"uv", "pip"})
 
 
@@ -352,16 +355,20 @@ def test_python_dependency_updates_leave_the_declared_floors_alone():
     grouped patch bump rewrote `pandas>=2.2` as `pandas>=3.0.6`, and ibkr_trader, whose
     `alphalens-reloaded` needs `pandas<3`, went red on its own `main` with no PR of its
     own to show why. A floor says what the code needs; the lock says what was tested.
+
+    `increase-if-necessary` was the answer until it did the same: under it the uv updater
+    rewrote `pyarrow>=17` as `pyarrow>=26.0.0` for a release the floor already allowed,
+    and ibkr_trader's nightly, whose mlflow caps `pyarrow<26`, stopped resolving.
     """
     if not DEPENDABOT.is_file():
         return  # test_dependency_updates_are_configured owns that failure
     raisers = _floor_raisers(_read(DEPENDABOT))
     assert not raisers, (
         f".github/dependabot.yml would raise pyproject floors for: {', '.join(raisers)}. "
-        "Add to each Python entry:\n\n"
-        "    versioning-strategy: increase-if-necessary\n\n"
-        "It bumps uv.lock and leaves a floor alone unless the new release falls outside "
-        "it, so a project that depends on this one is not forced up with it."
+        "Give each Python entry:\n\n"
+        "    versioning-strategy: lockfile-only\n\n"
+        "It bumps uv.lock and never pyproject.toml, so a project that depends on this "
+        "one is not forced up with it. `sync-devkit.py --pull` writes it for you."
     )
 
 
@@ -374,9 +381,16 @@ def test_update_entries_are_read_per_entry():
     )
     assert _floor_raisers(text) == ["uv (no versioning-strategy)"]
     fixed = text.replace(
-        "    directory: /\n", "    directory: /\n    versioning-strategy: increase-if-necessary\n"
+        "    directory: /\n", "    directory: /\n    versioning-strategy: lockfile-only\n"
     )
     assert _floor_raisers(fixed) == []
+    # Neither the strategy the uv updater raised a floor under anyway nor `widen`, whose
+    # definition lets it rewrite the manifest too, counts as keeping one.
+    for raising in ("increase-if-necessary", "widen"):
+        assert _floor_raisers(fixed.replace("lockfile-only", raising)) == [
+            f"uv ({raising})",
+            f"pip ({raising})",
+        ]
     assert _floor_raisers(text.replace("lockfile-only", "increase")) == [
         "uv (no versioning-strategy)",
         "pip (increase)",
