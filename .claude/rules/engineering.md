@@ -55,8 +55,8 @@ Write and Edit decode a backslash-u escape to its character, failing ruff's RUF0
 it `\N{EN DASH}` in source.
 
 **Issue commands bare; wrapping by reflex is a mistake.** A `grep`, a `python -c`, a test
-run, a `curl`, a heredoc: routing them through a wrapper buys no second bound and has
-happened here at scale. Bound only a statement whose output grows with the
+run, a `curl`, a heredoc: routing them through a wrapper buys no second bound.
+Bound only a statement whose output grows with the
 **repository** rather than with the command you wrote — `ls`, `cat`, `find`, `tree`,
 `du`, `env`, `git status`, an uncounted `git log`, a raw `git diff`/`git show`:
 
@@ -91,10 +91,11 @@ substring, so `.gitignore`, `github.com` and `digit` each read as "names git": s
 the statement. The reproductions are in
 [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-**Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an
-`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped.
+**Git Bash rewrites POSIX-looking arguments into Windows paths**: `rev:path` into what
+git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.
 `MSYS2_ARG_CONV_EXCL` in `.claude/settings.json` exempts revs opening `origin/`,
-`upstream/` or `refs/`; for any other rev with a slash, spell it `feature/x:./.devkit.toml`.
+`upstream/` or `refs/`; spell another `feature/x:./.devkit.toml`, and prefix
+`docker exec` with `MSYS_NO_PATHCONV=1`.
 
 ## Waiting: one backgrounded call, not a poll loop
 
