@@ -9,9 +9,14 @@
 - [ ] Put a handful of known-good finance accounts in `X_SEED_ACCOUNTS` to bootstrap
       discovery (they are also the only X source while logged out)
 - [ ] Optionally `python -m social_scraper login reddit`; anonymous works (measured)
-- [ ] Decide where it runs on a schedule (Windows Task Scheduler running
-      `python -m social_scraper run`, or leave a terminal open) -- it needs the desktop:
-      Reddit blocks headless Chrome
+- [x] Decide where it runs on a schedule: devkit's scheduled collector runs
+      `uv run social-scraper scrape` every 30 minutes from a Windows Scheduled Task, on
+      one of the two PCs at a time
+- [ ] Move it between the PCs with devkit's `collectors.py move social-scraper --to HOST`
+      (docs/operations/collector-handoff.md): the database goes through the bucket, so
+      `ARCHIVE_BACKEND=s3` must be set on both PCs, and both storage PCs must be on for
+      the export. Then run `uv run social-scraper login x` on the receiving PC, since
+      profiles stay behind. Not yet run live: the first move should be watched
 - [ ] Confirm `python scripts/sync-devkit.py --list` shows a stamped `DEVKIT_VERSION`
 - [ ] Set `DEVKIT_DIR` in CI so the drift check actually gates
 - [ ] Set `ARCHIVE_BACKEND=s3` and copy ibkr_trader's `ARCHIVE_S3_*` R2 block into
