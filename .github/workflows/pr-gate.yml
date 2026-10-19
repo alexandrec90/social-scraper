@@ -90,10 +90,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       db:
-        # The same official image, from ECR Public's mirror: a runner pulls Docker Hub
-        # anonymously on a shared IP, and its rate limit failed this job before any
-        # test ran. tests/test_workflow_images.py keeps Docker Hub out of CI.
-        image: public.ecr.aws/docker/library/postgres:18
+        # The same official image, from Google's mirror: a runner pulls anonymously on
+        # a shared IP, and both Docker Hub and ECR Public answered `toomanyrequests`,
+        # failing this job before any test ran. tests/test_workflow_images.py keeps
+        # them out of CI.
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: social_scraper
           POSTGRES_PASSWORD: social_scraper_local_dev # pragma: allowlist secret

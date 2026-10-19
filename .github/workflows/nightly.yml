@@ -43,8 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       db:
-        # ECR Public's mirror of the official image, not Docker Hub: see pr-gate.yml.
-        image: public.ecr.aws/docker/library/postgres:18
+        # Google's mirror of the official image, not Docker Hub or ECR Public: see
+        # pr-gate.yml.
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: social_scraper
           POSTGRES_PASSWORD: social_scraper_local_dev # pragma: allowlist secret
