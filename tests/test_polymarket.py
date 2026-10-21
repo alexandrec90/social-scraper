@@ -25,7 +25,7 @@ from social_scraper.polymarket.cycle import Plan, PolymarketCrawler, ids_url, sc
 from social_scraper.polymarket.parse import Market, parse_events, parse_market
 from social_scraper.runner import policy_for
 from social_scraper.sports.leagues import League
-from social_scraper.throttle import Block, MemoryThrottleStore, Policy, Throttle
+from social_scraper.throttle import ERROR_STREAK, Block, MemoryThrottleStore, Policy, Throttle
 
 NHL = League(key="nhl", name="NHL", sport="hockey", polymarket_tags=("nhl",))
 TENNIS = League(key="atp", name="ATP", sport="tennis", polymarket_tags=("atp", "tennis"))
@@ -434,6 +434,51 @@ def test_crawl_stops_on_a_rate_limit(engine, clock):
     # The day's only failed load: a notice, the backoff is the response.
     assert browser.calls == [tag_url("earnings", 0)] and stats.notices and not stats.errors
     assert mem.get_block(POLYMARKET).blocked_until is not None
+
+
+def gone() -> PageResult:
+    return PageResult(404, "u", text='{"type":"not found"}')
+
+
+def test_a_gamma_404_is_gamma_not_serving_not_an_empty_tag(engine, clock):
+    """An /events query matching nothing answers 200 `[]`, so a 404 is Gamma down: a
+    notice, like a timeout, and the crawl goes on to the next tag."""
+    browser = FakeBrowser({tag_url("earnings", 0): gone()})
+    browser.default = ok([earnings_event()])
+    stats = PolymarketCrawler(browser, throttle(clock), engine, Plan(scope()), clock=clock).run()
+    assert stats.errors == [] and len(stats.notices) == 1
+    assert "tag:earnings" in stats.notices[0] and "HTTP 404" in stats.notices[0]
+    # Every tag was read: earnings, stocks, nhl, atp, tennis.
+    assert stats.markets == 1 and len(browser.calls) == 5
+
+
+def test_gamma_404_on_every_load_ends_the_crawl_as_an_error(engine, clock):
+    """2026-10-21 15:35Z: Gamma answered 404 to all seven loads of a cycle, tag reads
+    and the overdue lookup alike. The tags read as empty and the lookup as
+    "unparseable page (not a Gamma /events list)"; the outage was never named."""
+    s = store.Scope(frozenset(), (NHL, TENNIS), None)
+    with engine.begin() as conn:
+        store.store(conn, parse_events([pm_game("g1")]), s, SPORTS, NOW - timedelta(days=1))
+    clock.now = NOW + timedelta(days=30)
+    browser = FakeBrowser()
+    browser.default = gone()
+    plan = Plan(s, resolve_limit=5)
+    stats = PolymarketCrawler(browser, throttle(clock), engine, plan, clock=clock).run()
+    assert len(browser.calls) == ERROR_STREAK
+    assert len(stats.notices) == ERROR_STREAK - 1 and len(stats.errors) == 1
+    assert "HTTP 404" in stats.errors[0] and "unparseable" not in stats.errors[0]
+
+
+def test_an_overdue_lookup_404_is_not_an_unparseable_page(engine, clock):
+    s = store.Scope(frozenset(), (NHL,), None)
+    with engine.begin() as conn:
+        store.store(conn, parse_events([pm_game("g1")]), s, SPORTS, NOW - timedelta(days=1))
+    clock.now = NOW + timedelta(days=30)
+    browser = FakeBrowser({tag_url("nhl", 0): ok([]), ids_url(["g1"]): gone()})
+    plan = Plan(s, resolve_limit=5)
+    stats = PolymarketCrawler(browser, throttle(clock), engine, plan, clock=clock).run()
+    assert stats.errors == [] and len(stats.notices) == 1
+    assert stats.notices[0].startswith("overdue: ") and "HTTP 404" in stats.notices[0]
 
 
 # --- run_platform -------------------------------------------------------------------------
