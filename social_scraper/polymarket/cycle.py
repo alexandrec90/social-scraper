@@ -20,6 +20,12 @@ Read from the Gamma API (`gamma-api.polymarket.com`) with no key or account, thr
    `POLYMARKET_RESOLVE_PER_CYCLE` such events are re-read by id (`/events?id=..&id=..`,
    which answers several at once), until they close with their winner.
 
+A **404** is not "nothing here" on Gamma, as it is on the feeds `FeedCrawler` was built
+for: an `/events` query that matches nothing answers 200 `[]` (`?id=999999999`, measured
+2026-10-21). On 2026-10-21 15:35Z Gamma answered 404 to every load of a cycle for a few
+seconds, so a 404 is Gamma not serving, read like a timeout (`classify`): a notice until
+`ERROR_STREAK` loads in a row have failed, then an error that ends the crawl.
+
 Which domains run decides which tags are read: stock tags only with `stocks` in
 `DOMAINS`, league tags only with `sports`. Markets are not posts, so nothing here goes
 through an ingestor: `polymarket.store` writes its own two tables.
@@ -41,15 +47,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db import repository
 from social_scraper.db.throttle_store import DbThrottleStore
-from social_scraper.feeds import FeedCrawler, FeedRunStats
-from social_scraper.fetch import Browser
+from social_scraper.feeds import FeedCrawler, FeedRunStats, classify
+from social_scraper.fetch import Browser, PageResult
 from social_scraper.models import POLYMARKET, Post
 from social_scraper.pipeline import IngestStats
 from social_scraper.polymarket import store
 from social_scraper.polymarket.parse import Market, parse_events
 from social_scraper.sports.leagues import League
 from social_scraper.symbols.universe import Universe
-from social_scraper.throttle import Policy, Throttle, ThrottleStop
+from social_scraper.throttle import TIMED_OUT, Policy, Throttle, ThrottleStop
 
 log = logging.getLogger(__name__)
 
@@ -169,11 +175,14 @@ class PolymarketCrawler(FeedCrawler):
         self.run_steps(steps)
         return self.stats
 
+    def classify(self, result: PageResult, expect: str) -> tuple[str, str]:
+        if result.status == 404:
+            return TIMED_OUT, "HTTP 404 (Gamma not serving: no match is a 200 [])"
+        return classify(result, expect)
+
     def read_tag(self, tag: str, domain: str) -> None:
         for page in range(self.pages_per_tag):
             result = self.fetch(tag_url(tag, page * PAGE_SIZE), f"events:{domain}")
-            if result.status == 404:
-                return
             payload = result.data
             events = payload if isinstance(payload, list) else None
             self.write(payload, domain, traded_only=True)
