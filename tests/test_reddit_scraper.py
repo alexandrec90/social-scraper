@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -178,10 +179,22 @@ def test_run_stops_on_wall_without_raising(engine, universe):
     assert stats.notices and not stats.errors
 
 
-def test_a_rate_limit_again_within_the_day_is_an_error(engine, universe):
+def test_a_rate_limit_again_within_the_day_is_a_notice(engine, universe):
     browser = FakeBrowser()
     browser.default = PageResult(429, "u")
     s, _ = scraper(engine, universe, browser)
+    s.throttle.record(RATE_LIMITED, "listing:new", 429, "HTTP 429")
+    s.throttle.record(OK, "listing:new", 200)
+    stats = s.run(("wallstreetbets",))
+    assert len(browser.calls) == 1 and stats.notices and not stats.errors
+
+
+def test_a_rate_limit_the_longest_pause_answers_is_an_error(engine, universe):
+    browser = FakeBrowser()
+    browser.default = PageResult(429, "u")
+    s, _ = scraper(engine, universe, browser)
+    p = s.throttle.policy
+    s.throttle.policy = replace(p, backoff_max_minutes=2 * p.backoff_base_minutes)
     s.throttle.record(RATE_LIMITED, "listing:new", 429, "HTTP 429")
     s.throttle.record(OK, "listing:new", 200)
     stats = s.run(("wallstreetbets",))

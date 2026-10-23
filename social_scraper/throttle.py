@@ -11,7 +11,8 @@ Every page load goes through `Throttle.acquire()` first and reports back through
 - **Deadline** -- an optional time after which no page load starts, so a scheduled
   cycle ends before the next one is due (`runner.cycle_deadline`).
 - **Circuit breaker** -- a rate-limit response backs off exponentially
-  (`backoff_base * 2^failures`, capped); a challenge (captcha, login wall, locked
+  (`backoff_base * 2^failures`, capped), counting the day's failed loads as well as
+  the streak, so limits with good loads between them still slow the pace; a challenge (captcha, login wall, locked
   account) opens the circuit for `block_cooldown` and needs no further failures to do
   so -- and a challenge again on the first request after it doubles the cooldown
   (capped at `block_cooldown_max`), because on an always-on machine a fixed retry
@@ -19,8 +20,9 @@ Every page load goes through `Throttle.acquire()` first and reports back through
   it and resets the escalation. To an anonymous crawler the first challenge is a notice
   and the one after a cooldown an error (`Throttle.notice`): the pause is the response,
   and a block only needs a person once it has outlived one. On every platform, X
-  included, a rate limit is a notice when it is the only failed load in
-  `RATE_LIMIT_WINDOW`: pacing that is wrong hits the limit again within the day.
+  included, a rate limit is a notice while the breaker can still answer it: the load
+  before it succeeded, and the pause it set is short of `backoff_max`. A limit on the
+  first load after a pause, or one the longest pause has to answer, is an error.
 
 The store is a protocol so the rules are unit-tested against memory and run against
 Postgres (`db.throttle_store.DbThrottleStore`).
@@ -56,11 +58,12 @@ ERROR_STREAK = 3
 # `block_cooldown`, and only waiting lifts a block nobody is logged in to clear. A
 # challenge again on the first load after that cooldown is a block that held.
 CHALLENGE_STREAK = 2
-# How far back `Throttle.notice` looks for another failed load before a rate limit stops
-# being a notice. The breaker's streak is not enough: a success resets it, so a limit hit
-# once a cycle with good loads between would never be an error. On 2026-10-12 X served
-# one rate-limit page after some 120 clean loads in 30 hours, at 6 an hour against a
-# budget of 8, which failed the scrape although only waiting the backoff lifted it.
+# How far back a rate limit's backoff counts failed loads. The breaker's streak is not
+# enough: a success resets it, so a limit hit once a cycle with good loads between would
+# be paused for `backoff_base` every time and never slow the pace, nor reach the cap that
+# makes it an error. On 2026-10-12 X served one rate-limit page after some 120 clean
+# loads in 30 hours, at 6 an hour against a budget of 8; on 2026-10-23, two 90 minutes
+# apart. Only waiting lifted either, so neither is an error until the waits run out.
 RATE_LIMIT_WINDOW = timedelta(hours=24)
 # The page wants a sign-in. Not the platform pushing back -- our own state -- so it is
 # logged but leaves the circuit breaker alone; the scraper decides what to skip.
@@ -227,7 +230,7 @@ class Throttle:
         """Whether a failed load just recorded as `outcome` is a notice, not an error, for
         an anonymous crawl: a timeout while the platform is not `failing`, or a challenge
         before `CHALLENGE_STREAK` -- counted across runs, from the breaker's persisted
-        streak -- or a rate limit that is the only failed load in `RATE_LIMIT_WINDOW`. A
+        streak -- or a rate limit after a good load whose pause is short of the cap. A
         logged-in crawl (X) reads `failing` itself and asks this of a rate limit only: a
         challenge there is an account a person has to unlock, and waiting a cooldown to
         say so loses a day."""
@@ -238,10 +241,25 @@ class Throttle:
         if outcome == CHALLENGED:
             return failures < CHALLENGE_STREAK
         if outcome == RATE_LIMITED:
-            # This load is already logged, so it is the one failure a notice allows.
-            since = self.clock() - RATE_LIMIT_WINDOW
-            return failures <= 1 and self.store.failures_since(p, since) <= 1
+            # The load before this one succeeded, so the last pause worked, and the pause
+            # just set is not yet the longest the breaker has.
+            return failures <= 1 and self._backoff_minutes(failures) < (
+                self.policy.backoff_max_minutes
+            )
         return False
+
+    def _backoff_minutes(self, failures: int) -> float:
+        """The pause for a rate limit that brings the breaker's streak to `failures`.
+
+        It doubles with the streak or with the failed loads in `RATE_LIMIT_WINDOW`,
+        whichever is more: a success between limits resets the streak, and on
+        2026-10-23 X was paused 30 minutes for a limit at 15:38 and 30 again for one at
+        17:05, after one clean cycle, so a pace X had begun refusing never slowed.
+        """
+        p = self.policy
+        since = self.clock() - RATE_LIMIT_WINDOW
+        steps = max(failures, self.store.failures_since(p.platform, since))
+        return min(p.backoff_base_minutes * 2 ** (steps - 1), p.backoff_max_minutes)
 
     def record(self, outcome: str, kind: str, status: int | None = None, detail: str = "") -> None:
         """Log the request and move the circuit breaker according to `outcome`."""
@@ -260,8 +278,7 @@ class Throttle:
             hours = min(p.block_cooldown_hours * 2 ** (failures - 1), p.block_cooldown_max_hours)
             until = now + timedelta(hours=hours)
         elif outcome == RATE_LIMITED:
-            minutes = min(p.backoff_base_minutes * 2 ** (failures - 1), p.backoff_max_minutes)
-            until = now + timedelta(minutes=minutes)
+            until = now + timedelta(minutes=self._backoff_minutes(failures))
         else:
             # A plain error (timeout, 5xx) only pauses once it keeps happening.
             until = (

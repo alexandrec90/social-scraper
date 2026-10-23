@@ -251,25 +251,48 @@ def test_a_rate_limit_again_after_the_backoff_is_an_error():
     assert not t.notice(RATE_LIMITED)
 
 
-def test_a_rate_limit_each_cycle_with_good_loads_between_is_an_error():
-    # A success resets the breaker's streak; the day's failures still see the pattern.
+def test_a_second_rate_limit_in_the_day_after_good_loads_doubles_the_pause():
+    # 2026-10-23: X limited a timeline at 15:38 and a search at 17:05 with a clean cycle
+    # between. The success had reset the streak, so both got the 30-minute base pause and
+    # the second failed the scrape, though only a longer wait was ever going to lift it.
     clock = Clock(NOW)
-    t, store, _ = make(clock)
-    t.record(RATE_LIMITED, "k", 429)
-    clock.now += timedelta(hours=1)
-    t.record(OK, "k", 200)
-    t.record(RATE_LIMITED, "k", 429)
+    t, store, _ = make(clock, backoff_base_minutes=30, backoff_max_minutes=360)
+    t.record(RATE_LIMITED, "timeline", 200, "rate-limit page")
+    assert store.get_block("x").blocked_until == NOW + timedelta(minutes=30)
+    assert t.notice(RATE_LIMITED)
+    clock.now += timedelta(minutes=58)
+    t.record(OK, "search", 200)
+    clock.now += timedelta(minutes=29)
+    t.record(RATE_LIMITED, "search", 200, "rate-limit page")
     assert store.get_block("x").consecutive_failures == 1
-    assert not t.notice(RATE_LIMITED)
+    assert store.get_block("x").blocked_until == clock.now + timedelta(minutes=60)
+    assert t.notice(RATE_LIMITED)
+
+
+def test_a_rate_limit_the_longest_pause_answers_is_an_error():
+    # A success resets the breaker's streak; the day's failures still see the pattern,
+    # and once the pause is the longest the breaker has, waiting is not working.
+    clock = Clock(NOW)
+    t, store, _ = make(clock, backoff_base_minutes=30, backoff_max_minutes=240)
+    pauses, notices = [], []
+    for _ in range(4):
+        t.record(RATE_LIMITED, "k", 429)
+        pauses.append(store.get_block("x").blocked_until - clock.now)
+        notices.append(t.notice(RATE_LIMITED))
+        clock.now += timedelta(hours=1)
+        t.record(OK, "k", 200)
+    assert pauses == [timedelta(minutes=m) for m in (30, 60, 120, 240)]
+    assert notices == [True, True, True, False]
 
 
 def test_a_rate_limit_after_a_failure_outside_the_window_is_a_notice():
     clock = Clock(NOW)
-    t, _, _ = make(clock)
+    t, store, _ = make(clock, backoff_base_minutes=15)
     t.record(ERROR, "k", 502)
     t.record(OK, "k", 200)
     clock.now += throttle_mod.RATE_LIMIT_WINDOW + timedelta(minutes=1)
     t.record(RATE_LIMITED, "k", 429)
+    assert store.get_block("x").blocked_until == clock.now + timedelta(minutes=15)
     assert t.notice(RATE_LIMITED)
 
 

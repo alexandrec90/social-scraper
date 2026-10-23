@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -131,9 +132,20 @@ def test_run_steps_stops_at_a_first_rate_limit_or_challenge_as_a_notice(engine, 
     assert browser.calls == ["https://a"] and len(stats.notices) == 1 and stats.errors == []
 
 
-def test_a_rate_limit_after_another_failed_load_that_day_is_an_error(engine, clock):
+def test_a_rate_limit_after_another_failed_load_that_day_is_a_notice(engine, clock):
     browser = FakeBrowser({"https://a": PageResult(429, "a")})
     c = crawler(browser, engine, clock)
+    c.throttle.record(RATE_LIMITED, "k", 429, "HTTP 429")
+    c.throttle.record(OK, "k", 200)
+    stats = c.run_steps([("a", loader(c, "https://a"))])
+    assert stats.errors == [] and "HTTP 429" in stats.notices[0]
+
+
+def test_a_rate_limit_the_longest_pause_answers_is_an_error(engine, clock):
+    browser = FakeBrowser({"https://a": PageResult(429, "a")})
+    c = crawler(browser, engine, clock)
+    p = c.throttle.policy
+    c.throttle.policy = replace(p, backoff_max_minutes=2 * p.backoff_base_minutes)
     c.throttle.record(RATE_LIMITED, "k", 429, "HTTP 429")
     c.throttle.record(OK, "k", 200)
     stats = c.run_steps([("a", loader(c, "https://a"))])
