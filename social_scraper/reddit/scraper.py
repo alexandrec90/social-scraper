@@ -203,7 +203,7 @@ class RedditScraper:
 
     def _failed(self, line: str, outcome: str) -> bool:
         """Record a failed load: a notice when it timed out and the platform is not
-        failing, was a first challenge, or the day's only failed load and a rate limit
+        failing, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):

@@ -203,8 +203,8 @@ class XCrawler:
         A login wall on a *search* skips the remaining searches only: profile timelines
         are readable logged out, so seeds and tracked accounts still get visited. Any
         other wall -- or a login wall on a timeline -- ends the cycle, and so does the
-        cycle's deadline, as a notice. A rate limit ends it as a notice when it is the
-        only failed load of the day (`Throttle.notice`).
+        cycle's deadline, as a notice. A rate limit ends it as a notice while the
+        breaker's backoff can still answer it (`Throttle.notice`).
         """
         searching = True
         for step in steps:
@@ -230,8 +230,9 @@ class XCrawler:
                     self.stats.notices.append(str(exc))
                     continue
                 if exc.outcome == RATE_LIMITED and self.throttle.notice(RATE_LIMITED):
-                    # The breaker has paused X for its backoff, and only that wait lifts
-                    # the limit; one again within the day is pacing, and an error.
+                    # The breaker has paused X for a backoff that doubles with the day's
+                    # failed loads, and only that wait lifts the limit; one the longest
+                    # pause has to answer, or right after a pause, is an error.
                     self.stats.notices.append(str(exc))
                     return
                 self.stats.errors.append(str(exc))

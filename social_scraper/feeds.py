@@ -7,8 +7,8 @@ them, with Reddit's semantics (`reddit.scraper`), since those are the ones the b
 and the run report were built around:
 
 - a **challenge** or **rate limit** ends the run: the throttle has recorded the pause,
-  and the next load would only knock on the same door. A rate limit is a notice when it
-  is the only failed load of the day, and an error after another; a challenge is a
+  and the next load would only knock on the same door. A rate limit is a notice while
+  the breaker's backoff can still answer it, and an error once it cannot; a challenge is a
   notice until it comes again after the cooldown (`Throttle.notice`), since every feed
   is read anonymously and only waiting lifts the block;
 - a **timeout** is a notice until the platform keeps failing (`Throttle.failing`);
@@ -189,7 +189,7 @@ class FeedCrawler:
 
     def failed(self, line: str, outcome: str) -> bool:
         """Record a failed load: a notice when it timed out and the platform is not
-        failing, was a first challenge, or the day's only failed load and a rate limit
+        failing, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):

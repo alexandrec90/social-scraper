@@ -144,9 +144,12 @@ the run report, not a failed cycle: the pause is the whole response, and nobody 
 block sooner. A challenge again on the first load after the pause fails the cycle. On X
 the first one fails it, because a locked account waits for a person to unlock it.
 
-A rate limit is a notice on every platform, X included, when it is the only failed load
-in the last 24 hours: the backoff is the response. One more failed load within the day
-fails the cycle, because pacing that is too fast hits the limit again.
+A rate limit pauses the platform for a backoff that doubles with each failed load in the
+last 24 hours, so a pace the platform has started refusing slows down even when good loads
+come between the limits. On every platform, X included, the limit is a notice while that
+backoff is the response: the load before it succeeded, and the pause is short of
+`backoff_max_minutes`. A limit on the first load after a pause, or one the longest pause
+has to answer, fails the cycle: waiting is no longer working.
 
 Pages are read from the data the site loads for itself -- Reddit's listing JSON, X's
 GraphQL responses and server-streamed first page -- never scraped from the DOM. Each

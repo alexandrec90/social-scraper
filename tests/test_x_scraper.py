@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -487,9 +488,23 @@ def test_one_rate_limit_page_after_clean_loads_is_a_notice_that_ends_the_cycle(e
     assert s.throttle.store.get_block("x").blocked_until is not None
 
 
-def test_a_second_rate_limit_within_the_day_fails_the_cycle(engine, universe):
+def test_a_second_rate_limit_within_the_day_doubles_the_pause_as_a_notice(engine, universe):
+    """2026-10-23: limits at 15:38 and 17:05 UTC, a clean cycle between; both were paused
+    for the base backoff, and the second failed the scrape."""
     s, _ = rate_limited_after_a_search(engine, universe)
     # An earlier cycle's rate limit, and a success since that reset the breaker's streak.
+    s.throttle.record(RATE_LIMITED, "timeline", 200, "rate-limit page")
+    s.throttle.record(OK, "timeline", 200)
+    stats = s.run()
+    assert stats.errors == [] and len(stats.notices) == 1
+    block, base = s.throttle.store.get_block("x"), s.throttle.policy.backoff_base_minutes
+    assert block.blocked_until - s.clock() == timedelta(minutes=2 * base)
+
+
+def test_a_rate_limit_the_longest_pause_answers_fails_the_cycle(engine, universe):
+    s, _ = rate_limited_after_a_search(engine, universe)
+    p = s.throttle.policy
+    s.throttle.policy = replace(p, backoff_max_minutes=2 * p.backoff_base_minutes)
     s.throttle.record(RATE_LIMITED, "timeline", 200, "rate-limit page")
     s.throttle.record(OK, "timeline", 200)
     stats = s.run()
