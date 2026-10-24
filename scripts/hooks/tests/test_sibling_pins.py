@@ -18,7 +18,10 @@ from conftest import load_module
 sp = load_module("scripts/hooks/sibling_pins.py")
 
 A, B = "a" * 40, "b" * 40
-OTHER = 4242  # a pid the tests' `alive` answers for, never this process
+# A pid the tests' `alive` answers for, never this process. Derived, not a literal: Linux
+# hands pids out in sequence, so a fixed 4242 was the pytest process's own on a CI runner,
+# and `blockers` then read the other run's lease as this run's and moved under it.
+OTHER = os.getpid() + 100_000
 
 
 def _sibling(tmp_path: Path, relative: bool = False) -> Path:
@@ -53,6 +56,12 @@ def _claim(target: Path, state: State, alive=lambda pid: True, **kw):
     shared = sp.Sibling(target, state.want, state.head, state.move)
     pace = sp.Pace(pid=os.getpid(), alive=alive, say=said.append, **kw)
     return sp.claim(shared, Path("proj"), pace), said
+
+
+def test_the_other_run_is_never_this_process():
+    """Every test below that waits on OTHER's lease passes vacuously when it is ours."""
+    assert OTHER != os.getpid()
+    assert OTHER not in {11, 12, 13, 77, 78, 79}, "the pids the lease tests write by hand"
 
 
 def test_the_lease_directory_is_inside_the_siblings_own_git_dir(tmp_path):
