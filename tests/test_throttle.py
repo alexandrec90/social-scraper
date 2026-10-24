@@ -12,6 +12,7 @@ from social_scraper.throttle import (
     LOGIN_REQUIRED,
     OK,
     RATE_LIMITED,
+    SERVER_ERROR,
     TIMED_OUT,
     Block,
     BudgetExhausted,
@@ -231,8 +232,20 @@ def test_notice_reads_timeouts_as_failing_does_and_nothing_else_as_one():
         t.record(TIMED_OUT, "k", None)
     assert not t.notice(TIMED_OUT)
     fresh, _, _ = make()
-    fresh.record(ERROR, "k", 502)
+    fresh.record(ERROR, "k", 400)
     assert not fresh.notice(ERROR)
+
+
+def test_a_server_error_is_a_notice_as_a_timeout_is():
+    # 2026-10-23: one HTTP 500 from Bluesky's AppView, between good loads, failed the
+    # scheduled scrape.
+    t, _, _ = make()
+    t.record(SERVER_ERROR, "k", 500)
+    assert t.notice(SERVER_ERROR)
+    t.record(TIMED_OUT, "k", None)
+    assert t.notice(SERVER_ERROR)
+    t.record(SERVER_ERROR, "k", 502)
+    assert not t.notice(SERVER_ERROR) and t.failing()
 
 
 def test_the_only_failed_load_of_the_day_being_a_rate_limit_is_a_notice():

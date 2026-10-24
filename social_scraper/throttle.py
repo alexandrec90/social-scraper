@@ -50,9 +50,15 @@ ERROR = "error"
 # breaker; to a crawler, a notice until `ERROR_STREAK` loads in a row have failed
 # (`Throttle.failing`), since one slow load on a loaded machine is not the platform down.
 TIMED_OUT = "timed_out"
+# The platform answered with a 5xx, or not at all (a reset connection): its own trouble,
+# and mostly brief. A timeout's rules: on 2026-10-23 Bluesky's AppView answered one
+# search with HTTP 500 between good ones, and the scheduled scrape failed on it.
+SERVER_ERROR = "server_error"
 # Failed loads in a row at which a plain error pauses the platform, and at which a
-# timed-out load stops being a notice.
+# timed-out load or a server error stops being a notice.
 ERROR_STREAK = 3
+# The outcomes that are a notice until `ERROR_STREAK` (`Throttle.notice`).
+TRANSIENT = (TIMED_OUT, SERVER_ERROR)
 # Failed loads in a row at which a challenge on an anonymous crawl stops being a notice
 # (`Throttle.notice`). The first is one: the breaker has already paused the platform for
 # `block_cooldown`, and only waiting lifts a block nobody is logged in to clear. A
@@ -228,7 +234,8 @@ class Throttle:
 
     def notice(self, outcome: str) -> bool:
         """Whether a failed load just recorded as `outcome` is a notice, not an error, for
-        an anonymous crawl: a timeout while the platform is not `failing`, or a challenge
+        an anonymous crawl: a timeout or a server error while the platform is not
+        `failing`, or a challenge
         before `CHALLENGE_STREAK` -- counted across runs, from the breaker's persisted
         streak -- or a rate limit after a good load whose pause is short of the cap. A
         logged-in crawl (X) reads `failing` itself and asks this of a rate limit only: a
@@ -236,7 +243,7 @@ class Throttle:
         say so loses a day."""
         p = self.policy.platform
         failures = self.store.get_block(p).consecutive_failures
-        if outcome == TIMED_OUT:
+        if outcome in TRANSIENT:
             return failures < ERROR_STREAK
         if outcome == CHALLENGED:
             return failures < CHALLENGE_STREAK

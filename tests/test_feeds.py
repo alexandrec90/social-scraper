@@ -19,6 +19,7 @@ from social_scraper.throttle import (
     ERROR,
     OK,
     RATE_LIMITED,
+    SERVER_ERROR,
     TIMED_OUT,
     Block,
     MemoryThrottleStore,
@@ -37,8 +38,9 @@ from social_scraper.throttle import (
         (PageResult(200, "u", text="Just a moment..."), HTML, CHALLENGED),
         (PageResult(403, "u", data={"error": "x"}), JSON, CHALLENGED),
         (PageResult(503, "u", text="Checking your browser"), HTML, CHALLENGED),
-        (PageResult(500, "u"), JSON, ERROR),
-        (PageResult(None, "u", text="ConnectionResetError"), JSON, ERROR),
+        (PageResult(500, "u"), JSON, SERVER_ERROR),
+        (PageResult(503, "u", data={"error": "x"}), JSON, SERVER_ERROR),
+        (PageResult(None, "u", text="ConnectionResetError"), JSON, SERVER_ERROR),
         (PageResult(404, "u"), JSON, OK),
         (PageResult(400, "u", data={"error": "bad query"}), JSON, ERROR),
         (PageResult(200, "u", text="not json"), JSON, ERROR),
@@ -110,7 +112,7 @@ def loader(c: FeedCrawler, url: str, expect: str = JSON):
 
 def test_run_steps_errors_and_goes_on(engine, clock):
     browser = FakeBrowser(
-        {"https://a": PageResult(500, "a"), "https://b": PageResult(200, "b", data=[])}
+        {"https://a": PageResult(400, "a"), "https://b": PageResult(200, "b", data=[])}
     )
     c = crawler(browser, engine, clock)
 
@@ -167,6 +169,26 @@ def test_a_timeout_is_a_notice_until_the_platform_keeps_failing(engine, clock):
     stats = c.run_steps([(s, loader(c, f"https://{s}")) for s in "abcd"])
     # Two notices, then the third failure in a row makes the platform failing: an error,
     # and the run stops there.
+    assert len(stats.notices) == 2 and len(stats.errors) == 1 and stats.requests == 3
+
+
+def test_one_server_error_is_a_notice_and_the_crawl_goes_on(engine, clock):
+    """2026-10-23: Bluesky's AppView answered one `$CRDO` search with HTTP 500, between
+    good searches, and the scheduled scrape failed on it."""
+    browser = FakeBrowser(
+        {"https://a": PageResult(500, "a"), "https://b": PageResult(200, "b", data=[])}
+    )
+    c = crawler(browser, engine, clock)
+    stats = c.run_steps([("a", loader(c, "https://a")), ("b", loader(c, "https://b"))])
+    assert stats.errors == [] and "HTTP 500" in stats.notices[0]
+    assert browser.calls == ["https://a", "https://b"]
+
+
+def test_server_errors_are_a_notice_until_the_platform_keeps_failing(engine, clock):
+    browser = FakeBrowser()
+    browser.default = PageResult(502, "u")
+    c = crawler(browser, engine, clock)
+    stats = c.run_steps([(s, loader(c, f"https://{s}")) for s in "abcd"])
     assert len(stats.notices) == 2 and len(stats.errors) == 1 and stats.requests == 3
 
 

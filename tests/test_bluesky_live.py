@@ -207,7 +207,7 @@ def test_crawl_paces_each_symbol(engine, universe):
     [
         (PageResult(429, "u"), "notices", True),
         (PageResult(403, "u", text="403 Forbidden"), "notices", True),
-        (PageResult(502, "u"), "errors", False),
+        (PageResult(502, "u"), "notices", False),
         (PageResult(200, "u", data={"error": "x"}), "errors", False),
         (PageResult(None, "u", timed_out=True), "notices", False),
     ],
