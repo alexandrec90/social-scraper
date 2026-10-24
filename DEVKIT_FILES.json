@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.67",
+  "devkit_tag": "v0.11.68",
   "files": {
     ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -52,7 +52,7 @@
     "scripts/hooks/tests/test_session_start.py": "cdd6a81c695749cd271dad20c3dfb8158651db90db4d0133cc3a4d56e70de666",
     "scripts/hooks/tests/test_session_sync.py": "6cd9195b308cfc3b75ebcbf6e8088078584931eb4f7b71da8534c409eb971ea2",
     "scripts/hooks/tests/test_ship.py": "68cd08afe1514168cc2ef92202e9469d36d307e0e4d9d733e0ee0ba1ef461b2a",
-    "scripts/hooks/tests/test_sibling_pins.py": "57d0c2b7f81a4018690d18a2ffa48bcd3f5108c5616b7cc35ec219fb24022191",
+    "scripts/hooks/tests/test_sibling_pins.py": "852338c9dbea117dc21d744be53f13d77c62c6d863b2431257d5f5c64b2750d6",
     "scripts/hooks/tests/test_stop.py": "b1dcabdd203c2e048357d12792f47891c3c8d069417cceeee584d6c27bb6eefa",
     "scripts/hooks/tests/test_stop_session.py": "adf05353d474dd977941f6372efc6b4395538e0312ff27033e43b440522aeb0f",
     "scripts/hooks/tests/test_structure_baseline.py": "df2b3f10392f799d230ae0f6ab4496f2e904db54eb370727bbb61fde5f4154db",
