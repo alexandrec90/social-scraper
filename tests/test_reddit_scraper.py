@@ -16,6 +16,7 @@ from social_scraper.throttle import (
     ERROR_STREAK,
     OK,
     RATE_LIMITED,
+    SERVER_ERROR,
     TIMED_OUT,
     Block,
     MemoryThrottleStore,
@@ -62,8 +63,8 @@ def test_listing_url():
         (PageResult(429, "u"), RATE_LIMITED),
         (PageResult(403, "u", text="You've been blocked by network security."), CHALLENGED),
         (PageResult(200, "u", text="Please complete the CAPTCHA"), CHALLENGED),
-        (PageResult(502, "u"), ERROR),
-        (PageResult(None, "u"), ERROR),
+        (PageResult(502, "u"), SERVER_ERROR),
+        (PageResult(None, "u"), SERVER_ERROR),
         (PageResult(404, "u"), OK),
         (PageResult(200, "u", data=None), ERROR),
         (PageResult(200, "u", data={"kind": "Listing"}), OK),
@@ -301,7 +302,7 @@ def test_a_403_on_the_first_load_after_the_cooldown_is_an_error(engine, universe
 def test_error_on_one_listing_continues_with_the_next(engine, universe):
     browser = FakeBrowser(
         {
-            BASE + "new.json": PageResult(502, "u"),
+            BASE + "new.json": PageResult(200, "u", data=None),
             BASE + "comments.json": ok(reddit_listing([reddit_comment("c", T0)])),
             BASE + "top.json": ok(reddit_listing([])),
             BASE: PageResult(200, BASE),
@@ -311,6 +312,30 @@ def test_error_on_one_listing_continues_with_the_next(engine, universe):
     stats = s.run(("wallstreetbets",))
     assert stats.ingest.stored == 1
     assert any("new" in e for e in stats.errors)
+
+
+def test_one_server_error_is_a_notice_and_the_crawl_goes_on(engine, universe):
+    browser = FakeBrowser(
+        {
+            BASE + "new.json": PageResult(502, "u"),
+            BASE + "comments.json": ok(reddit_listing([reddit_comment("c", T0)])),
+            BASE + "top.json": ok(reddit_listing([])),
+        }
+    )
+    s, _ = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets",), warm=False)
+    assert stats.errors == [] and any("HTTP 502" in n for n in stats.notices)
+    assert stats.ingest.stored == 1
+
+
+def test_server_errors_in_a_row_are_an_error_and_end_the_run(engine, universe):
+    browser = FakeBrowser()
+    browser.default = PageResult(500, "u")
+    s, store = scraper(engine, universe, browser)
+    stats = s.run(("wallstreetbets", "stocks"), warm=False)
+    assert len(browser.calls) == ERROR_STREAK
+    assert len(stats.notices) == ERROR_STREAK - 1 and len(stats.errors) == 1
+    assert store.get_block("reddit").blocked_until is not None
 
 
 def test_unparseable_page_is_reported_not_raised(engine, universe):

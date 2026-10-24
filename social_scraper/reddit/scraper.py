@@ -34,7 +34,9 @@ from social_scraper.throttle import (
     ERROR,
     OK,
     RATE_LIMITED,
+    SERVER_ERROR,
     TIMED_OUT,
+    TRANSIENT,
     OutOfTime,
     Throttle,
 )
@@ -77,7 +79,7 @@ def classify(result: PageResult, expect_json: bool = True) -> tuple[str, str]:
     if status in (401, 403):
         return CHALLENGED, f"HTTP {status} (network or account block)"
     if status is None or status >= 500:
-        return ERROR, f"HTTP {status}"
+        return SERVER_ERROR, f"HTTP {status}"
     if status == 404:
         return OK, "not found (banned, private or renamed subreddit)"
     if expect_json and result.data is None:
@@ -192,18 +194,18 @@ class RedditScraper:
             self.crawl_listing(sub, listing, **kwargs)
         except FetchFailed as exc:
             noticed = self._failed(f"r/{sub}/{listing}: {exc}", exc.outcome)
-            # A timeout streak stops the run here: the breaker has just paused the
+            # A timeout or 5xx streak stops the run here: the breaker has just paused the
             # platform, and the next `acquire` would end it as a skip, losing this run.
             if exc.outcome in (CHALLENGED, RATE_LIMITED) or (
-                exc.outcome == TIMED_OUT and not noticed
+                exc.outcome in TRANSIENT and not noticed
             ):
                 raise
         except ValueError as exc:
             self.stats.errors.append(f"r/{sub}/{listing}: unparseable page ({exc})")
 
     def _failed(self, line: str, outcome: str) -> bool:
-        """Record a failed load: a notice when it timed out and the platform is not
-        failing, was a first challenge, or a rate limit the backoff still answers
+        """Record a failed load: a notice when it timed out or met a server error and the
+        platform is not failing, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):

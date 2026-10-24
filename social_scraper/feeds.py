@@ -11,7 +11,8 @@ and the run report were built around:
   the breaker's backoff can still answer it, and an error once it cannot; a challenge is a
   notice until it comes again after the cooldown (`Throttle.notice`), since every feed
   is read anonymously and only waiting lifts the block;
-- a **timeout** is a notice until the platform keeps failing (`Throttle.failing`);
+- a **timeout**, a **5xx** or no answer at all is a notice until the platform keeps
+  failing (`Throttle.failing`), and then ends the run;
 - any other failure, or a page that does not parse, is an error for that subject, and
   the run goes on to the next;
 - the cycle's **deadline** (`OutOfTime`) ends the run with what it read, as a notice.
@@ -38,7 +39,9 @@ from social_scraper.throttle import (
     ERROR,
     OK,
     RATE_LIMITED,
+    SERVER_ERROR,
     TIMED_OUT,
+    TRANSIENT,
     OutOfTime,
     Throttle,
 )
@@ -96,7 +99,7 @@ def classify(
     if status in (401, 403):
         return CHALLENGED, f"HTTP {status} (network or account block)"
     if status is None or status >= 500:
-        return ERROR, f"HTTP {status}"
+        return SERVER_ERROR, f"HTTP {status}"
     if status == 404:
         return OK, "not found"
     if status >= 400:
@@ -181,15 +184,15 @@ class FeedCrawler:
         except FetchFailed as exc:
             noticed = self.failed(f"{label}: {exc}", exc.outcome)
             if exc.outcome in (CHALLENGED, RATE_LIMITED) or (
-                exc.outcome == TIMED_OUT and not noticed
+                exc.outcome in TRANSIENT and not noticed
             ):
                 raise
         except ValueError as exc:
             self.stats.errors.append(f"{label}: unparseable page ({exc})")
 
     def failed(self, line: str, outcome: str) -> bool:
-        """Record a failed load: a notice when it timed out and the platform is not
-        failing, was a first challenge, or a rate limit the backoff still answers
+        """Record a failed load: a notice when it timed out or met a server error and the
+        platform is not failing, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):
