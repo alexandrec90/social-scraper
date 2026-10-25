@@ -104,9 +104,11 @@ def load_features(con: duckdb.DuckDBPyConnection, files: Sequence[Path]) -> int:
 def joined(con: duckdb.DuckDBPyConnection, path: Path) -> Iterator[dict[str, Any]]:
     """Each message of one `messages` file beside its metadata (`has_meta` false: none)."""
     con.execute(LOAD_MESSAGES, [str(path)])
-    bounds = con.execute("SELECT min(id), max(id) FROM m").fetchone()
-    lo, hi = (bounds[0], bounds[1]) if bounds and bounds[0] is not None else (0, -1)
-    reader = con.execute(JOIN_MESSAGES, [lo, hi]).to_arrow_reader(READ_BATCH)
+    # fetchall, not fetchone: duckdb 2.0 streams a result, and one left open blocks `con.sql`.
+    (bounds,) = con.execute("SELECT min(id), max(id) FROM m").fetchall()
+    lo, hi = (bounds[0], bounds[1]) if bounds[0] is not None else (0, -1)
+    # A relation, not `con.execute()`: duckdb 2.0 copies a DB-API result to export Arrow.
+    reader = con.sql(JOIN_MESSAGES, params=[lo, hi]).to_arrow_reader(READ_BATCH)
     for batch in reader:
         yield from batch.to_pylist()
 
