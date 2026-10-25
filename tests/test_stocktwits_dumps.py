@@ -3,6 +3,7 @@
 id order -- with invented content: no real message or user id is committed."""
 
 import json
+import warnings
 from datetime import UTC, datetime
 
 import pyarrow.parquet as pq
@@ -170,6 +171,20 @@ def test_joined_pairs_each_message_with_its_metadata(tmp_path):
     assert rows[101]["sentiment"] == "Bearish"  # its metadata is in another file
     assert rows[102]["reply_to"] == 100
     assert not rows[103]["has_meta"]
+
+
+def test_joined_reads_through_a_relation_not_a_db_api_result(tmp_path):
+    """duckdb 2.0 warns on Arrow export from `con.execute()`, which copies every row again."""
+    folder = standard(tmp_path / "st")
+    con = backfill.connect(tmp_path / "f.duckdb", tmp_path / "tmp")
+    try:
+        load_features(con, sorted((folder / "feature_wo_messages").glob("*.csv")))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            rows = list(joined(con, folder / "messages" / "msg_000.csv"))
+    finally:
+        con.close()
+    assert sorted(r["id"] for r in rows) == [100, 101, 102, 103]
 
 
 def test_spool_messages_counts_every_outcome(tmp_path, universe):
