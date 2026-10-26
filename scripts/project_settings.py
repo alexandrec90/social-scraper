@@ -47,6 +47,10 @@ SETTINGS_FILE = ".claude/settings.json"
 # argument" that cost a fixer its turn. An argument opening with one of these prefixes is
 # a remote-tracking or full ref, never a path worth converting; absolute paths (`/c/...`)
 # still convert. Every other platform ignores the variable.
+#
+# A project's settings reach only a session started in that project, so
+# `install-agent-env.py` puts the same keys in the user tier for one started anywhere
+# else -- the workspace root, which no settings pass writes (5769209d).
 AGENT_ENV = {
     "PYTHON_COLORS": "0",
     "PY_COLORS": "0",
