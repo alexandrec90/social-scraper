@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.68",
+  "devkit_tag": "v0.11.69",
   "files": {
     ".claude/engineering-evidence.md": "36a39a5fe2721abd4637b0fbc3a5b83ee2731f93afdd204c900a855c76f2c71b",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -73,7 +73,7 @@
     "scripts/log-wrap.py": "761c8878b06c61d848f2ace210c8f250394d498a78a6cbc6d8a085cc6ca34270",
     "scripts/merge-dependabot-prs.py": "a083311d8b21c0c55125319bf3cbc798383fd62d5d82acc6ff7b9c2d8e3e16c6",
     "scripts/project_dependabot.py": "e50443e327c01fa6f147c75c8df5169a79279b76809d5c4f2a1c6a3ee9f93c89",
-    "scripts/project_settings.py": "8075019039398c06af41e5cca1a818a38e0c21570b0306b31667324e21a18fca",
+    "scripts/project_settings.py": "7b42a2251d2179e4596c91db1054522b1083904608d138ac6252b2576e8e8f8b",
     "scripts/pytest-plugins/devkit_temproot.py": "5e293d8ca461ef40e94c8f4f957667967574798b3393bc6cd68ace45767e713d",
     "scripts/report-workflow-failure.py": "ff3a73eb4e4a7df12ee7ff0080df4c4286b4b86620ea4a72ff5d47295c84b0ed",
     "scripts/ship.py": "49db8d82daf549fe81e24ac82d5479f9b1a68a1870775e9c9e9747954bfc063d",
