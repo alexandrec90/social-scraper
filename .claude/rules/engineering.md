@@ -84,12 +84,11 @@ PowerShell tool is the answer for a compound statement, not a workaround.
 | `git -C`, `--git-dir`, `env -C`, `GIT_DIR=`, `cd … &&` before git | bare `git`, from the worktree |
 | command substitution, `for`/`while`, a subshell | one call each — a plain `&&` list is fine |
 | the letters `git` inside any of the above | nothing; it is a false positive |
+| `sh -c "…"` in a container, either tool | a script file, run there by `sh` |
 
-**The last row is the one that wastes turns.** Inside a statement the parser could not
-reduce to a simple list, the guard tests the *whole line* for `git` as an unanchored
-substring, so `.gitignore`, `github.com` and `digit` each read as "names git": split
-the statement. The reproductions are in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
+**The last two rows waste turns.** An irreducible line is tested whole for `git` as a
+substring (`.gitignore`, `github.com`, `digit`): split it. PowerShell reads a
+container's `rm` as hitting a "protected" host path. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **Git Bash rewrites POSIX-looking arguments into Windows paths**: `rev:path` into what
 git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.
