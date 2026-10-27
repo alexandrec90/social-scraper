@@ -1,10 +1,13 @@
 ---
 name: ship
-description: 'Mark the task done: write the commit message as an intent file and stop. The fix pass commits, pushes and opens the PR.'
+description: 'Mark the task done: write the commit message as an intent file and stop. The fix pass commits, pushes and opens the PR. `/ship auto` opens it to merge itself once green.'
+argument-hint: '[auto]'
 disable-model-invocation: false
 ---
 
 # Ship the current task
+
+Arguments: `$ARGUMENTS`
 
 Shipping is one file. You write it and stop. Nothing here runs a gate, commits, pushes
 or opens a PR: the scheduled fix pass does all of that, reads what the gate says, and
@@ -20,7 +23,12 @@ recover is *why* the change was made, so that is the only thing it is asked for.
    - a blank line;
    - a body explaining *why*, in Markdown. Name identifiers in backticks. This body is
      the PR description and the only changelog a consumer of this repository gets, so
-     write it for the reader who did not watch the work.
+     write it for the reader who did not watch the work;
+   - only when the arguments above are `auto`: a blank line, then `Automerge: yes` as
+     the file's last line. The pass labels that PR `automerge`, and it merges once the
+     gate is green with nobody reviewing it. That is the person's call, made by typing
+     `/ship auto`: never add the line on your own judgement, nor because a change looks
+     trivial to you.
 3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
    you the wrong way -- add one line per thing to `logs/friction.md`, keeping the lines
    already there: another session in this tree may have written them. Write each
@@ -44,7 +52,7 @@ The fix pass (`scripts/fix-pass.py`, scheduled every half hour, or the *Agent: F
 Is Red* task by hand) finds the intent, runs the commit-stage fixers, commits with your
 message, pushes with the push gate skipped, and opens the PR. A PR from a tree the fix
 pass cut for a fixer is labelled `automerge` and merges once green; yours is not, and
-waits for a person. It records the outcome beside the intent in `logs/ship-state.json`.
+waits for a person -- unless the intent ends `Automerge: yes`. It records the outcome beside the intent in `logs/ship-state.json`.
 CI runs the gate.
 If it is red, the pass downloads the artifact and sends a fresh session at it with the
 failing tests named; if the commit stage refused the change, the pass sends one at this
