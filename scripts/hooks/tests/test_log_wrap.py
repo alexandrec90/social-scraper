@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from conftest import REPO_ROOT, load_module
@@ -419,6 +420,122 @@ def test_the_script_runs_as_a_script(tmp_path):
     assert result.returncode == 0
     assert "hi" in result.stdout
     assert (tmp_path / "logs" / "t.log").read_text(encoding="utf-8") == ""
+
+
+# --- the command's processes die with the wrapper -----------------------------
+#
+# `CREATE_NO_WINDOW` gives the child a console of its own, so closing the task's terminal
+# reaches the wrapper and never the child: ec0274d1, a `ui-task.py` server still answering
+# on its port after its terminal was closed.
+
+# The child prints its own pid and its child's, then waits on that child; the grandchild
+# holds none of the pipe, so only containment can reach it.
+SERVER = (
+    "import os, subprocess, sys\n"
+    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+    " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "print(os.getpid(), g.pid, flush=True)\n"
+    "{tail}\n"
+)
+
+
+def _zombie(pid: int) -> bool:
+    """Whether `pid` has exited and waits only to be reaped -- a container with no init
+    may never reap an orphan, and a signal still reaches its zombie."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return stat.rpartition(")")[2].split()[:1] == ["Z"]
+
+
+def _exits_within(pid: int, seconds: float) -> bool:
+    """Whether process `pid` is gone, or goes within `seconds`."""
+    if sys.platform == "win32":  # spelled so mypy skips `WinDLL` off Windows
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return True
+        try:
+            return kernel32.WaitForSingleObject(handle, int(seconds * 1000)) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if _zombie(pid) or time.monotonic() > deadline:
+            return _zombie(pid)
+        time.sleep(0.1)
+
+
+def _reap(*pids: int) -> None:
+    for pid in pids:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
+            continue
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_closing_the_terminal_takes_the_command_s_whole_tree_with_it(tmp_path):
+    """The reproduction from ec0274d1: the child and grandchild gone with the wrapper. On
+    Windows a closed terminal reaches only the wrapper, so killing it alone must be enough;
+    elsewhere it signals the terminal's process group, which the command never leaves."""
+    script = REPO_ROOT / "scripts" / "log-wrap.py"
+    child = SERVER.format(tail="g.wait()")
+    wrapper = subprocess.Popen(
+        [sys.executable, str(script), "T", "--", sys.executable, "-c", child],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name != "nt",
+    )
+    assert wrapper.stdout is not None
+    pids = [int(pid) for pid in wrapper.stdout.readline().split()]
+    try:
+        if sys.platform == "win32":  # spelled so mypy narrows `killpg` off Windows
+            wrapper.kill()
+        else:
+            os.killpg(wrapper.pid, 9)
+        wrapper.wait(timeout=10)
+        assert all(_exits_within(pid, 10) for pid in pids)
+    finally:
+        wrapper.stdout.close()
+        _reap(*pids)
+
+
+def test_a_process_the_command_left_running_on_purpose_survives_its_exit():
+    """A command that exits normally keeps what it started deliberately -- a launcher's
+    Docker Desktop: containment is for a wrapper killed mid-run, not for a finished one."""
+    code, output = lw.stream([sys.executable, "-c", SERVER.format(tail="")])
+    survivor = int(output.split()[1])
+    try:
+        assert code == 0
+        assert not _exits_within(survivor, 1)
+    finally:
+        _reap(survivor)
+
+
+def test_nothing_is_contained_off_windows(monkeypatch):
+    monkeypatch.setattr(lw, "ON_WINDOWS", False)
+    assert lw.contain(os.getpid()) is None
+    lw.release(None)  # a no-op, not an error
+
+
+def test_a_process_that_cannot_be_opened_is_left_uncontained():
+    """Best-effort, like every other part of this wrapper: no job is no reason to fail."""
+    assert lw.contain(0) is None
 
 
 # --- an unattended failure reaches the ledger --------------------------------

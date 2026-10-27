@@ -71,6 +71,7 @@ Pure and stdlib-only; every decision is an importable function tested in
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import json
 import os
 import re
@@ -194,6 +195,21 @@ JOB_ENV = "DEVKIT_JOB"
 # stops creating one. The window-less console is inherited by the child's own children,
 # so a wrapped script does not have to know about any of this.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# The cost of that flag, and what pays it. A console of its own means the child never
+# hears its task's terminal close, so closing it killed this wrapper and orphaned the
+# command: ec0274d1, a `ui-task.py` server and its `uv` still answering on the port. So
+# the child is put in a job object that kills every process in it when its last handle
+# closes, which is this wrapper's, however it dies (`contain`) -- and the kill is
+# disarmed once the command exits on its own (`release`), so a process it launched to
+# outlive it, Docker Desktop from `docker-maint.py`, still does. A job is inherited by
+# every descendant; `BREAKAWAY_OK` leaves `CREATE_BREAKAWAY_FROM_JOB` to one that must
+# survive even a killed wrapper.
+ON_WINDOWS = os.name == "nt"
+JOB_KILL_ON_CLOSE = 0x2000
+JOB_BREAKAWAY_OK = 0x800
+JOB_EXTENDED_LIMITS = 9  # JobObjectExtendedLimitInformation
+PROCESS_SET_QUOTA_AND_TERMINATE = 0x0100 | 0x0001
 
 # Seconds `head_stamp` waits on git before filing no `head_at=`: it runs ahead of the job,
 # so a git that hangs must not hold the job back.
@@ -534,13 +550,92 @@ def stream(command: list[str], env: dict[str, str] | None = None) -> tuple[int, 
             shell=True,
             creationflags=NO_WINDOW,
         )
+    job = contain(process.pid)
     captured: list[str] = []
     assert process.stdout is not None  # noqa: S101 - PIPE above guarantees it
     for line in iter(process.stdout.readline, ""):
         captured.append(line)
         echo(line)
     process.stdout.close()
-    return process.wait(), "".join(captured)
+    code = process.wait()
+    release(job)
+    return code, "".join(captured)
+
+
+@functools.cache
+def _kernel32():
+    """kernel32, typed for the job-object calls `contain` and `release` make."""
+    import ctypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle, dword = ctypes.c_void_p, ctypes.c_uint32
+    k.CreateJobObjectW.restype = handle
+    k.CreateJobObjectW.argtypes = (handle, ctypes.c_wchar_p)
+    k.SetInformationJobObject.argtypes = (handle, ctypes.c_int, handle, dword)
+    k.OpenProcess.restype = handle
+    k.OpenProcess.argtypes = (dword, ctypes.c_int, dword)
+    k.AssignProcessToJobObject.argtypes = (handle, handle)
+    k.CloseHandle.argtypes = (handle,)
+    return k
+
+
+def _limit(job: int, flags: int) -> bool:
+    """Set `job`'s limit flags to `flags`; whether Windows took them."""
+    import ctypes
+
+    size, large = ctypes.c_size_t, ctypes.c_int64
+
+    class Limits(ctypes.Structure):
+        # JOBOBJECT_EXTENDED_LIMIT_INFORMATION: the basic limits, IO_COUNTERS, four sizes.
+        _fields_ = [
+            ("process_time", large),
+            ("job_time", large),
+            ("flags", ctypes.c_uint32),
+            ("min_ws", size),
+            ("max_ws", size),
+            ("processes", ctypes.c_uint32),
+            ("affinity", size),
+            ("priority", ctypes.c_uint32),
+            ("scheduling", ctypes.c_uint32),
+            ("io", ctypes.c_uint64 * 6),
+            ("memory", size * 4),
+        ]
+
+    limits = Limits(flags=flags)
+    return bool(
+        _kernel32().SetInformationJobObject(
+            job, JOB_EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)
+        )
+    )
+
+
+def contain(pid: int) -> int | None:
+    """A job holding process `pid`, armed to kill it and all it starts when this
+    wrapper's handle to it closes; None off Windows or wherever Windows refuses one --
+    best-effort, since no job is no reason to fail the task. See `JOB_KILL_ON_CLOSE`."""
+    if not ON_WINDOWS:
+        return None
+    k = _kernel32()
+    job = k.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    process = k.OpenProcess(PROCESS_SET_QUOTA_AND_TERMINATE, False, pid)
+    held = bool(process) and _limit(job, JOB_KILL_ON_CLOSE | JOB_BREAKAWAY_OK)
+    held = held and bool(k.AssignProcessToJobObject(job, process))
+    if process:
+        k.CloseHandle(process)
+    if not held:
+        k.CloseHandle(job)
+        return None
+    return job
+
+
+def release(job: int | None) -> None:
+    """Disarm `job` and let it go, for a command that exited on its own: what it left
+    running was left on purpose. A job that will not disarm is kept open instead, so
+    closing it does not kill what disarming was meant to spare."""
+    if job is not None and _limit(job, JOB_BREAKAWAY_OK):
+        _kernel32().CloseHandle(job)
 
 
 def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> int:
