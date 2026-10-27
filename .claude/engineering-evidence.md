@@ -167,6 +167,27 @@ reading them avoids `$HOME` for the tilde, which is the one spelling that is act
 refused. Nothing gates a sentence like that, which is why it survived until a session
 ran the commands instead of believing it.
 
+## A container's command line, read as the host's
+
+Both tools judge the text of a `docker exec … sh -c "…"` as if the host would run it. A
+carameli session (ledger groups `9a2a5478` and its Bash twin, 2026-10-27) met each in
+turn:
+
+```
+Bash:       docker exec mutmut-probe sh -c '… tar --exclude=./.git …'
+            → "hands sh text naming git in a plain command … Refusing to run it"
+PowerShell: docker exec … mutmut-probe sh -c "rm -rf mutants; …"
+            → "Remove-Item on system path '/work' is blocked. This path is protected
+               from removal."
+```
+
+The second is the PowerShell tool's own protected-path check, not the isolation guard
+and not devkit: it reads `rm` as the `Remove-Item` alias and the container's `/work` as a
+host root. The rule's "PowerShell for a compound statement" sends a session straight
+into it. What passes both is what the session found: write the container's commands to a
+script file with the Write tool and run that file with `sh` in the container (a
+bind-mounted path, or `docker cp` first), so neither tool sees the text.
+
 ## Git Bash rewrites a `rev:path` whose path starts with a dot
 
 Not the guard: the MSYS layer under Git Bash converting what it takes for a POSIX path
