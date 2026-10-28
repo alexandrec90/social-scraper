@@ -18,7 +18,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-social_scraper_local_dev}
       POSTGRES_DB: ${POSTGRES_DB:-social_scraper}
     ports:
-      - "${DB_HOST_PORT:-5434}:5432"
+      # Loopback only: the db is for this host. Another PC reaches it, if ever, through
+      # `tailscale serve` (tailnet only), as ibkr_trader's is, never the LAN.
+      - "127.0.0.1:${DB_HOST_PORT:-5434}:5432"
     volumes:
       # postgres:18 keeps its data under a versioned subdirectory and refuses to start
       # when a volume is mounted at the old `/var/lib/postgresql/data` path -- the
