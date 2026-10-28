@@ -472,8 +472,12 @@ def _exits_within(pid: int, seconds: float) -> bool:
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
-        if _zombie(pid) or time.monotonic() > deadline:
-            return _zombie(pid)
+        # One look per pass: a second `_zombie` can run after init reaps the zombie the
+        # first one saw, and an absent `/proc` entry reads as not a zombie.
+        if _zombie(pid):
+            return True
+        if time.monotonic() > deadline:
+            return False
         time.sleep(0.1)
 
 
@@ -486,6 +490,17 @@ def _reap(*pids: int) -> None:
             os.kill(pid, 9)
         except ProcessLookupError:
             pass
+
+
+def test_a_zombie_reaped_between_two_looks_has_still_exited(monkeypatch):
+    """The gate's flake on e274312: `_exits_within` saw a zombie, looked again after init
+    had reaped it, found no `/proc` entry and read the gone process as one still running.
+    `os.kill` is stubbed because on Windows a signal 0 terminates the pid it names."""
+    looks = iter([True, False])
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)
+    monkeypatch.setitem(globals(), "_zombie", lambda pid: next(looks))
+    assert _exits_within(4321, 0)
 
 
 def test_closing_the_terminal_takes_the_command_s_whole_tree_with_it(tmp_path):
