@@ -225,9 +225,13 @@ class XCrawler:
                     self.stats.notices.append(f"search skipped -- {exc.detail}")
                     searching = False
                     continue
-                if exc.outcome == TIMED_OUT and not self.throttle.failing():
-                    # One slow load on a loaded machine; the next page may answer.
+                if exc.outcome == TIMED_OUT and self.throttle.notice(TIMED_OUT):
+                    # One slow load on a loaded machine; the next page may answer. A
+                    # streak has just paused X, which ends the cycle with the pause as
+                    # the response; one after the pause has lifted is an error.
                     self.stats.notices.append(str(exc))
+                    if self.throttle.failing():
+                        return
                     continue
                 if exc.outcome == RATE_LIMITED and self.throttle.notice(RATE_LIMITED):
                     # The breaker has paused X for a backoff that doubles with the day's

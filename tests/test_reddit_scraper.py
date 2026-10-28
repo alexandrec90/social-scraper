@@ -328,13 +328,13 @@ def test_one_server_error_is_a_notice_and_the_crawl_goes_on(engine, universe):
     assert stats.ingest.stored == 1
 
 
-def test_server_errors_in_a_row_are_an_error_and_end_the_run(engine, universe):
+def test_server_errors_in_a_row_pause_and_end_the_run_as_notices(engine, universe):
     browser = FakeBrowser()
     browser.default = PageResult(500, "u")
     s, store = scraper(engine, universe, browser)
     stats = s.run(("wallstreetbets", "stocks"), warm=False)
     assert len(browser.calls) == ERROR_STREAK
-    assert len(stats.notices) == ERROR_STREAK - 1 and len(stats.errors) == 1
+    assert len(stats.notices) == ERROR_STREAK and stats.errors == []
     assert store.get_block("reddit").blocked_until is not None
 
 
@@ -397,20 +397,20 @@ def test_one_timed_out_listing_is_a_notice_and_the_crawl_goes_on(engine, univers
     assert store.get_block("reddit").consecutive_failures == 0
 
 
-def test_timeouts_in_a_row_are_an_error_and_end_the_run(engine, universe):
+def test_timeouts_in_a_row_pause_and_end_the_run_as_notices(engine, universe):
     browser = FakeBrowser()
     browser.default = TIMED_OUT_PAGE
     s, store = scraper(engine, universe, browser)
     stats = s.run(("wallstreetbets", "stocks"), warm=False)
     assert len(browser.calls) == ERROR_STREAK
-    assert len(stats.notices) == ERROR_STREAK - 1
-    assert len(stats.errors) == 1 and "timed out" in stats.errors[0]
+    assert stats.errors == [] and len(stats.notices) == ERROR_STREAK
+    assert all("timed out" in n for n in stats.notices)
     assert store.get_block("reddit").blocked_until is not None
 
 
 def test_a_timeout_after_failing_runs_is_an_error_at_once(engine, universe):
     """The streak is the breaker's persisted count, so a platform that keeps timing out
-    across cycles is not a notice every cycle."""
+    across cycles -- through the pause the streak set -- is not a notice every cycle."""
     browser = FakeBrowser()
     browser.default = TIMED_OUT_PAGE
     s, store = scraper(engine, universe, browser)

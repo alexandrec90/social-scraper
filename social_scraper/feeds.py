@@ -11,8 +11,9 @@ and the run report were built around:
   the breaker's backoff can still answer it, and an error once it cannot; a challenge is a
   notice until it comes again after the cooldown (`Throttle.notice`), since every feed
   is read anonymously and only waiting lifts the block;
-- a **timeout**, a **5xx** or no answer at all is a notice until the platform keeps
-  failing (`Throttle.failing`), and then ends the run;
+- a **timeout**, a **5xx** or no answer at all is a notice, and once the platform keeps
+  failing (`Throttle.failing`) it ends the run on the pause that sets -- still a notice,
+  and an error only when the first load after the pause fails too (`Throttle.notice`);
 - any other failure, or a page that does not parse, is an error for that subject, and
   the run goes on to the next;
 - the cycle's **deadline** (`OutOfTime`) ends the run with what it read, as a notice.
@@ -182,17 +183,17 @@ class FeedCrawler:
         try:
             step()
         except FetchFailed as exc:
-            noticed = self.failed(f"{label}: {exc}", exc.outcome)
+            self.failed(f"{label}: {exc}", exc.outcome)
             if exc.outcome in (CHALLENGED, RATE_LIMITED) or (
-                exc.outcome in TRANSIENT and not noticed
+                exc.outcome in TRANSIENT and self.throttle.failing()
             ):
                 raise
         except ValueError as exc:
             self.stats.errors.append(f"{label}: unparseable page ({exc})")
 
     def failed(self, line: str, outcome: str) -> bool:
-        """Record a failed load: a notice when it timed out or met a server error and the
-        platform is not failing, was a first challenge, or a rate limit the backoff still answers
+        """Record a failed load: a notice when it timed out or met a server error short of
+        outliving a pause, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):
