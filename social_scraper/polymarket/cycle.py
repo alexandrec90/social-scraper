@@ -23,8 +23,9 @@ Read from the Gamma API (`gamma-api.polymarket.com`) with no key or account, thr
 A **404** is not "nothing here" on Gamma, as it is on the feeds `FeedCrawler` was built
 for: an `/events` query that matches nothing answers 200 `[]` (`?id=999999999`, measured
 2026-10-21). On 2026-10-21 15:35Z Gamma answered 404 to every load of a cycle for a few
-seconds, so a 404 is Gamma not serving, read like a timeout (`classify`): a notice until
-`ERROR_STREAK` loads in a row have failed, then an error that ends the crawl.
+seconds, so a 404 is Gamma not serving, read like a timeout (`classify`): a notice, and
+`ERROR_STREAK` loads in a row end the crawl on a pause, named in the notices; a load that
+fails after the pause has lifted is an error.
 
 Which domains run decides which tags are read: stock tags only with `stocks` in
 `DOMAINS`, league tags only with `sports`. Markets are not posts, so nothing here goes

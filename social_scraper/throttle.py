@@ -47,17 +47,20 @@ RATE_LIMITED = "rate_limited"
 CHALLENGED = "challenged"
 ERROR = "error"
 # The page load got no answer in time (`PageResult.timed_out`). A plain error to the
-# breaker; to a crawler, a notice until `ERROR_STREAK` loads in a row have failed
-# (`Throttle.failing`), since one slow load on a loaded machine is not the platform down.
+# breaker; to a crawler, a notice until the platform has failed through a pause
+# (`Throttle.notice`), since one slow load on a loaded machine is not the platform down.
 TIMED_OUT = "timed_out"
 # The platform answered with a 5xx, or not at all (a reset connection): its own trouble,
 # and mostly brief. A timeout's rules: on 2026-10-23 Bluesky's AppView answered one
 # search with HTTP 500 between good ones, and the scheduled scrape failed on it.
 SERVER_ERROR = "server_error"
-# Failed loads in a row at which a plain error pauses the platform, and at which a
-# timed-out load or a server error stops being a notice.
+# Failed loads in a row at which a plain error pauses the platform (`Throttle.failing`),
+# which ends a crawler's run.
 ERROR_STREAK = 3
-# The outcomes that are a notice until `ERROR_STREAK` (`Throttle.notice`).
+# The outcomes that are a notice until a load after the `ERROR_STREAK` pause fails too
+# (`Throttle.notice`). The streak itself is not an error: on 2026-10-28 the AppView
+# answered three searches with HTTP 500 inside 25 seconds, the pause was the whole
+# response, and failing the scrape on it only sent a fixer at an outage nobody could act on.
 TRANSIENT = (TIMED_OUT, SERVER_ERROR)
 # Failed loads in a row at which a challenge on an anonymous crawl stops being a notice
 # (`Throttle.notice`). The first is one: the breaker has already paused the platform for
@@ -229,13 +232,15 @@ class Throttle:
 
     def failing(self) -> bool:
         """Whether the last `ERROR_STREAK` loads on this platform all failed -- across
-        runs, from the breaker's persisted count -- so a timeout is no longer a notice."""
+        runs, from the breaker's persisted count -- so the breaker has paused it and a
+        crawler ends its run."""
         return self.store.get_block(self.policy.platform).consecutive_failures >= ERROR_STREAK
 
     def notice(self, outcome: str) -> bool:
         """Whether a failed load just recorded as `outcome` is a notice, not an error, for
-        an anonymous crawl: a timeout or a server error while the platform is not
-        `failing`, or a challenge
+        an anonymous crawl: a timeout or a server error up to and including the one that
+        made the platform `failing` -- the pause is the response, and only a failure on
+        the first load after it is an outage that needs a person -- or a challenge
         before `CHALLENGE_STREAK` -- counted across runs, from the breaker's persisted
         streak -- or a rate limit after a good load whose pause is short of the cap. A
         logged-in crawl (X) reads `failing` itself and asks this of a rate limit only: a
@@ -244,7 +249,7 @@ class Throttle:
         p = self.policy.platform
         failures = self.store.get_block(p).consecutive_failures
         if outcome in TRANSIENT:
-            return failures < ERROR_STREAK
+            return failures <= ERROR_STREAK
         if outcome == CHALLENGED:
             return failures < CHALLENGE_STREAK
         if outcome == RATE_LIMITED:

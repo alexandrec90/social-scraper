@@ -162,14 +162,18 @@ def test_a_challenge_again_after_the_cooldown_is_an_error(engine, clock):
     assert stats.notices == [] and "challenged" in stats.errors[0]
 
 
-def test_a_timeout_is_a_notice_until_the_platform_keeps_failing(engine, clock):
+def test_a_timeout_is_a_notice_until_it_outlives_the_pause(engine, clock):
     browser = FakeBrowser()
     browser.default = PageResult(None, "u", timed_out=True)
     c = crawler(browser, engine, clock)
     stats = c.run_steps([(s, loader(c, f"https://{s}")) for s in "abcd"])
-    # Two notices, then the third failure in a row makes the platform failing: an error,
-    # and the run stops there.
-    assert len(stats.notices) == 2 and len(stats.errors) == 1 and stats.requests == 3
+    # The third failure in a row pauses the platform and the run stops there, a notice.
+    assert len(stats.notices) == 3 and stats.errors == [] and stats.requests == 3
+    # The pause lifts and the platform still times out: an error.
+    clock.now = c.throttle.store.get_block(c.platform).blocked_until + timedelta(minutes=1)
+    c = crawler(browser, engine, clock, mem=c.throttle.store)
+    stats = c.run_steps([("e", loader(c, "https://e"))])
+    assert stats.notices == [] and "timed out" in stats.errors[0]
 
 
 def test_one_server_error_is_a_notice_and_the_crawl_goes_on(engine, clock):
@@ -184,12 +188,15 @@ def test_one_server_error_is_a_notice_and_the_crawl_goes_on(engine, clock):
     assert browser.calls == ["https://a", "https://b"]
 
 
-def test_server_errors_are_a_notice_until_the_platform_keeps_failing(engine, clock):
+def test_server_errors_in_a_row_pause_the_platform_as_notices(engine, clock):
+    """2026-10-28: Bluesky's AppView answered three searches in a row with HTTP 500, and
+    the third failed the scheduled scrape, though the pause it set was the response."""
     browser = FakeBrowser()
     browser.default = PageResult(502, "u")
     c = crawler(browser, engine, clock)
     stats = c.run_steps([(s, loader(c, f"https://{s}")) for s in "abcd"])
-    assert len(stats.notices) == 2 and len(stats.errors) == 1 and stats.requests == 3
+    assert len(stats.notices) == 3 and stats.errors == [] and stats.requests == 3
+    assert c.throttle.store.get_block(c.platform).blocked_until is not None
 
 
 def test_the_deadline_ends_the_run_as_a_notice(engine):

@@ -21,7 +21,7 @@ from social_scraper.sports import registry
 from social_scraper.sports.leagues import League
 from social_scraper.sports.matcher import NAME, EntityMention, Matcher
 from social_scraper.sports.wikidata import TEAM, EntityRecord
-from social_scraper.throttle import MemoryThrottleStore, Policy, Throttle
+from social_scraper.throttle import ERROR_STREAK, MemoryThrottleStore, Policy, Throttle
 
 DID = "did:plc:testauthor000000000000aa"
 OTHER = "did:plc:testparent000000000000bb"
@@ -219,6 +219,28 @@ def test_crawl_failures(engine, universe, result, where, stops):
     stats = live.crawl(s, engine, ingestor, browser, throttle())
     assert getattr(stats, where), stats
     assert len(browser.calls) == (1 if stops else 2)
+
+
+def test_a_5xx_streak_pauses_bluesky_as_a_notice_and_one_after_the_pause_is_an_error(
+    engine, universe
+):
+    """2026-10-28 08:32Z: the AppView answered $STX, $META and $MU with HTTP 500 inside
+    25 seconds. The third set the pause and failed the scheduled scrape, though the pause
+    was the whole response and nobody had anything to do."""
+    browser = FakeBrowser({live.SEARCH_URL: PageResult(500, "u")})
+    clock = Clock()
+    t = throttle(clock)
+    s = settings(watchlist="STX,META,MU,TSLA", bluesky_searches_per_cycle=4)
+    stats = live.crawl(s, engine, Ingestor(engine, universe, clock), browser, t)
+    assert stats.errors == [] and len(stats.notices) == ERROR_STREAK
+    assert len(browser.calls) == ERROR_STREAK  # the pause ended the run
+    block = t.store.get_block(BLUESKY)
+    assert block.blocked_until is not None
+    # The pause lifts and Bluesky still answers 500: an outage that outlived its pause.
+    clock.now = block.blocked_until + timedelta(minutes=1)
+    s = settings(watchlist="NVDA", bluesky_searches_per_cycle=1)
+    stats = live.crawl(s, engine, Ingestor(engine, universe, clock), browser, t)
+    assert stats.notices == [] and len(stats.errors) == 1 and "HTTP 500" in stats.errors[0]
 
 
 def test_crawl_404_is_nothing_found(engine, universe):
