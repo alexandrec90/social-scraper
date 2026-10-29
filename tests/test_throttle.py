@@ -224,12 +224,15 @@ def test_a_challenge_on_top_of_another_failure_is_an_error():
     assert not t.notice(CHALLENGED)
 
 
-def test_notice_reads_timeouts_as_failing_does_and_nothing_else_as_one():
+def test_a_timeout_is_a_notice_until_one_fails_after_the_streaks_pause():
     t, _, _ = make()
     t.record(TIMED_OUT, "k", None)
     assert t.notice(TIMED_OUT)
     for _ in range(ERROR_STREAK - 1):
         t.record(TIMED_OUT, "k", None)
+    # The streak's own last load: the pause it set is the response.
+    assert t.notice(TIMED_OUT) and t.failing()
+    t.record(TIMED_OUT, "k", None)
     assert not t.notice(TIMED_OUT)
     fresh, _, _ = make()
     fresh.record(ERROR, "k", 400)
@@ -244,8 +247,11 @@ def test_a_server_error_is_a_notice_as_a_timeout_is():
     assert t.notice(SERVER_ERROR)
     t.record(TIMED_OUT, "k", None)
     assert t.notice(SERVER_ERROR)
+    # 2026-10-28: three HTTP 500s inside 25 seconds paused Bluesky and failed the scrape.
     t.record(SERVER_ERROR, "k", 502)
-    assert not t.notice(SERVER_ERROR) and t.failing()
+    assert t.notice(SERVER_ERROR) and t.failing()
+    t.record(SERVER_ERROR, "k", 500)
+    assert not t.notice(SERVER_ERROR)
 
 
 def test_the_only_failed_load_of_the_day_being_a_rate_limit_is_a_notice():

@@ -452,16 +452,26 @@ def test_one_timed_out_search_is_a_notice_and_the_cycle_goes_on(engine, universe
     assert any("timed out" in n for n in stats.notices)
 
 
-def test_timeouts_in_a_row_are_an_error_and_end_the_cycle(engine, universe):
+def test_timeouts_in_a_row_pause_and_end_the_cycle_and_one_after_the_pause_is_an_error(
+    engine, universe
+):
     with engine.begin() as conn:
         accounts.add_seeds(conn, ["alice", "bob"], NOW)
     browser = FakeBrowser()
     browser.default = TIMED_OUT_PAGE
-    s = scraper(engine, universe, browser, pages=4, search_share=0.5, watchlist=("NVDA",))
+    clock = Clock()
+    s = scraper(engine, universe, browser, clock, pages=4, search_share=0.5, watchlist=("NVDA",))
     stats = s.run()
     assert len(browser.calls) == ERROR_STREAK
-    assert len(stats.errors) == 1 and "timed out" in stats.errors[0]
-    assert len(stats.notices) == ERROR_STREAK - 1
+    assert stats.errors == [] and len(stats.notices) == ERROR_STREAK
+    block = s.throttle.store.get_block("x")
+    assert block.blocked_until is not None
+    clock.now = block.blocked_until + timedelta(minutes=1)
+    # The next cycle's scraper, with the breaker's persisted streak and an elapsed pause.
+    s = scraper(engine, universe, browser, clock, pages=4, search_share=0.5, watchlist=("NVDA",))
+    s.throttle.store.set_block("x", block, clock.now)
+    stats = s.run()
+    assert len(stats.errors) == 1 and "timed out" in stats.errors[0] and stats.notices == []
 
 
 RATE_LIMIT_PAGE = PageResult(200, "https://x.com/bob", text="Something went wrong. Try reloading.")

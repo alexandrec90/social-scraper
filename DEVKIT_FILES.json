@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.72",
+  "devkit_tag": "v0.11.74",
   "files": {
     ".claude/engineering-evidence.md": "1b8267ab4b6c2f8dbf6eec4c1fe48e7b60157e83f8278d7ea081c65fe1a9b6af",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -42,7 +42,7 @@
     "scripts/hooks/tests/test_hook_execution_contract.py": "833f23fc9ee40dc863b9a98e01e5205d38fcf9d2a8fc714eaca549c9e9100fcb",
     "scripts/hooks/tests/test_invoke_capped.py": "ce50d6a670ab0e0a65d12ca1e2cf878064e587993a5136488efc43e93deb3a4d",
     "scripts/hooks/tests/test_lint_fix.py": "deb89c25df49464aacf13e128ca82e01e1f0aa50fa50d46eb186caf7e0343ae9",
-    "scripts/hooks/tests/test_log_wrap.py": "34bd73d05e9f5786c797361bc976e960891057c16056eebad2f1f60b1c3a40da",
+    "scripts/hooks/tests/test_log_wrap.py": "130e5b0eff1758a8a727cb67101af0c9fe02cc35e607b3aee444a8b8df8a610a",
     "scripts/hooks/tests/test_merge_dependabot_prs.py": "64a6ce4288c9b76789ed235253faea89bdee038c2d183fa8be9f146fd8510f4c",
     "scripts/hooks/tests/test_project_dependabot.py": "7f56c5c815895363fd7a11791970f184c851e5238df4cb41a13b5d7b349468a7",
     "scripts/hooks/tests/test_project_settings.py": "888d9a463628930c4e61240dc328a632b8804e7a335f5935b24c18fc7d0eb69a",

@@ -452,10 +452,11 @@ def test_a_gamma_404_is_gamma_not_serving_not_an_empty_tag(engine, clock):
     assert stats.markets == 1 and len(browser.calls) == 5
 
 
-def test_gamma_404_on_every_load_ends_the_crawl_as_an_error(engine, clock):
+def test_gamma_404_on_every_load_ends_the_crawl_on_a_pause_and_names_it(engine, clock):
     """2026-10-21 15:35Z: Gamma answered 404 to all seven loads of a cycle, tag reads
     and the overdue lookup alike. The tags read as empty and the lookup as
-    "unparseable page (not a Gamma /events list)"; the outage was never named."""
+    "unparseable page (not a Gamma /events list)"; the outage was never named. The
+    streak pauses Polymarket, as notices; it is an error once it outlives the pause."""
     s = store.Scope(frozenset(), (NHL, TENNIS), None)
     with engine.begin() as conn:
         store.store(conn, parse_events([pm_game("g1")]), s, SPORTS, NOW - timedelta(days=1))
@@ -463,10 +464,16 @@ def test_gamma_404_on_every_load_ends_the_crawl_as_an_error(engine, clock):
     browser = FakeBrowser()
     browser.default = gone()
     plan = Plan(s, resolve_limit=5)
-    stats = PolymarketCrawler(browser, throttle(clock), engine, plan, clock=clock).run()
+    t = throttle(clock)
+    stats = PolymarketCrawler(browser, t, engine, plan, clock=clock).run()
     assert len(browser.calls) == ERROR_STREAK
-    assert len(stats.notices) == ERROR_STREAK - 1 and len(stats.errors) == 1
-    assert "HTTP 404" in stats.errors[0] and "unparseable" not in stats.errors[0]
+    assert len(stats.notices) == ERROR_STREAK and stats.errors == []
+    assert all("HTTP 404" in n and "unparseable" not in n for n in stats.notices)
+    block = t.store.get_block(POLYMARKET)
+    assert block.blocked_until is not None
+    clock.now = block.blocked_until + timedelta(minutes=1)
+    stats = PolymarketCrawler(browser, t, engine, plan, clock=clock).run()
+    assert len(stats.errors) == 1 and "HTTP 404" in stats.errors[0]
 
 
 def test_an_overdue_lookup_404_is_not_an_unparseable_page(engine, clock):

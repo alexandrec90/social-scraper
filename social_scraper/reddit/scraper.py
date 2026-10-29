@@ -193,19 +193,19 @@ class RedditScraper:
         try:
             self.crawl_listing(sub, listing, **kwargs)
         except FetchFailed as exc:
-            noticed = self._failed(f"r/{sub}/{listing}: {exc}", exc.outcome)
+            self._failed(f"r/{sub}/{listing}: {exc}", exc.outcome)
             # A timeout or 5xx streak stops the run here: the breaker has just paused the
             # platform, and the next `acquire` would end it as a skip, losing this run.
             if exc.outcome in (CHALLENGED, RATE_LIMITED) or (
-                exc.outcome in TRANSIENT and not noticed
+                exc.outcome in TRANSIENT and self.throttle.failing()
             ):
                 raise
         except ValueError as exc:
             self.stats.errors.append(f"r/{sub}/{listing}: unparseable page ({exc})")
 
     def _failed(self, line: str, outcome: str) -> bool:
-        """Record a failed load: a notice when it timed out or met a server error and the
-        platform is not failing, was a first challenge, or a rate limit the backoff still answers
+        """Record a failed load: a notice when it timed out or met a server error short of
+        outliving a pause, was a first challenge, or a rate limit the backoff still answers
         (`Throttle.notice`), else an error. True when
         it was a notice."""
         if self.throttle.notice(outcome):
