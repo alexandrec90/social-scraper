@@ -45,6 +45,7 @@ in the scrapers, which are tested against a fake `Browser`.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from collections.abc import Callable
 from pathlib import Path
@@ -60,9 +61,18 @@ NAV_TIMEOUT_MS = 45_000
 # `error`. A page load past `NAV_TIMEOUT_MS` comes back as `PageResult.timed_out` and a
 # launch past Playwright's three minutes as `LaunchTimedOut`; this is any other wait.
 TIMED_OUT = "timed_out"
-# `_goto`'s answer for a navigation that timed out: not None, which is a load that
-# answered without a response object.
-NO_ANSWER = object()
+# Chrome's network errors that mean the site gave no answer -- the connection dropped,
+# was refused, or never resolved. `_goto` returns one as a `PageResult` with no status,
+# which the throttle reads as a 5xx (`SERVER_ERROR`), the same as `apiclient` reads a
+# reset socket. Raised, it ended the platform's crawl and failed the scheduled scrape
+# (2026-10-30: one `net::ERR_CONNECTION_CLOSED` from TradingView). Any other `net::`
+# error -- an aborted navigation, a blocked request -- is not the site's trouble and
+# still raises.
+DROPPED_CONNECTION = re.compile(
+    r"net::ERR_(?:CONNECTION_(?:CLOSED|RESET|REFUSED|ABORTED|FAILED|TIMED_OUT)"
+    r"|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|INTERNET_DISCONNECTED|NAME_NOT_RESOLVED"
+    r"|ADDRESS_UNREACHABLE|HTTP2_PROTOCOL_ERROR|QUIC_PROTOCOL_ERROR|SSL_PROTOCOL_ERROR)\b"
+)
 TEXT_EXCERPT_CHARS = 3_000
 LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
 # Where Windows itself parks minimized windows: off every monitor.
@@ -232,21 +242,29 @@ class PlaywrightBrowser:
                 self._pw = None
 
     def _goto(self, url: str) -> Any:
-        """The navigation's response; `NO_ANSWER` when it got none in time."""
+        """The navigation's response, or the `PageResult` of a load that got no answer:
+        timed out, or its connection dropped (`DROPPED_CONNECTION`)."""
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         try:
             return self._page.goto(url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
         except PlaywrightTimeoutError as exc:
             log.warning("page load timed out: %s (%s)", url, exc)
-            return NO_ANSWER
+            return PageResult(status=None, final_url=url, timed_out=True)
+        except PlaywrightError as exc:
+            dropped = DROPPED_CONNECTION.search(str(exc))
+            if dropped is None:
+                raise
+            log.warning("page load got no answer: %s (%s)", url, dropped.group())
+            return PageResult(status=None, final_url=url, text=dropped.group())
 
     def get_json(self, url: str) -> PageResult:
         from playwright.sync_api import Error as PlaywrightError
 
         resp = self._goto(url)
-        if resp is NO_ANSWER:
-            return PageResult(status=None, final_url=url, timed_out=True)
+        if isinstance(resp, PageResult):
+            return resp
         data = None
         if resp is not None:
             try:
@@ -264,8 +282,8 @@ class PlaywrightBrowser:
         from playwright.sync_api import Error as PlaywrightError
 
         resp = self._goto(url)
-        if resp is NO_ANSWER:
-            return PageResult(status=None, final_url=url, timed_out=True)
+        if isinstance(resp, PageResult):
+            return resp
         try:
             html = self._page.content()
         except PlaywrightError:
@@ -297,8 +315,8 @@ class PlaywrightBrowser:
         self._page.on("response", on_response)
         try:
             resp = self._goto(url)
-            if resp is NO_ANSWER:
-                return PageResult(status=None, final_url=url, timed_out=True)
+            if isinstance(resp, PageResult):
+                return resp
             self._settle()
             for _ in range(scrolls):
                 between()

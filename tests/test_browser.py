@@ -27,7 +27,9 @@ from social_scraper.browser import (
     launch_args,
     open_for_login,
 )
+from social_scraper.feeds import classify
 from social_scraper.fetch import LaunchTimedOut
+from social_scraper.throttle import SERVER_ERROR
 
 HEADLESS_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -360,6 +362,43 @@ def test_a_timed_out_capture_is_a_result_and_drops_its_listener():
     r = make(page).capture("https://x.com/a", lambda u: True, 2, lambda: None)
     assert r.timed_out and r.payloads == [] and page.removed == ["response"]
     assert page.waits == []  # no settling, no scrolling on a page that never loaded
+
+
+class DroppedPage(FakePage):
+    def __init__(self, code="ERR_CONNECTION_CLOSED"):
+        super().__init__(FakeResponse("u", 200))
+        self.code = code
+
+    def goto(self, url, wait_until, timeout):
+        raise PlaywrightError(f"Page.goto: net::{self.code} at {url}\nCall log:\n  - nav")
+
+
+TV_IDEAS = "https://www.tradingview.com/symbols/SPCX/ideas/?component-data-only=1"
+
+
+def test_a_dropped_connection_is_a_server_error_not_a_raise():
+    """2026-10-30: one `net::ERR_CONNECTION_CLOSED` ended TradingView's crawl and failed
+    the scheduled scrape; it is the site's trouble, which the throttle reads as a 5xx."""
+    r = make(DroppedPage()).get_json(TV_IDEAS)
+    assert r.status is None and not r.timed_out and r.final_url == TV_IDEAS
+    assert r.text == "net::ERR_CONNECTION_CLOSED"
+    assert classify(r)[0] == SERVER_ERROR
+
+
+@pytest.mark.parametrize(
+    "code", ["ERR_CONNECTION_RESET", "ERR_EMPTY_RESPONSE", "ERR_NAME_NOT_RESOLVED"]
+)
+def test_every_load_shape_returns_a_dropped_connection(code):
+    assert make(DroppedPage(code)).get_html("u").status is None
+    page = DroppedPage(code)
+    r = make(page).capture("https://x.com/a", lambda u: True, 2, lambda: None)
+    assert r.text == f"net::{code}" and page.removed == ["response"] and page.waits == []
+
+
+@pytest.mark.parametrize("code", ["ERR_ABORTED", "ERR_BLOCKED_BY_CLIENT", "ERR_CONNECTION_X"])
+def test_a_network_error_that_is_not_the_site_still_raises(code):
+    with pytest.raises(PlaywrightError, match=code):
+        make(DroppedPage(code)).get_json("u")
 
 
 class StalledPlaywright(FakePlaywright):
