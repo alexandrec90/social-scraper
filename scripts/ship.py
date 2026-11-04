@@ -260,7 +260,8 @@ def push_failure(stderr: str) -> str:
     if "failed to push some refs" in text:
         return (
             "push refused before anything was sent -- the pre-push gate failed (not a network "
-            "error). Its findings are above and in logs/test-failures.log / logs/lint-errors.log."
+            "error). Its findings are above and in logs/test-failures.log / "
+            "logs/lint-errors.log / logs/junit-hooks.xml."
         )
     return "push failed (not a network error): see git's output above."
 
