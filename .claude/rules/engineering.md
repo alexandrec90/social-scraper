@@ -80,7 +80,7 @@ PowerShell tool is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
-| `~` in a path; `$HOME` as the script, `python "$HOME/…/x.py"` | `$HOME` as an argument; the PowerShell tool for a script path |
+| `~` in a path; a variable as the script, `python "$S/x.py"`, or in a `sed` path | `$HOME` as an argument; the PowerShell tool for either |
 | `git -C`, `--git-dir`, `env -C`, `GIT_DIR=`, `cd … &&` before git | bare `git`, from the worktree |
 | command substitution, `for`/`while`, a subshell | one call each — a plain `&&` list is fine |
 | the letters `git` inside any of the above | nothing; it is a false positive |
@@ -88,7 +88,8 @@ PowerShell tool is the answer for a compound statement, not a workaround.
 
 **The last two rows waste turns.** An irreducible line is tested whole for `git` as a
 substring (`.gitignore`, `github.com`, `digit`): split it. PowerShell reads a
-container's `rm` as hitting a "protected" host path. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
+container's `rm` as hitting a "protected" host path, and `Remove-Item $d` as `/`: spell
+it out. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **Git Bash rewrites POSIX-looking arguments into Windows paths**: `rev:path` into what
 git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.

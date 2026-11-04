@@ -484,15 +484,16 @@ def resolve_js(spec: str, importer: str, roots: tuple[str, ...], files: set[str]
 
 
 def import_graph(
-    metrics: dict[str, scan_mod.FileMetrics], roots: tuple[str, ...]
+    metrics: dict[str, scan_mod.FileMetrics], roots: tuple[str, ...], typed: bool = False
 ) -> dict[str, set[str]]:
     """`importer -> {imported}` over the scanned files; edges to third-party code
-    are dropped, self-imports too."""
+    are dropped, self-imports too. `typed` adds the type-only imports, which close no
+    cycle and still use what they name."""
     files = set(metrics)
     graph: dict[str, set[str]] = {rel: set() for rel in files}
     for rel, m in metrics.items():
         py = PurePosixPath(rel).suffix in scan_mod.PY_SUFFIXES
-        for spec in m.modules:
+        for spec in (*m.modules, *m.type_modules) if typed else m.modules:
             target = (
                 resolve_python(spec, rel, roots, files)
                 if py
@@ -765,7 +766,7 @@ def findings(root: Path, cfg: harness_config.Config) -> list[Finding]:
         raw.extend(measure(rel, m, lim, is_test(rel, cfg)))
     graph = import_graph({r: m for r, m in metrics.items()}, roots)
     raw.extend(cycles({r: t for r, t in graph.items() if not is_test(r, cfg)}))
-    raw.extend(orphans(graph, texts, cfg))
+    raw.extend(orphans(import_graph(metrics, roots, typed=True), texts, cfg))
     raw.extend(layer_violations(metrics, graph, cfg))
     raw.extend(restrict_violations(texts, cfg))
     raw.extend(dependency_findings(root, cfg))

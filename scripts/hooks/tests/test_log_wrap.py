@@ -157,7 +157,7 @@ def test_a_clicked_child_may_still_prompt_and_a_caller_s_choice_stands():
 def test_always_runs_the_command_with_the_unattended_environment(monkeypatch, tmp_path):
     seen: dict[str, dict] = {}
 
-    def fake_stream(command, env=None):
+    def fake_stream(command, env=None, progress=None):
         seen[command[0]] = env or {}
         return 0, "ok"
 
@@ -175,7 +175,7 @@ def test_the_child_is_told_which_job_it_runs_as(monkeypatch, tmp_path):
     what it publishes. An outer wrapper's label is overwritten -- the innermost ran it."""
     seen: dict[str, dict] = {}
 
-    def fake_stream(command, env=None):
+    def fake_stream(command, env=None, progress=None):
         seen[command[0]] = env or {}
         return 0, "ok"
 
@@ -327,6 +327,61 @@ def test_a_real_failure_lands_in_the_file_the_terminal_points_at(tmp_path, capsy
     written = (tmp_path / "logs" / "ship-sweep.log").read_text(encoding="utf-8")
     assert "boom" in written
     assert "logs/ship-sweep.log" in capsys.readouterr().err
+
+
+def test_a_clicked_run_killed_mid_way_leaves_its_own_account(tmp_path):
+    """525ec1bc: homelab's generator run died with its terminal, and what its session
+    found was another project's report from six days before."""
+    log = tmp_path / "logs" / "new.log"
+    log.parent.mkdir()
+    log.write_text("the last run's report\n", encoding="utf-8")
+    script = "import time; print('got this far', flush=True); time.sleep(60)"
+    wrap = (sys.executable, str(REPO_ROOT / "scripts" / "log-wrap.py"), "New", "--")
+    wrapper = subprocess.Popen(
+        [*wrap, sys.executable, "-c", script],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and "got this far" not in log.read_text(encoding="utf-8"):
+        time.sleep(0.05)
+    wrapper.kill()
+    wrapper.wait(timeout=30)
+    left = log.read_text(encoding="utf-8")
+    assert "not finished" in left and "got this far" in left
+    assert "the last run's report" not in left
+
+
+def test_a_clicked_run_that_passes_still_empties_its_file(tmp_path):
+    """The progress lines are this run's own, so they do not hold its retraction back."""
+    command = ["T", "--", sys.executable, "-c", "print('fine')"]
+    assert lw.main(command, root=tmp_path) == 0
+    assert (tmp_path / "logs" / "t.log").read_text(encoding="utf-8") == ""
+
+
+def test_a_run_finishing_after_another_wrote_keeps_that_report(tmp_path):
+    """`write_artifact`'s concurrency guard still holds against another run's write."""
+    log = tmp_path / "logs" / "t.log"
+    handle = lw.open_progress(tmp_path, "t", "T", ["x"])
+    mine = lw.close_progress(handle, 0.0)
+    log.write_text("another run's failure\n", encoding="utf-8")
+    os.utime(log, (mine + 5, mine + 5))
+    lw.write_artifact(tmp_path, "t", "", since=mine)
+    assert log.read_text(encoding="utf-8") == "another run's failure\n"
+
+
+def test_progress_that_cannot_be_written_changes_nothing_about_the_run(tmp_path):
+    (tmp_path / "logs").write_text("a file where the directory goes", encoding="utf-8")
+    assert lw.open_progress(tmp_path, "t", "T", ["x"]) is None
+    assert lw.close_progress(None, 12.5) == 12.5
+
+
+def test_an_unattended_run_takes_no_file_over_before_it_ends(tmp_path, monkeypatch):
+    """`schedule_health` reads that file's time as a finished run's."""
+    monkeypatch.setattr(lw, "open_progress", lambda *a: pytest.fail("opened"))
+    command = ["--always", "T", "--", sys.executable, "-c", "print('fine')"]
+    assert lw.main(command, root=tmp_path) == 0
 
 
 # --- the unattended caller ----------------------------------------------------

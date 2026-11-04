@@ -21,6 +21,8 @@ and wrapping it anyway would produce a second, redundant file.
 **The artifact is the point, per `.claude/rules/engineering.md`:** a task's failure has
 to survive the terminal it scrolled past. `logs/<slug>.log` is overwritten per run and
 **emptied on success**, so a stale report can never outlive the failure it describes.
+For a clicked task the run takes it over as it starts (`open_progress`), so one that is
+killed leaves what it printed under a `not finished` line, never the last run's report.
 
 **`--always` keeps the passing run too, and is for the unattended caller.** For a task
 someone clicked, an empty file is unambiguous -- they watched it pass. Nobody watches a
@@ -80,6 +82,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 LOGS_DIR = "logs"
 
@@ -511,9 +514,47 @@ def echo(line: str, out=None) -> None:
         return
 
 
-def stream(command: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
+def open_progress(root: Path, name: str, title: str, command: list[str]) -> IO[str] | None:
+    """`logs/<name>.log` opened for a clicked task's run, saying what is running; None when
+    it cannot be written, which is no reason to change what the task reports.
+
+    Everything else here happens once the child has exited, so a run killed with its
+    terminal left nothing, and the previous run's report sat where this run's should be.
+    2026-11-03: "Project: New from devkit" died in `git_init` for homelab, its session
+    found the log productivity-tracker's run had left six days before, and read it as
+    this failure's until it checked the date (525ec1bc); skinamp's run had done the same.
+    So the run takes the file over as it starts, and what it prints is on disk as it
+    arrives. An unattended (`--always`) job needs none of it: the scheduler says when one
+    stopped, and `schedule_health` reads this file's time as a finished run's."""
+    path = root / LOGS_DIR / f"{name}.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w", encoding="utf-8", errors="replace")
+        handle.write(f"# {title}: started {_now()}, not finished -- {' '.join(command)}\n")
+        handle.flush()
+    except OSError:
+        return None
+    return handle
+
+
+def close_progress(handle: IO[str] | None, started: float) -> float:
+    """Close what `open_progress` opened; the time `write_artifact` should take for this
+    run's own last word, so that only *another* run's newer write holds a retraction back."""
+    if handle is None:
+        return started
+    handle.close()
+    try:
+        return Path(handle.name).stat().st_mtime
+    except OSError:
+        return started
+
+
+def stream(
+    command: list[str], env: dict[str, str] | None = None, progress: IO[str] | None = None
+) -> tuple[int, str]:
     """Run `command`, echoing output live while keeping a copy. `(exit code, output)`.
-    `env` is the child's whole environment, `child_env()` when None.
+    `env` is the child's whole environment, `child_env()` when None; `progress` is a
+    file the output is also written to as it arrives (`open_progress`).
 
     stderr is merged into stdout on purpose. Two pipes would need two readers to avoid
     deadlocking on a full buffer, and the artifact wants the interleaving the operator
@@ -556,6 +597,8 @@ def stream(command: list[str], env: dict[str, str] | None = None) -> tuple[int, 
     for line in iter(process.stdout.readline, ""):
         captured.append(line)
         echo(line)
+        if progress is not None:
+            echo(line, progress)
     process.stdout.close()
     code = process.wait()
     release(job)
@@ -652,17 +695,20 @@ def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> i
 
     started = time.time()
     head = head_stamp(root or Path.cwd())
+    name = slug(title)
+    last_write = started
     if run is None:
-        code, output = stream(command, child_env(unattended=always, title=title))
+        progress = None if always else open_progress(root or Path.cwd(), name, title, command)
+        code, output = stream(command, child_env(unattended=always, title=title), progress)
+        last_write = close_progress(progress, started)
     else:
         code, output = run(command)
 
-    name = slug(title)
     path = write_artifact(
         root or Path.cwd(),
         name,
         artifact_body(title, command, code, output, always),
-        since=started,
+        since=last_write,
     )
     if code != 0 and path is not None:
         # One line, and only the path -- the failure text is already above, and

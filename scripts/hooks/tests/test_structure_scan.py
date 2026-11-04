@@ -129,6 +129,7 @@ def test_scan_python_runtime_imports_skip_the_type_checking_block():
     assert "pathlib.Path" in m.modules
     assert ".sibling.thing" in m.modules
     assert not any(mod.startswith("heavy") for mod in m.modules)
+    assert any(mod.startswith("heavy") for mod in m.type_modules)
 
 
 def test_scan_python_counters():
@@ -256,6 +257,7 @@ def test_scan_js_runtime_specifiers_skip_type_only_imports():
     assert "./lib/helper" in m.modules
     assert "../api" in m.modules
     assert "./types" not in m.modules
+    assert m.type_modules == ("./types",)
 
 
 def test_scan_js_counters():

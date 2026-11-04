@@ -494,6 +494,75 @@ def test_pull_receipt_preserves_a_locally_edited_retired_file(tmp_path, monkeypa
     assert (repo / "scripts/old.py").read_text() == "local edit"
 
 
+def _older_release(root: Path) -> Path:
+    """A source whose own list stops short of the running one's."""
+    _seed(root, "scripts/kept.py", "kept")
+    _seed(root, "scripts/devkit_manifest.py", 'MANIFEST = ("scripts/kept.py",)\n')
+    return root
+
+
+def test_as_the_source_lists_it_drops_only_what_its_own_list_omits(tmp_path, monkeypatch):
+    older = _older_release(tmp_path / "older")
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    gated = "src/worktreePort.ts"  # a consumer's own path, in no MANIFEST on either side
+    wanted = ("scripts/kept.py", "scripts/new.py", gated)
+    assert sh.as_the_source_lists_it(older, wanted) == ("scripts/kept.py", gated)
+    assert sh.as_the_source_lists_it(tmp_path / "no-list", wanted) == wanted
+
+
+def test_a_pull_from_an_older_release_leaves_no_orphan(tmp_path, monkeypatch, capsys):
+    """ba73e7c3: the newer list named a rule the older release has never heard of. It was
+    reported `(absent)`, stayed in the tree, and no later `--check` could see it."""
+    newer = tmp_path / "newer"
+    _seed(newer, "scripts/kept.py", "kept")
+    _seed(newer, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(newer), "--allow-untagged"]) == 0
+
+    older = _older_release(tmp_path / "older")
+    assert sh.main(["--pull", "--src", str(older), "--allow-untagged"]) == 0
+    assert not (repo / "scripts/new.py").exists()
+    assert (repo / "scripts/kept.py").is_file()
+    assert "(absent)" not in capsys.readouterr().out
+
+
+def test_a_pull_from_an_older_release_keeps_a_local_edit_to_what_it_never_listed(
+    tmp_path, monkeypatch
+):
+    newer = tmp_path / "newer"
+    _seed(newer, "scripts/kept.py", "kept")
+    _seed(newer, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(newer), "--allow-untagged"]) == 0
+    _seed(repo, "scripts/new.py", "local edit")
+
+    older = _older_release(tmp_path / "older")
+    assert sh.main(["--pull", "--src", str(older), "--allow-untagged"]) == 0
+    assert (repo / "scripts/new.py").read_text() == "local edit"
+
+
+def test_a_source_that_merely_lacks_a_file_deletes_nothing(tmp_path, monkeypatch, capsys):
+    """A wrong `--src` looks like this. With no list of its own the source said nothing
+    about what is retired, so the file stays and the report stays."""
+    full = tmp_path / "full"
+    _seed(full, "scripts/kept.py", "kept")
+    _seed(full, "scripts/new.py", "new")
+    repo = tmp_path / "proj"
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/kept.py", "scripts/new.py"))
+    assert sh.main(["--pull", "--src", str(full), "--allow-untagged"]) == 0
+
+    thin = tmp_path / "thin"
+    _seed(thin, "scripts/kept.py", "kept")
+    assert sh.main(["--pull", "--src", str(thin), "--allow-untagged"]) == 0
+    assert (repo / "scripts/new.py").is_file()
+    assert "(absent) scripts/new.py" in capsys.readouterr().out
+
+
 # --- retirement has to leave the *directory* gone too -----------------------
 # Every retired skill that shipped a `.py` had run at least once, so it left a
 # `__pycache__/` behind. That husk is gitignored, so it is invisible to `git status`
@@ -2273,7 +2342,9 @@ def test_pull_refusal_names_each_refusal_and_each_override(tmp_path, capsys):
 
     untagged = _repo(tmp_path / "untagged")
     assert sh.pull_refusal(untagged, allow_dirty=False, allow_untagged=False) == 2
-    assert "not tagged" in capsys.readouterr().err
+    said = capsys.readouterr().err
+    assert "not tagged" in said
+    assert "--src <a clean clone at that tag>" in said, "b5fabd41: the way through is named"
     assert sh.pull_refusal(untagged, allow_dirty=True, allow_untagged=False) == 2, (
         "--allow-dirty must not excuse an untagged source"
     )

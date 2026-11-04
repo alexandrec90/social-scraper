@@ -74,6 +74,9 @@ class FileMetrics:
     counts: dict[str, int] = field(default_factory=dict)
     react_state: int = 0
     react_effects: int = 0
+    # The imports left out of `modules`. They bind no cycle, but they are still a use:
+    # a module only ever imported for its types is not an orphan.
+    type_modules: tuple[str, ...] = ()
 
 
 def is_test_file(rel: str) -> bool:
@@ -232,6 +235,15 @@ def _runtime_imports_of(nodes: list[ast.stmt]) -> list[str]:
     return _runtime_imports(holder)
 
 
+def _type_imports(tree: ast.AST) -> list[str]:
+    """Import specifiers `_runtime_imports` skips: those under `if TYPE_CHECKING:`."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            found.extend(_runtime_imports_of(node.body))
+    return found
+
+
 def _swallows(handler: ast.ExceptHandler) -> bool:
     """A broad handler that never re-raises: the shape that hides every bug at once."""
     kind = handler.type
@@ -304,6 +316,7 @@ def scan_python(text: str) -> FileMetrics | None:
         symbols=tuple(sorted(symbols, key=lambda s: s.line)),
         modules=tuple(dict.fromkeys(_runtime_imports(tree))),
         counts=counts,
+        type_modules=tuple(dict.fromkeys(_type_imports(tree))),
     )
 
 
@@ -668,12 +681,11 @@ def scan_js(text: str, react: bool = False) -> FileMetrics:
         if depths[m.start()] == 0:
             top_level += 1
     modules: list[str] = []
+    type_modules: list[str] = []
     for m in _JS_SPECIFIER.finditer(masked):
-        if m.group("type"):
-            continue
         spec = text[m.start("spec") : m.end("spec")]
         if spec:
-            modules.append(spec)
+            (type_modules if m.group("type") else modules).append(spec)
     comment_text = "\n".join(comments)
     counts = {
         "suppressions": unexplained(_JS_SUPPRESSION, comment_text),
@@ -692,6 +704,7 @@ def scan_js(text: str, react: bool = False) -> FileMetrics:
         counts=counts,
         react_state=len(re.findall(r"\buseState\s*[<(]", masked)) if react else 0,
         react_effects=len(re.findall(r"\buse(?:Layout)?Effect\s*\(", masked)) if react else 0,
+        type_modules=tuple(dict.fromkeys(type_modules)),
     )
 
 
