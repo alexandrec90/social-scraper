@@ -198,3 +198,51 @@ def test_an_absent_or_undecodable_file_is_left_alone(tmp_path):
     path.write_bytes(b"\xff\xfe not utf-8 package-ecosystem: uv")
     assert pd.dependabot_pass(tmp_path) == []
     assert path.read_bytes() == b"\xff\xfe not utf-8 package-ecosystem: uv"
+
+
+def test_update_entries_reads_each_ecosystem_and_directory_as_the_file_spells_them():
+    assert pd.update_entries(RENDERED_BEFORE) == [("uv", "/"), ("github-actions", "/")]
+    text = (
+        "version: 2\n"
+        "registries:\n"
+        "  - package-ecosystem: not-an-update\n"
+        "updates:\r\n"
+        "  # commented:\n"
+        "  - package-ecosystem: 'npm'  # the frontend\n"
+        "    ignore:\n"
+        "      - dependency-name: react\n"
+        "        directory: /nested-under-ignore\n"
+        '    directory: "/frontend"  # the app\n'
+        "  - directory: /svc\n"
+        "    package-ecosystem: gomod\n"
+        "  - package-ecosystem: docker\n"
+        "    directories:\n"
+        "      - /a\n"
+        "      - /b/*\n"
+        "  - package-ecosystem: pip\n"
+        "    directory: /docs\n"
+        "other-top-level:\n"
+        "  - package-ecosystem: ignored\n"
+    )
+    assert pd.update_entries(text) == [
+        ("npm", "/frontend"),
+        ("gomod", "/svc"),
+        ("docker", ""),
+        ("pip", "/docs"),
+    ]
+
+
+def test_update_entries_reads_a_list_flush_with_its_key():
+    text = "updates:\n- package-ecosystem: uv\n  directory: /\n"
+    assert pd.update_entries(text) == [("uv", "/")]
+
+
+def test_update_entries_says_nothing_rather_than_part_of_a_file():
+    """A caller drops a job the answer leaves out, so a partial answer drops a live job."""
+    head = "updates:\n  - package-ecosystem: uv\n    directory: /\n"
+    assert pd.update_entries(head + "  - {package-ecosystem: npm, directory: /x}\n") == []
+    assert pd.update_entries(head + "  - <<: *shared\n    directory: /x\n") == []
+    assert pd.update_entries(head + "  -\n    package-ecosystem: npm\n") == []
+    assert pd.update_entries("updates: []\n") == []
+    assert pd.update_entries("version: 2\n") == []
+    assert pd.update_entries("") == []

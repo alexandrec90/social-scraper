@@ -19,6 +19,9 @@ floors, the contract test says so, with the fix. The edit is textual, one line p
 so the file's comments, order and line endings survive: a YAML round-trip would lose all
 three, and there is no YAML parser in the standard library anyway.
 
+`update_entries` is the read half, for what the fix pass needs to know about a project's
+config (`fix_dependabot.retired`); it changes nothing.
+
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
 Tested in `scripts/hooks/tests/test_project_dependabot.py`.
@@ -40,6 +43,7 @@ RETIRED_STRATEGIES = frozenset({"increase-if-necessary"})
 
 _HEAD = re.compile(r"(\s*-\s*)package-ecosystem:\s*['\"]?([\w-]+)")
 _STRATEGY = re.compile(r"versioning-strategy\s*:\s*['\"]?([\w-]+)")
+_KEY = re.compile(r"([\w-]+)\s*:\s*(.*)")
 
 
 def _is_code(line: str) -> bool:
@@ -123,6 +127,53 @@ def with_floor_keeping(text: str) -> tuple[str, list[str]]:
         return text, []
     changed = sorted([*retired, *((index, ecosystem) for index, ecosystem, _ in missing)])
     return "".join(lines), [ecosystem for _index, ecosystem in changed]
+
+
+def _items(text: str) -> list[list[tuple[int, str]]]:
+    """Each item of the top-level `updates:` list, as `(column, text)` per code line; a
+    head's `- ` counts as indent, so the item's own keys share one column."""
+    items: list[list[tuple[int, str]]] = []
+    dash: int | None = None
+    inside = False
+    for line in filter(_is_code, text.splitlines()):
+        body = line.lstrip()
+        indent = len(line) - len(body)
+        if not indent and not body.startswith("-"):
+            inside = body.startswith("updates:")
+            continue
+        if not inside:
+            continue
+        if body[:2].rstrip() == "-" and dash in (None, indent):
+            dash = indent
+            items.append([])
+            body = body[1:].lstrip()
+            indent = len(line) - len(body)
+        if items:
+            items[-1].append((indent, body))
+    return items
+
+
+def _scalar(raw: str) -> str:
+    return raw.split(" #", 1)[0].strip().strip("'\"")
+
+
+def update_entries(text: str) -> list[tuple[str, str]]:
+    """`(ecosystem, directory)` per entry of `updates:`, as the file spells them.
+
+    The directory is "" for an entry naming no single one: `directories:` takes a list or
+    a glob. Any item that names no ecosystem on a key of its own, a flow mapping or a YAML
+    merge for one, empties the answer: a caller told what the file runs must not be told
+    a part of it.
+    """
+    entries: list[tuple[str, str]] = []
+    for item in _items(text):
+        column = item[0][0]
+        keys = {m[1]: m[2] for at, body in item if at == column and (m := _KEY.match(body))}
+        ecosystem = _scalar(keys.get("package-ecosystem", ""))
+        if not ecosystem:
+            return []
+        entries.append((ecosystem, _scalar(keys.get("directory", ""))))
+    return entries
 
 
 def dependabot_pass(root: Path) -> list[str]:

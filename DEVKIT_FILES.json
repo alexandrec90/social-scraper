@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.78",
+  "devkit_tag": "v0.11.79",
   "files": {
     ".claude/engineering-evidence.md": "1b8267ab4b6c2f8dbf6eec4c1fe48e7b60157e83f8278d7ea081c65fe1a9b6af",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -45,7 +45,7 @@
     "scripts/hooks/tests/test_lint_fix.py": "deb89c25df49464aacf13e128ca82e01e1f0aa50fa50d46eb186caf7e0343ae9",
     "scripts/hooks/tests/test_log_wrap.py": "b20609d71f8d0d8d48717635af7bb3f6f43dc3dbec466aa8f77d713bde8a0a48",
     "scripts/hooks/tests/test_merge_dependabot_prs.py": "64a6ce4288c9b76789ed235253faea89bdee038c2d183fa8be9f146fd8510f4c",
-    "scripts/hooks/tests/test_project_dependabot.py": "7f56c5c815895363fd7a11791970f184c851e5238df4cb41a13b5d7b349468a7",
+    "scripts/hooks/tests/test_project_dependabot.py": "2cfb053b7eef00023f981f44c0b5a97252ca803fe6626ba613659fb1972980fa",
     "scripts/hooks/tests/test_project_settings.py": "888d9a463628930c4e61240dc328a632b8804e7a335f5935b24c18fc7d0eb69a",
     "scripts/hooks/tests/test_repo_contract.py": "ac2763340c3e7f533a0698143561b81956952bf84cf9112a68580efdd8e28937",
     "scripts/hooks/tests/test_report_harness_defect.py": "f35709dbfd8ccffa1b84f0ab310a506a347be730d97e512b88404435b844c3ac",
@@ -73,7 +73,7 @@
     "scripts/hooks/worktree_tiers.py": "11dd71d6e92a0dacf2488c3cc4c937911b60bda4a99e5d2383a64b452d0fc9f5",
     "scripts/log-wrap.py": "9c3583f0475a36d87fce16f5bbe63d3f393873cb0d6dda9f165071ba0f757f9b",
     "scripts/merge-dependabot-prs.py": "a083311d8b21c0c55125319bf3cbc798383fd62d5d82acc6ff7b9c2d8e3e16c6",
-    "scripts/project_dependabot.py": "e50443e327c01fa6f147c75c8df5169a79279b76809d5c4f2a1c6a3ee9f93c89",
+    "scripts/project_dependabot.py": "1e9ef22a1ddafd4e00524f8f9d06d72645119a3485ec582f3906c4724f224d11",
     "scripts/project_settings.py": "7b42a2251d2179e4596c91db1054522b1083904608d138ac6252b2576e8e8f8b",
     "scripts/pytest-plugins/devkit_temproot.py": "5e293d8ca461ef40e94c8f4f957667967574798b3393bc6cd68ace45767e713d",
     "scripts/report-workflow-failure.py": "ff3a73eb4e4a7df12ee7ff0080df4c4286b4b86620ea4a72ff5d47295c84b0ed",
