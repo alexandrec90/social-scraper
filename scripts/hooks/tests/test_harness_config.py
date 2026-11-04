@@ -310,6 +310,52 @@ def test_a_docker_table_of_the_wrong_shape_is_ignored():
     assert cfg.from_dict({"docker": "auto_stop"}).docker.auto_stop is False
 
 
+# --- [desktop]: the .NET app tier and the release driver it gates -----------------
+
+
+def test_the_desktop_tier_defaults_off_with_no_solution_named():
+    """Off by default: the key vendors `scripts/desktop.py` into the project, so a project
+    that never mentions it must not receive it."""
+    desktop = cfg.Config().desktop
+    assert desktop.enabled is False
+    assert (desktop.solution, desktop.project, desktop.pack_id) == ("", "", "")
+    assert desktop.runtime == "win-x64"
+    assert cfg.from_dict({"desktop": {}}).desktop == desktop
+
+
+def test_the_desktop_tier_is_read_from_the_manifest():
+    desktop = cfg.from_dict(
+        {
+            "desktop": {
+                "enabled": True,
+                "solution": "Skinamp.slnx",
+                "project": "src/Skinamp/Skinamp.csproj",
+                "pack_id": "Skinamp",
+                "pack_title": "Skinamp",
+                "runtime": "win-arm64",
+            }
+        }
+    ).desktop
+    assert desktop.enabled is True
+    assert desktop.solution == "Skinamp.slnx"
+    assert desktop.project == "src/Skinamp/Skinamp.csproj"
+    assert (desktop.pack_id, desktop.pack_title, desktop.runtime) == (
+        "Skinamp",
+        "Skinamp",
+        "win-arm64",
+    )
+
+
+def test_the_desktop_tier_turns_on_only_for_the_literal_true():
+    """A typo must not vendor a release driver into a project that asked for nothing."""
+    for junk in ("yes", "true", 1, [True], None):
+        assert cfg.from_dict({"desktop": {"enabled": junk}}).desktop.enabled is False
+
+
+def test_a_desktop_table_of_the_wrong_shape_is_ignored():
+    assert cfg.from_dict({"desktop": ["enabled"]}).desktop == cfg.DesktopConfig()
+
+
 # --- [worktree]: the `.env` values a box must derive for itself -----------------
 
 

@@ -268,13 +268,26 @@ def vendored_paths(root: Path) -> frozenset[str]:
     # and unskipped it would put devkit's TypeScript into the consumer's baseline.
     gated = literals.get("GATED_MANIFEST")
     if isinstance(gated, dict):
-        frontend = harness_config.load(root).frontend
-        if frontend.enabled:
-            prefix = str(frontend.src).replace("\\", "/").rstrip("/") + "/"
-            for name in gated.get("frontend", ()):
-                if isinstance(name, str):
-                    paths.add(prefix + name)
+        for prefix, names in _gate_prefixes(harness_config.load(root), gated):
+            paths.update(prefix + name for name in names if isinstance(name, str))
     return frozenset(paths)
+
+
+def _gate_prefixes(
+    cfg: harness_config.Config, gated: dict[object, object]
+) -> list[tuple[str, tuple[object, ...]]]:
+    """`(prefix, names)` for each gate `cfg` turns on, as `sync-devkit.gate_prefixes`
+    resolves them: the frontend's at its `src`, the desktop's from the repo root."""
+    on: list[tuple[str, object]] = []
+    if cfg.frontend.enabled:
+        on.append((str(cfg.frontend.src).replace("\\", "/").rstrip("/") + "/", "frontend"))
+    if cfg.desktop.enabled:
+        on.append(("", "desktop"))
+    return [
+        (prefix, tuple(names))
+        for prefix, gate in on
+        if isinstance(names := gated.get(gate, ()), (list, tuple))
+    ]
 
 
 def _manifest_literals(tree: ast.Module) -> dict[str, object]:

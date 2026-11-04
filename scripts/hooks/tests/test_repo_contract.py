@@ -114,6 +114,7 @@ def _toml_schema() -> dict[str, frozenset[str]]:
         "paths": frozenset({"app", "tests", "unit_tests"}),
         "db": fields(cfg.DbConfig),
         "frontend": fields(cfg.FrontendConfig),
+        "desktop": fields(cfg.DesktopConfig),
         "python": fields(cfg.PythonConfig),
         "bash": fields(cfg.BashConfig),
         "docker": fields(cfg.DockerConfig),
@@ -455,6 +456,23 @@ def test_frontend_paths_exist_when_the_tier_is_on():
         pytest.skip("project has no frontend tier")
     assert (REPO_ROOT / CFG.frontend.dir).is_dir(), f"[frontend] dir = {CFG.frontend.dir!r}"
     assert (REPO_ROOT / CFG.frontend.src).is_dir(), f"[frontend] src = {CFG.frontend.src!r}"
+
+
+@consumes_harness
+def test_desktop_paths_exist_when_the_tier_is_on():
+    """`scripts/desktop.py` builds `solution` and publishes `project`; a name that is not
+    on disk fails a release at the one moment it costs the most -- after the tag. With the
+    tier off nothing is named, so nothing is owed."""
+    named = (
+        [("[desktop] solution", CFG.desktop.solution), ("[desktop] project", CFG.desktop.project)]
+        if CFG.desktop.enabled
+        else []
+    )
+    # An empty value names the root, which is no file either.
+    missing = [
+        f"{label} = {value!r}" for label, value in named if not (REPO_ROOT / value).is_file()
+    ]
+    assert not missing, "not a file: " + ", ".join(missing)
 
 
 def undefined_npm_scripts(commands: dict[str, list[str]], scripts: Mapping[str, str]) -> list[str]:
