@@ -167,6 +167,10 @@ MANIFEST: tuple[str, ...] = (
     ".claude/rules/authoring.md",
     # What a coding session leaves to the fix pass: commit, push, PR, the full suite.
     ".claude/rules/session-scope.md",
+    # Where a test only this workstation can run goes, and the `scripts/e2e.py` contract
+    # devkit's nightly `devkit-local-e2e` job runs in every checkout. Path-scoped to test
+    # files, so it costs the always-loaded tier nothing.
+    ".claude/rules/local-e2e.md",
     # The policy's reference half, and a fixer session's own instructions. Vendored as
     # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
     # where every `.md` is loaded into every session -- which neither may be.
