@@ -9,6 +9,8 @@ broken test cannot flood the artifact and bury the other twenty.
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`,
 plus `CONTRACT_TESTS`, which read every module and instruction file. Where `.devkit.toml` turns the `[frontend]` tier on, a changed source under its `src`
 runs `vitest related` instead, which follows the imports to the tests that reach it.
+Where it turns the `[desktop]` tier on, a changed C# source runs the solution's tests
+through `scripts/desktop.py test`, and so does every whole-suite run, on Windows alone.
 Named test files run with the contract tests too, unless `--only` says just these.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
@@ -73,6 +76,11 @@ FRONTEND_SUFFIXES = (
 )
 # The vendored reader of `.devkit.toml`, which owns the tier's defaults.
 HARNESS_CONFIG = Path("scripts") / "hooks" / "harness_config.py"
+# The `[desktop]` tier: a change to any of these runs the C# tests, through the driver
+# the gated tier vendors. `dotnet test` takes the whole solution, never a file list.
+DESKTOP_SUFFIXES = (".cs", ".xaml", ".csproj", ".props", ".targets", ".slnx", ".sln")
+DESKTOP_DRIVER = Path("scripts") / "desktop.py"
+WINDOWS = os.name == "nt"
 # How much of a failed vitest run the artifact keeps: its summary is at the end.
 VITEST_TAIL_LINES = 120
 # The per-test timeout of this runner's own vitest run, which shares the machine with
@@ -297,10 +305,10 @@ def _module_names(posix: str) -> list[str]:
     return [parts[-1], *(["_".join(parts[-2:])] if len(parts) > 1 else [])]
 
 
-def frontend_tier(root: Path) -> tuple[str, str] | None:
-    """`(dir, src)` of the `[frontend]` tier where `.devkit.toml` turns it on, else None.
+def harness_tier(root: Path, name: str) -> Any | None:
+    """`.devkit.toml`'s `[<name>]` tier where it is turned on, else None.
 
-    Read through the vendored `harness_config`, which owns the tier's defaults; a tree
+    Read through the vendored `harness_config`, which owns the tiers' defaults; a tree
     without it has no tier to read.
     """
     path = root / HARNESS_CONFIG
@@ -312,10 +320,54 @@ def frontend_tier(root: Path) -> tuple[str, str] | None:
     sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
-        front = module.load(root).frontend
+        tier = getattr(module.load(root), name)
     except (ImportError, OSError, AttributeError):
         return None
-    return (front.dir, front.src) if front.enabled else None
+    return tier if tier.enabled else None
+
+
+def frontend_tier(root: Path) -> tuple[str, str] | None:
+    """`(dir, src)` of the `[frontend]` tier where `.devkit.toml` turns it on, else None."""
+    front = harness_tier(root, "frontend")
+    return (front.dir, front.src) if front else None
+
+
+def desktop_sources(paths: list[str]) -> list[str]:
+    """The changed paths the desktop app's tests answer for."""
+    return [p.replace("\\", "/") for p in paths if p.endswith(DESKTOP_SUFFIXES)]
+
+
+def run_desktop(root: Path) -> str:
+    """`scripts/desktop.py test`; the artifact's text for a failure, empty for a pass.
+
+    Off Windows, or with no `dotnet`, it is a skip with a note, not a failure: the PR
+    gate's Windows job is where the tier is gated. The host is asked first because a
+    Linux runner can carry `dotnet` and build the solution, and still has no WPF runtime
+    to run its tests on. No driver is a tree whose gated files have not been pulled yet.
+    """
+    driver = root / DESKTOP_DRIVER
+    if not driver.is_file():
+        print("run-tests: scripts/desktop.py missing; run sync-devkit.py --pull")
+        return ""
+    if not WINDOWS:
+        print("run-tests: the desktop tier needs Windows; desktop tests skipped")
+        return ""
+    if not shutil.which("dotnet"):
+        print("run-tests: no dotnet on PATH; desktop tests skipped (global.json names the SDK)")
+        return ""
+    print("run-tests: scripts/desktop.py test")
+    result = subprocess.run(
+        [sys.executable, str(driver), "test"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if result.returncode == 0:
+        return ""
+    log = root / "logs" / "desktop-test.log"
+    return log.read_text(encoding="utf-8") if log.is_file() else result.stdout + result.stderr
 
 
 def frontend_sources(paths: list[str], src: str) -> list[str]:
@@ -442,8 +494,7 @@ def main(argv: list[str] | None = None) -> int:
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     plan = None if whole else _plan_changed(REPO_ROOT)
     if plan is None:
-        groups = [targets] if args.only else explicit_runs(targets, REPO_ROOT)
-        return _finish([run_pytest(cmd + group) for group in groups])
+        return _run_whole(cmd, targets, args.only)
     return _run_planned(cmd, *plan)
 
 
@@ -452,14 +503,27 @@ def main(argv: list[str] | None = None) -> int:
 # template, so a branch added here reddens every project that refreshes it.
 
 
-def _plan_changed(root: Path) -> tuple[list[str], list[str], list[str]] | None:
-    """`(pytest targets, vitest command, failures)` for what changed; None runs the suite."""
+def _run_whole(cmd: list[str], targets: list[str], only: bool) -> int:
+    """The suite, or the named pytest targets, with the contract tests unless `only` says
+    just those; the desktop tests ride with the suite."""
+    groups = [targets] if only else explicit_runs(targets, REPO_ROOT)
+    failures = [run_pytest(cmd + group) for group in groups]
+    if not targets and harness_tier(REPO_ROOT, "desktop"):
+        failures.append(run_desktop(REPO_ROOT))
+    return _finish(failures)
+
+
+def _plan_changed(root: Path) -> tuple[list[str], list[str], list[str], bool] | None:
+    """`(pytest targets, vitest command, failures, desktop)` for what changed; None runs
+    the suite."""
     changed = changed_paths(root)
     if changed is None:
         print("run-tests: git cannot say what changed; running the suite")
         return None
     targets, unnamed = tests_for(changed, root)
     front, unnamed, owed = frontend_run(changed, unnamed, root)
+    desktop = desktop_sources(changed) if harness_tier(root, "desktop") else []
+    unnamed = [path for path in unnamed if path not in desktop]
     print(
         f"run-tests: {len(targets)} test file(s) for {len(changed)} changed path(s), "
         "and the contract tests; --all runs the suite"
@@ -468,18 +532,22 @@ def _plan_changed(root: Path) -> tuple[list[str], list[str], list[str]] | None:
         targets = with_contracts(targets, root)
     for path in unnamed:
         print(f"run-tests:   no test named for {path}")
-    return targets, front, [owed] if owed else []
+    return targets, front, [owed] if owed else [], bool(desktop)
 
 
-def _run_planned(cmd: list[str], targets: list[str], front: list[str], failures: list[str]) -> int:
+def _run_planned(
+    cmd: list[str], targets: list[str], front: list[str], failures: list[str], desktop: bool
+) -> int:
     """Run the tests `_plan_changed` named, and nothing where it named none."""
-    if not targets and not front and not failures:
+    if not targets and not front and not failures and not desktop:
         ARTIFACT.write_text("", encoding="utf-8")
         print("run-tests: nothing to run (artifact cleared)")
         return 0
     failures = [*failures, *(run_pytest(cmd + group) for group in by_test_root(targets))]
     if front:
         failures = [*failures, run_vitest(front, REPO_ROOT)]
+    if desktop:
+        failures = [*failures, run_desktop(REPO_ROOT)]
     return _finish(failures)
 
 

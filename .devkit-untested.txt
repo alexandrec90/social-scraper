@@ -60,12 +60,15 @@ scripts/run-tests.py::cap_failure_blocks
 scripts/run-tests.py::changed_paths
 scripts/run-tests.py::contracts_beyond
 scripts/run-tests.py::default_branch
+scripts/run-tests.py::desktop_sources
 scripts/run-tests.py::explicit_runs
 scripts/run-tests.py::filter_output
 scripts/run-tests.py::frontend_run
 scripts/run-tests.py::frontend_sources
 scripts/run-tests.py::frontend_tier
+scripts/run-tests.py::harness_tier
 scripts/run-tests.py::rerun_in_tree_venv
+scripts/run-tests.py::run_desktop
 scripts/run-tests.py::run_pytest
 scripts/run-tests.py::run_vitest
 scripts/run-tests.py::tests_for

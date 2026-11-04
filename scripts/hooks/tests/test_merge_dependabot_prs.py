@@ -130,8 +130,8 @@ def test_the_merge_goes_through_rest_and_never_graphql():
 
 
 def test_a_pr_without_the_automerge_label_is_left_alone():
-    """The label is the classifier's verdict, and it is the only place the
-    runtime-vs-development judgement is recorded. No label means it was never made."""
+    """The label is the whole authorization: the classify job applies it to Dependabot's
+    PRs, a person to any other. No label means nobody authorized the merge."""
     run = FakeRun(world(prs=[pr(labels=[{"name": "dependencies"}])]))
     assert merger.main(env(), run) == 0
     assert not run.merges()

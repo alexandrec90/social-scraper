@@ -4,7 +4,8 @@
 The hook scripts (`stop.py`, and later the rest of `scripts/hooks/`) are meant to
 be **vendored unchanged into every project**. Everything that differs between
 projects -- the control-env prefix, the DB credentials/ports/service names, the
-frontend layout, and the source-tree shape --
+frontend layout, the desktop app's solution and installer identity, and the
+source-tree shape --
 lives here, read from a committed `.devkit.toml` at the repo root. The
 scripts stay shape-agnostic; a new project drops in a manifest instead of forking
 the code.
@@ -64,6 +65,29 @@ class FrontendConfig:
     skin: str = "frontend/src/skins"  # subtree whose change triggers a typecheck
     test_cmd: tuple[str, ...] = ("run", "test:run")
     typecheck_cmd: tuple[str, ...] = ("run", "typecheck")
+
+
+@dataclass(frozen=True)
+class DesktopConfig:
+    """The desktop tier: a .NET app shipped to users as an installer that updates itself.
+
+    `enabled=False` skips every desktop check and keeps `scripts/desktop.py` -- the
+    gated tier's build, test and release driver -- out of the project entirely.
+
+    `solution` is what lint and test run over, `project` the app's `.csproj` that a
+    release publishes. `pack_id` is the installer's identity on users' machines: an
+    installed copy only accepts an update carrying the id it was installed with, so it
+    never changes after the first release. Empty derives it from `project`'s file name,
+    as `pack_title` (the name users see) falls back to `pack_id`. `runtime` is the .NET
+    runtime identifier the release is published for.
+    """
+
+    enabled: bool = False
+    solution: str = ""
+    project: str = ""
+    pack_id: str = ""
+    pack_title: str = ""
+    runtime: str = "win-x64"
 
 
 # Floor for `invoke-capped.py --max-bytes`, enforced there and quoted by
@@ -258,6 +282,7 @@ class Config:
     unit_tests: str = "tests/unit"
     db: DbConfig = field(default_factory=DbConfig)
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
+    desktop: DesktopConfig = field(default_factory=DesktopConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
     bash: BashConfig = field(default_factory=BashConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
@@ -309,6 +334,20 @@ def _frontend_from(raw: dict[str, Any], default: FrontendConfig) -> FrontendConf
         skin=str(raw.get("skin", default.skin)),
         test_cmd=_as_str_tuple(raw.get("test_cmd"), default.test_cmd),
         typecheck_cmd=_as_str_tuple(raw.get("typecheck_cmd"), default.typecheck_cmd),
+    )
+
+
+def _desktop_from(raw: dict[str, Any], default: DesktopConfig) -> DesktopConfig:
+    return replace(
+        default,
+        # `is True`, as `[docker] auto_stop` reads it: this key vendors a release driver
+        # into the project, so a typo ("yes") must read as the default, not as truthy.
+        enabled=raw.get("enabled", default.enabled) is True,
+        solution=str(raw.get("solution", default.solution)),
+        project=str(raw.get("project", default.project)),
+        pack_id=str(raw.get("pack_id", default.pack_id)),
+        pack_title=str(raw.get("pack_title", default.pack_title)),
+        runtime=str(raw.get("runtime", default.runtime)),
     )
 
 
@@ -444,6 +483,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     paths = data.get("paths", {}) if isinstance(data.get("paths"), dict) else {}
     db_raw = data.get("db", {}) if isinstance(data.get("db"), dict) else {}
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
+    desk_raw = data.get("desktop", {}) if isinstance(data.get("desktop"), dict) else {}
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
     bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
     docker_raw = data.get("docker", {}) if isinstance(data.get("docker"), dict) else {}
@@ -457,6 +497,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         unit_tests=str(paths.get("unit_tests", default.unit_tests)),
         db=_db_from(db_raw, default.db),
         frontend=_frontend_from(fe_raw, default.frontend),
+        desktop=_desktop_from(desk_raw, default.desktop),
         python=_python_from(py_raw, default.python),
         bash=_bash_from(bash_raw, default.bash),
         docker=_docker_from(docker_raw, default.docker),

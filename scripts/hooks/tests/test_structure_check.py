@@ -195,6 +195,25 @@ def test_vendored_paths_leave_the_gated_tier_out_where_the_frontend_is_off(tmp_p
     assert sc.vendored_paths(tmp_path) == {"a.py"}
 
 
+DESKTOP_SCRIPT = (
+    'MANIFEST: tuple[str, ...] = (\n    "a.py",\n)\n'
+    "GATED_MANIFEST: dict[str, tuple[str, ...]] = {\n"
+    '    "frontend": ("port.ts",),\n'
+    '    "desktop": ("scripts/desktop.py",),\n}\n'
+)
+
+
+def test_vendored_paths_include_the_desktop_gate_from_the_repo_root(tmp_path):
+    """The desktop gate's files are named from the root, so they are exempt where they
+    landed; the frontend gate, still off, contributes nothing."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", DESKTOP_SCRIPT)
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = true\n")
+    assert sc.vendored_paths(tmp_path) == {"a.py", "scripts/desktop.py"}
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = false\n")
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
 def test_a_gated_literal_that_will_not_evaluate_costs_only_the_gated_half(tmp_path):
     """`ast.literal_eval` refuses a `Name` key. The unconditional manifest must still
     be read -- losing the whole exemption over the gated half would redden a consumer

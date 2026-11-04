@@ -44,10 +44,10 @@ import subprocess
 import sys
 import time
 
-# The label `dependabot-automerge.yml`'s classify job applies to routine Dependabot
-# bumps, and anything with write access may apply by hand. Only a PR carrying it is a
-# candidate here -- this file never classifies, because the Dependabot metadata that
-# decides the label is available on the pull_request event and nowhere else.
+# The label `dependabot-automerge.yml`'s classify job applies to every Dependabot PR,
+# and anything with write access may apply by hand. Only a PR carrying it is a
+# candidate here -- this file never labels, because the event that says Dependabot
+# opened the PR is the pull_request one, and this runs on workflow_run and schedule.
 AUTOMERGE_LABEL = "automerge"
 
 # The gate whose success the event-driven job waits on. Vendored byte-identical, so the
