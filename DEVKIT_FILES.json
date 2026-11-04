@@ -1,5 +1,5 @@
 {
-  "devkit_tag": "v0.11.77",
+  "devkit_tag": "v0.11.78",
   "files": {
     ".claude/engineering-evidence.md": "1b8267ab4b6c2f8dbf6eec4c1fe48e7b60157e83f8278d7ea081c65fe1a9b6af",
     ".claude/fixer.md": "80a95436cefb022c9e177a29c8dad77e7fb37f4572fee0219671a14efb04e893",
@@ -77,7 +77,7 @@
     "scripts/project_settings.py": "7b42a2251d2179e4596c91db1054522b1083904608d138ac6252b2576e8e8f8b",
     "scripts/pytest-plugins/devkit_temproot.py": "5e293d8ca461ef40e94c8f4f957667967574798b3393bc6cd68ace45767e713d",
     "scripts/report-workflow-failure.py": "ff3a73eb4e4a7df12ee7ff0080df4c4286b4b86620ea4a72ff5d47295c84b0ed",
-    "scripts/ship.py": "49db8d82daf549fe81e24ac82d5479f9b1a68a1870775e9c9e9747954bfc063d",
+    "scripts/ship.py": "e7d90392eaaf0834c01b0d762ebf5cc21c7e923f522678cdf869f4b756a43395",
     "scripts/sync-codex-context.py": "1c71032db6058751ef56514b831cda9bd5faa72a470256b3b7ac84cb9208ff00",
     "scripts/sync-codex-hooks.py": "376c84d6c2e046e8d2a8b0db94c2efa05797326e95e555d8242d671401d61ed1",
     "scripts/sync-devkit.py": "b3830481cd6c2b26c2b47f9d394b4b625e124ceb6d606c299d3d0c59f3c98e9a",
