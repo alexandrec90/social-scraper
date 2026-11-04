@@ -1394,7 +1394,8 @@ def pull_refusal(src: Path, allow_dirty: bool, allow_untagged: bool) -> int:
             f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
             f"tag, so an untagged pull can never be pinned to what it vendored. "
             f"Tag the release first, or pass --allow-untagged to pull anyway "
-            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
+            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red). To adopt a tag "
+            f"this checkout has moved past, pass --src <a clean clone at that tag>.",
             file=sys.stderr,
         )
         return 2
@@ -1471,6 +1472,26 @@ def apply_push(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     )
 
 
+def as_the_source_lists_it(src: Path, manifest: tuple[str, ...]) -> tuple[str, ...]:
+    """`manifest` without what this running copy lists and the source's own list does not.
+
+    A pull from a release older than the running copy delivers that release's shorter
+    list, so a path only the newer list named was printed as `(absent)`, left in the tree,
+    and read by no later `--check`: homelab's `.claude/rules/local-e2e.md`, still loaded by
+    Claude Code and removed by hand (ba73e7c3). Dropped here, it is a receipt entry out
+    of the MANIFEST: deleted if untouched, kept if edited, like any retired file.
+
+    Only the source's own list decides. A path merely missing from the source is what a
+    wrong `--src` looks like, and a source with no such list says nothing; both keep the
+    `(absent)` report. Keyed on `MANIFEST`, since a gated path is the consumer's own."""
+    lists = _load_by_path("devkit_manifest_of_source", src / "scripts" / "devkit_manifest.py")
+    listed = getattr(lists, "MANIFEST", None)
+    if not listed:
+        return manifest
+    unlisted = set(MANIFEST) - set(listed)
+    return tuple(rel for rel in manifest if rel not in unlisted)
+
+
 def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     """`--pull`: copy upstream's files down, then every side effect adoption needs.
 
@@ -1480,6 +1501,9 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     ordering constraints past the eye and cost complexity 32 in a function whose
     sequence is the only thing a reader is here for.
     """
+    # First: every step below, the deletions above all, has to read the release being
+    # adopted rather than the newer one this running copy came from.
+    manifest = as_the_source_lists_it(src, manifest)
     managed_removed, preserved, unvendored = remove_receipt_retired(REPO_ROOT, manifest, src)
     copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=True)
     removed = remove_retired(REPO_ROOT) + managed_removed

@@ -148,7 +148,7 @@ jobs:
           repository: alexandrec90/devkit
           # Pin a tag, never @main — one bad devkit commit must not redden every
           # consuming repo at once.
-          ref: v0.11.76
+          ref: v0.11.77
           path: .devkit-src
       # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs the
       # project, and this job has nothing to sync for. `sync-devkit.py` is stdlib-only

@@ -515,6 +515,33 @@ def test_findings_are_keyed_deduped_and_sorted(tmp_path):
     assert [(f.key, f.value) for f in found] == [("function_params::src/main.py::alpha", 3)]
 
 
+def test_a_module_only_imported_for_its_types_is_not_an_orphan(tmp_path):
+    """a745fee7: photolab's `frontend/src/api/types.ts`, all types and imported by everyone
+    with `import type`, read as dead code because the graph is built for cycles."""
+    write(tmp_path, "src/main.ts", 'import type { Foo } from "./types";\nmain();\n')
+    write(tmp_path, "src/types.ts", "export type Foo = string;\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+
+
+def test_a_python_module_only_imported_under_type_checking_is_not_an_orphan(tmp_path):
+    write(
+        tmp_path,
+        "src/main.py",
+        "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from src import shapes\n",
+    )
+    write(tmp_path, "src/shapes.py", "x = 1\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    write(tmp_path, "src/unused.py", "x = 1\n")
+    found = [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    assert found == ["orphan::src/unused.py"], "the rule still finds what nothing uses"
+
+
+def test_type_only_imports_still_close_no_cycle(tmp_path):
+    write(tmp_path, "src/a.ts", 'import type { B } from "./b";\nexport type A = B;\n')
+    write(tmp_path, "src/b.ts", 'import { a } from "./a";\nexport type B = typeof a;\n')
+    assert not [f for f in sc.findings(tmp_path, config()) if f.rule == "cycle"]
+
+
 def test_findings_honour_disabled_rules(tmp_path):
     write(tmp_path, "src/dead.py", "x = 1  # noqa\n")
     assert [f.rule for f in sc.findings(tmp_path, config())] == ["orphan", "suppressions"]
