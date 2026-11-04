@@ -9,6 +9,7 @@ broken test cannot flood the artifact and bury the other twenty.
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`,
 plus `CONTRACT_TESTS`, which read every module and instruction file. Where `.devkit.toml` turns the `[frontend]` tier on, a changed source under its `src`
 runs `vitest related` instead, which follows the imports to the tests that reach it.
+Named test files run with the contract tests too, unless `--only` says just these.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -16,7 +17,8 @@ Usage:
     python scripts/run-tests.py             # the tests for what changed
     python scripts/run-tests.py --all       # the whole application suite
     python scripts/run-tests.py --changed   # pytest's last-failed subset
-    python scripts/run-tests.py tests/test_a.py tests/test_b.py::test_c   # just these
+    python scripts/run-tests.py tests/test_a.py tests/test_b.py::test_c   # these, and the contracts
+    python scripts/run-tests.py --only tests/test_a.py                    # just these
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
-USAGE = "%(prog)s [-h] [--all | --changed] [test file or pytest argument ...]"
+USAGE = "%(prog)s [-h] [--all | --changed] [--only] [test file or pytest argument ...]"
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -45,7 +47,10 @@ TEST_DIRS = ("tests", "scripts/hooks/tests")
 # public symbol -- so no changed file's name maps to them, and a run of "the tests for
 # what changed" skipped exactly what the gate then went red on: roguelike's CLAUDE.md at
 # 500 lines, social-scraper's run-tests.py past the complexity limit (2026-10-01). About
-# twenty seconds together; one the project does not hold is skipped.
+# twenty seconds together; one the project does not hold is skipped. Named test files
+# get them too, in runs of their own so the files' options do not bind to them: a
+# session that named its files got none, and ran all of `scripts/hooks/tests` to reach
+# them (devkit, 9caa3f5d). `--only` is the run of just the named files.
 CONTRACT_TESTS = (
     "scripts/hooks/tests/test_repo_contract.py",
     "scripts/hooks/tests/test_structure_check.py",
@@ -228,10 +233,32 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     return tests, unnamed
 
 
+def contracts_beyond(targets: list[str], root: Path = REPO_ROOT) -> list[str]:
+    """Every `CONTRACT_TESTS` file `root` holds that `targets` does not already run, by
+    naming it or a directory holding it."""
+    named = [t.replace("\\", "/").rstrip("/") for t in targets if not t.startswith("-")]
+
+    def runs(contract: str) -> bool:
+        return any(n in (contract, ".", "") or contract.startswith(f"{n}/") for n in named)
+
+    return [t for t in CONTRACT_TESTS if not runs(t) and (root / t).is_file()]
+
+
 def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
-    """`tests` followed by every `CONTRACT_TESTS` file `root` holds that it lacks."""
-    extra = [t for t in CONTRACT_TESTS if t not in tests and (root / t).is_file()]
-    return [*tests, *extra]
+    """`tests` followed by every `CONTRACT_TESTS` file `contracts_beyond` them."""
+    return [*tests, *contracts_beyond(tests, root)]
+
+
+def explicit_runs(targets: list[str], root: Path = REPO_ROOT) -> list[list[str]]:
+    """The pytest runs for targets a caller named: those as one run, since they may carry
+    options that bind to them, then the contract tests they do not run, one run per
+    `TEST_DIRS` root. No targets is the whole suite, which holds every contract."""
+    if not targets:
+        return [targets]
+    extra = contracts_beyond(targets, root)
+    if extra:
+        print(f"run-tests: and {len(extra)} contract test(s) besides; --only skips them")
+    return [targets, *by_test_root(extra)]
 
 
 def by_test_root(targets: list[str]) -> list[list[str]]:
@@ -398,6 +425,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, usage=USAGE)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
+    parser.add_argument(
+        "--only", action="store_true", help="run just the named tests, not the contract tests"
+    )
     args, extra = parser.parse_known_args(argv)
     # After parsing, so `--help` answers without installing anything.
     rerun = rerun_in_tree_venv("pytest", argv)
@@ -412,7 +442,8 @@ def main(argv: list[str] | None = None) -> int:
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     plan = None if whole else _plan_changed(REPO_ROOT)
     if plan is None:
-        return _finish([run_pytest(cmd + targets)])
+        groups = [targets] if args.only else explicit_runs(targets, REPO_ROOT)
+        return _finish([run_pytest(cmd + group) for group in groups])
     return _run_planned(cmd, *plan)
 
 
