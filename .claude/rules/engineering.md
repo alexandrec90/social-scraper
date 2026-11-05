@@ -4,8 +4,7 @@ description: Baseline engineering policy shared by every devkit project — test
 
 # Rule: Baseline engineering policy
 
-Deliberately **unscoped** (no `paths:`) — the small set of rules that hold everywhere, so
-there is no glob that should exempt a file from them.
+Deliberately **unscoped** (no `paths:`): these hold everywhere.
 
 **Vendored from devkit and byte-identical in every project.** It is in `sync-devkit.py`'s
 `MANIFEST`, so a local edit is reported as drift by the PR gate rather than quietly
@@ -36,7 +35,7 @@ that has no test, write the test in the same commit even if the logic didn't cha
 
 Running tests is optional, and the full suite is not yours to run — see
 `.claude/rules/session-scope.md`. The gate runs once, in CI, on the PR the fix pass opens
-for you; a red gate comes back as a fresh session with the failing tests named.
+for you.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
@@ -83,6 +82,7 @@ PowerShell tool is the answer for a compound statement, not a workaround.
 | `~` in a path; a variable as the script, `python "$S/x.py"`, or in a `sed` path | `$HOME` as an argument; the PowerShell tool for either |
 | `git -C`, `--git-dir`, `env -C`, `GIT_DIR=`, `cd … &&` before git | bare `git`, from the worktree |
 | command substitution, `for`/`while`, a subshell | one call each — a plain `&&` list is fine |
+| `rm` of a variable-built path: "Dangerous rm operation", a built-in check, not this guard | `"${A:?}/${f:?}/x"` or a literal path, never another tool |
 | the letters `git` inside any of the above | nothing; it is a false positive |
 | `sh -c "…"` in a container, either tool | a script file, run there by `sh` |
 

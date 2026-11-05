@@ -188,6 +188,26 @@ into it. What passes both is what the session found: write the container's comma
 script file with the Write tool and run that file with `sh` in the container (a
 bind-mounted path, or `docker cp` first), so neither tool sees the text.
 
+## An `rm` whose target is built from variables
+
+Neither the isolation guard nor devkit: a built-in Claude Code safety check, on a target
+it cannot show stays away from the filesystem root. Reproduced 2026-11-04 (ledger
+`b945aedf`), each line a separate Bash call on a scratch path that did not exist:
+
+```
+for f in a b; do rm -f $A/$f/x; done            → "Dangerous rm operation detected … a
+                                                   shell variable expansion"
+for f in a b; do rm -f "$A/$f/x"; done          → the same; quoting does not settle it
+for f in a b; do rm -f "${A:?}/${f:?}/x"; done  → runs
+A=…; rm -f $A/x                                 → runs
+```
+
+The refusal names both ways through: the `:?` form, which stops the shell when a variable
+is empty, and a literal absolute path. Take one of those. The rule's "PowerShell for a
+compound statement" does not apply here: the refusal says not to re-issue the removal
+through another tool or shell, and when it offers no rewrite the removal is left for a
+person to do, and the report says so.
+
 ## Git Bash rewrites a `rev:path` whose path starts with a dot
 
 Not the guard: the MSYS layer under Git Bash converting what it takes for a POSIX path
