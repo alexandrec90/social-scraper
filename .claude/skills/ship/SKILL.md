@@ -66,7 +66,9 @@ waits on a gate spends the tail of a long conversation on a verdict a fresh one 
 a single call.
 
 **Leave the worktree alone.** Do not reap a box, delete the branch or stop a stack.
-`worktree.py reconcile` owns that and waits for the PR to actually merge.
+`worktree.py reconcile` and `session_trees.py` own that and wait for the PR to actually
+merge. A stack the project should keep running is not this tree's to host: it stays up,
+its tree is kept for it, and your report names it to be moved to the checkout.
 
 **Never work around a refusal.** If something in the harness blocked a correct edit or
 command, say so in your report with the exact command, put it in `logs/friction.md`,
