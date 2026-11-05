@@ -14,12 +14,16 @@ Usage:
     python scripts/lint-all.py            # whole repo
     python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
     python scripts/lint-all.py --paths a.py b.md  # exactly these (/ship's branch diff)
+
+A narrowed run (`--changed`, `--paths`) also runs the commit stage's `detect-secrets`
+hook over every file it names, Python or not, unless `--no-secrets` is given.
 """
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -144,6 +148,40 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
 
 
+# The commit-stage hook a narrowed run also runs, through pre-commit so its `exclude` and
+# the `# pragma: allowlist secret` convention are the commit's own. Without it every check
+# a session runs before `/ship` passed a hard-coded key that the commit then refused, a
+# whole dispatch later. `pre-commit run --all-files` does not stand in for this: it reads
+# only what git tracks, and the file that refuses is usually new. Not named `SECRETS_*`:
+# the scanner reads any assignment to a name holding that word as a keyword secret.
+SCAN_HOOK_ID = "detect-secrets"
+PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
+
+
+def secrets_targets(selected: list[str], skip: bool) -> list[str]:
+    """The files the secrets pass scans: every selected one, of any type, or none.
+
+    None when `skip` (`--no-secrets`) or when this repo's pre-commit config does not
+    declare the hook: a repo without it has no secrets pass to mirror, and pre-commit
+    would fail the run naming a missing hook id. Narrowed runs only: a whole-repo run is
+    CI's, where pre-commit runs every hook.
+    """
+    config = REPO_ROOT / PRECOMMIT_CONFIG
+    if skip or not selected or not config.is_file():
+        return []
+    declared = re.search(rf"id:\s*{SCAN_HOOK_ID}\s*$", config.read_text(encoding="utf-8"), re.M)
+    return selected if declared else []
+
+
+def secrets_section(paths: list[str]) -> str:
+    """The detect-secrets section for `paths`, run as the commit hook would run it."""
+    if not paths:
+        return ""
+    cmd = [sys.executable, "-m", "pre_commit", "run", SCAN_HOOK_ID, "--files", *paths]
+    hint = "remove the secret, or mark a false positive `# pragma: allowlist secret`"
+    return run_tool(SCAN_HOOK_ID, cmd, hint)
+
+
 def _git(*args: str) -> list[str]:
     result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
     return result.stdout.splitlines() if result.returncode == 0 else []
@@ -205,19 +243,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="lint exactly these files, scoped as --changed is (used by /ship)",
     )
-    # Accepted, and a no-op here: this project has no detect-secrets pass to skip.
     # The Stop hook (`scripts/hooks/stop.py`) passes `--no-secrets` unconditionally,
-    # because a project whose lint runner *does* have one must skip it on every turn —
-    # secrets scanning is the pre-commit hook's job and running it churns
-    # `.secrets.baseline`. stop.py is vendored byte-identical and cannot introspect
-    # this file, so parsing the flag is part of the contract between the two. Omitting
-    # it is not a silent no-op: argparse rejects the unknown flag and exits 2, which
-    # the Stop hook reports as a lint failure on *every* stop, with a usage message
-    # instead of a finding and nothing in the source tree that can fix it.
+    # because a per-turn run must not spend seconds on the secrets pass. stop.py is
+    # vendored byte-identical and cannot introspect this file, so parsing the flag is part
+    # of the contract between the two. Omitting it is not a silent no-op: argparse rejects
+    # the unknown flag and exits 2, which the Stop hook reports as a lint failure on
+    # *every* stop, with a usage message instead of a finding and nothing in the source
+    # tree that can fix it.
     parser.add_argument(
         "--no-secrets",
         action="store_true",
-        help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
+        help="skip the detect-secrets pass a --changed or --paths run makes",
     )
     return parser
 
@@ -302,7 +338,8 @@ def main(argv: list[str] | None = None) -> int:
     targets = python_targets(selected)
     workflows = workflow_files(changed)
     envs = env_files(changed)
-    if scoped and not (targets or workflows or envs):
+    secrets = secrets_targets(selected, args.no_secrets)
+    if scoped and not any((targets, workflows, envs, secrets)):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
@@ -330,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
+    sections += secrets_section(secrets)
 
     _write_artifact(sections)
     if sections:

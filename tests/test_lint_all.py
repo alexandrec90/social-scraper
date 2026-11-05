@@ -32,6 +32,71 @@ def test_main_clears_the_artifact_when_explicit_paths_need_no_linter(tmp_path, m
     assert artifact.read_text(encoding="utf-8") == ""
 
 
+def _rooted_with_the_hook(lint_all, monkeypatch, tmp_path, verdict=""):
+    """`lint_all` rooted at `tmp_path`, whose commit stage declares the secrets hook; every
+    tool answers `verdict` and is recorded in the list this returns."""
+    (tmp_path / ".pre-commit-config.yaml").write_text("- id: detect-secrets\n", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("words\n", encoding="utf-8")
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(lint_all, "ARTIFACT", tmp_path / "logs" / "lint-errors.log")
+    calls = []
+
+    def record(name, cmd, _hint):
+        calls.append((name, cmd))
+        return verdict
+
+    monkeypatch.setattr(lint_all, "run_tool", record)
+    return calls
+
+
+def test_secrets_targets_are_every_file_only_where_the_hook_is_declared(tmp_path, monkeypatch):
+    lint_all = _load_lint_all()
+    monkeypatch.setattr(lint_all, "REPO_ROOT", tmp_path)
+    assert lint_all.secrets_targets(["a.md"], skip=False) == [], "no config, nothing to mirror"
+    config = tmp_path / ".pre-commit-config.yaml"
+    config.write_text("- id: ruff\n", encoding="utf-8")
+    assert lint_all.secrets_targets(["a.md"], skip=False) == []
+    config.write_text("      - id: detect-secrets\n        exclude: x\n", encoding="utf-8")
+    assert lint_all.secrets_targets(["a.md", "b.py"], skip=False) == ["a.md", "b.py"]
+    assert lint_all.secrets_targets(["a.md"], skip=True) == []
+    assert lint_all.secrets_targets([], skip=False) == []
+
+
+def test_a_narrowed_run_scans_a_file_no_other_pass_reads(tmp_path, monkeypatch):
+    """This runner passed what the commit then refused, a whole dispatch later: the only
+    check before `/ship` that reads a non-Python file is the one that refused it."""
+    lint_all = _load_lint_all()
+    calls = _rooted_with_the_hook(lint_all, monkeypatch, tmp_path)
+
+    assert lint_all.main(["--paths", "notes.md"]) == 0
+    assert calls == [
+        (
+            "detect-secrets",
+            [sys.executable, "-m", "pre_commit", "run", "detect-secrets", "--files", "notes.md"],
+        )
+    ]
+
+
+def test_a_refused_scan_fails_the_run(tmp_path, monkeypatch):
+    lint_all = _load_lint_all()
+    _rooted_with_the_hook(lint_all, monkeypatch, tmp_path, verdict="# detect-secrets\nfound\n")
+
+    assert lint_all.main(["--paths", "notes.md"]) == 1
+    assert "# detect-secrets" in lint_all.ARTIFACT.read_text(encoding="utf-8")
+
+
+def test_no_secrets_skips_the_scan(tmp_path, monkeypatch):
+    lint_all = _load_lint_all()
+    calls = _rooted_with_the_hook(lint_all, monkeypatch, tmp_path)
+
+    assert lint_all.main(["--paths", "notes.md", "--no-secrets"]) == 0
+    assert calls == []
+
+
+def test_secrets_section_has_nothing_to_say_about_no_files():
+    assert _load_lint_all().secrets_section([]) == ""
+
+
 def test_main_hands_the_run_to_the_tree_venv_when_this_interpreter_has_no_ruff(monkeypatch):
     """Run with the system Python, it said "ruff: not installed", "mypy: not installed"
     and then "lint-all: clean" from a tree whose `.venv` held both."""
