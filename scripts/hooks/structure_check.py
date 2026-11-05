@@ -33,6 +33,8 @@ Every finding is one line, `rule::path[::symbol] = value`. The gate fails when a
 is new, when a value grew, when a line is no longer true (the function shrank, the
 dependency went), or when the baseline is missing a line the code no longer earns --
 `--tighten` rewrites the file for the last two cases and refuses to do anything else.
+A rename is one new line and one gone one, which `renames` reads off the numbers and the
+report names, with the one call that moves them.
 
 ## What is not
 
@@ -853,11 +855,63 @@ def verdict(
 # scanner it configures, and naming them here would make this comment a finding.
 UNRECORDABLE = frozenset(scan_mod.COUNTERS)
 
+RENAME_CALL = 'structure_check.py --tighten --record --reason "<what was renamed>"'
 
-def recordable(worse: list[Finding]) -> tuple[list[Finding], list[Finding]]:
-    """`worse`, split into what `--record` may move and what it must refuse."""
-    allowed = [f for f in worse if f.rule not in UNRECORDABLE]
-    refused = [f for f in worse if f.rule in UNRECORDABLE]
+
+def _could_be(gone: tuple[str, int], f: Finding, root: Path) -> bool:
+    """Whether the gone baseline line `(key, value)` can be what `f` was before a rename:
+    the same rule, no larger now, and for a counter a file that no longer exists -- moving
+    a `noqa` between two living files is a new decision to suppress, not a rename."""
+    rule, path, *_symbol = gone[0].split("::")
+    if rule != f.rule or gone[1] < f.value:
+        return False
+    return rule not in UNRECORDABLE or not (root / path).exists()
+
+
+def renames(
+    root: Path, worse: list[Finding], stale: list[tuple[str, int, int | None]]
+) -> list[tuple[str, Finding]]:
+    """`(gone key, new finding)` for each new finding a gone line could have become.
+
+    A baseline key is `rule::path::symbol`, so a pure rename reads as one new line and one
+    stale one: `--tighten` alone drops the stale half and leaves the gate red, and the test
+    beside it says not to add to the baseline at all (c03808d0). Nothing records what a
+    file was called before, so this is a reading of the numbers and the report words it
+    as one. It cannot loosen the ratchet: a pair never carries more than the line it
+    replaces. Each gone line answers for one new line, the largest new finding first and
+    the tightest fit, so the debt stays accounted for line by line.
+    """
+    recorded = read_baseline(baseline_path(root))
+    gone = [(key, value) for key, value, now in stale if now is None]
+    pairs: list[tuple[str, Finding]] = []
+    for f in sorted((f for f in worse if f.key not in recorded), key=lambda f: -f.value):
+        fits = [line for line in gone if _could_be(line, f, root)]
+        if fits:
+            tightest = min(fits, key=lambda line: line[1])
+            gone.remove(tightest)
+            pairs.append((tightest[0], f))
+    return pairs
+
+
+def rename_note(moved: list[tuple[str, Finding]]) -> str:
+    """The lines saying what reads as a rename and the one call that moves it, or nothing."""
+    if not moved:
+        return ""
+    pairs = "".join(f"\n  {old} -> {f.key}" for old, f in moved)
+    return (
+        f"\n{len(moved)} read(s) as a rename, the same debt under a new key:{pairs}\n"
+        f"if so, move them in one call: {RENAME_CALL}"
+    )
+
+
+def recordable(
+    worse: list[Finding], moved: list[tuple[str, Finding]] | None = None
+) -> tuple[list[Finding], list[Finding]]:
+    """`worse`, split into what `--record` may move and what it must refuse. A counter in
+    `moved` is the same count under a new path, so nobody chose anything: it may move."""
+    same_count = {f.key for _, f in moved or []}
+    allowed = [f for f in worse if f.rule not in UNRECORDABLE or f.key in same_count]
+    refused = [f for f in worse if f.rule in UNRECORDABLE and f.key not in same_count]
     return allowed, refused
 
 
@@ -886,8 +940,8 @@ def record(
     if not reason.strip():
         raise ValueError("--record needs a reason: say why the growth is the honest answer")
     path = baseline_path(root)
-    worse, _stale = verdict(root, cfg)
-    allowed, refused = recordable(worse)
+    worse, stale = verdict(root, cfg)
+    allowed, refused = recordable(worse, renames(root, worse, stale))
     if refused or not allowed:
         return [], refused
     entries = read_baseline(path)
@@ -940,6 +994,7 @@ def report(
     stale: list[tuple[str, int, int | None]],
     lim: dict[str, int],
     advisory: list[Finding] | None = None,
+    moved: list[tuple[str, Finding]] | None = None,
 ) -> str:
     """The artifact body: everything an agent needs to fix the gate, one line each, and
     one warning line for the module-size rules that no longer fail it."""
@@ -954,6 +1009,8 @@ def report(
         for key, recorded, now in stale:
             state = "gone" if now is None else f"now {now}"
             lines.append(f"  {key} = {recorded} ({state})")
+    if moved:
+        lines.append(rename_note(moved).strip())
     if not lines:
         lines.append("structure-check: clean.")
     if advisory:
@@ -997,13 +1054,20 @@ def run_record(reason: str) -> int | None:
     return None
 
 
-def failed_line(worse: list[Finding], stale: list, artifact: str, tightened: bool) -> str:
+def failed_line(
+    worse: list[Finding],
+    stale: list,
+    artifact: str,
+    tightened: bool,
+    moved: list[tuple[str, Finding]] | None = None,
+) -> str:
     """The status line of a failing run.
 
     After `--tighten` it says whose verdict it is: that run exits 1 while anything is
     still worse, so a `--record` chained after it with `&&` never runs, and the line read
     as `--record`'s own -- recording nothing, silently (6e2a36b2). Both flags share one
-    call, which records first and then tightens.
+    call, which records first and then tightens. `moved` puts that call on the line
+    before `--tighten` is tried, since a rename is the case where it is the first answer.
     """
     line = f"structure-check: {len(worse)} worse, {len(stale)} stale"
     if tightened and worse:
@@ -1011,6 +1075,8 @@ def failed_line(worse: list[Finding], stale: list, artifact: str, tightened: boo
             " after --tighten, which only drops and lowers; record growth in the same call"
             ' with --tighten --record --reason "<why>"'
         )
+    elif moved:
+        line += f"; {len(moved)} read(s) as a rename: {RENAME_CALL}"
     return f"{line} -- see {artifact}"
 
 
@@ -1064,10 +1130,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"structure-check: dropped {dropped} line(s), lowered {lowered} in {BASELINE_NAME}.")
 
     worse, stale, advisory = judge(REPO_ROOT, CFG)
-    body = report(worse, stale, limits(CFG), advisory)
-    path = write_artifact(REPO_ROOT, body)
+    moved = renames(REPO_ROOT, worse, stale)
+    path = write_artifact(REPO_ROOT, report(worse, stale, limits(CFG), advisory, moved))
     if worse or stale:
-        print(failed_line(worse, stale, path.relative_to(REPO_ROOT).as_posix(), args.tighten))
+        artifact = path.relative_to(REPO_ROOT).as_posix()
+        print(failed_line(worse, stale, artifact, args.tighten, moved))
         return 1
     sizes = len({f.path for f in advisory})
     warned = f"; warning: {sizes} module(s) past a size limit (advisory)" if sizes else ""

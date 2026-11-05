@@ -171,6 +171,10 @@ MANIFEST: tuple[str, ...] = (
     # devkit's nightly `devkit-local-e2e` job runs in every checkout. Path-scoped to test
     # files, so it costs the always-loaded tier nothing.
     ".claude/rules/local-e2e.md",
+    # What a script a VS Code task runs starts as. Path-scoped to `scripts/` for the same
+    # reason: `engineering.md` has no room for it (`hot-budget.py`), and a template's
+    # `CLAUDE.md` reaches only a project generated after the fix.
+    ".claude/rules/task-scripts.md",
     # The policy's reference half, and a fixer session's own instructions. Vendored as
     # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
     # where every `.md` is loaded into every session -- which neither may be.

@@ -208,6 +208,58 @@ def test_the_pr_gate_exists_and_carries_the_title_automerge_waits_on():
     )
 
 
+def unguarded_compose_entries(dependabot: str, gate: str) -> list[str]:
+    """The `docker-compose` entries of `dependabot` that auto-merge can take a major from.
+
+    None where `gate` starts the stack: there the gate is the review it is said to be.
+    """
+    code = re.sub(r"^\s*#.*$", "", dependabot, flags=re.M)
+    if re.search(r"docker[ -]compose\s[^\n]*\bup\b", re.sub(r"^\s*#.*$", "", gate, flags=re.M)):
+        return []
+    entries = re.split(r"^\s*-\s*package-ecosystem:\s*", code, flags=re.M)[1:]
+    return [
+        entry.split("\n", 1)[0].strip()
+        for entry in entries
+        if entry.startswith("docker-compose") and "version-update:semver-major" not in entry
+    ]
+
+
+def test_a_compose_image_no_gate_starts_takes_no_major_through_auto_merge():
+    """Auto-merge takes every Dependabot PR the gate passes, on the premise that the gate
+    expresses all a person would check. A gate that starts no container expresses nothing
+    about an image: homelab's mariadb 11.4 to 13.0 was green on every check while
+    Nextcloud allowed 12.3 at most. So that ecosystem's majors stay out of the bot's hands.
+    """
+    if not DEPENDABOT.is_file():
+        return
+    gate = WORKFLOWS_DIR / PR_GATE
+    unguarded = unguarded_compose_entries(_read(DEPENDABOT), _read(gate) if gate.is_file() else "")
+    assert not unguarded, (
+        ".github/dependabot.yml has a `docker-compose` entry that can open a major, and "
+        f"{AUTOMERGE} merges what the gate passes, which starts no container. Add to it:\n\n"
+        "    ignore:\n"
+        '      - dependency-name: "*"\n'
+        "        update-types:\n"
+        '          - "version-update:semver-major"\n'
+    )
+
+
+def test_the_compose_check_reads_entries_not_comments():
+    entry = "  - package-ecosystem: docker-compose\n    directory: /\n"
+    actions = "  - package-ecosystem: github-actions\n    directory: /\n"
+    ignored = (
+        f"{entry}    ignore:\n      - dependency-name: '*'\n        update-types:\n"
+        '          - "version-update:semver-major"\n'
+    )
+    assert unguarded_compose_entries(entry + actions, "") == ["docker-compose"]
+    assert unguarded_compose_entries(ignored + actions, "") == []
+    assert unguarded_compose_entries(actions, "") == []
+    named = f"{entry}    # never version-update:semver-major here\n"
+    assert unguarded_compose_entries(named, "") == ["docker-compose"], "a comment guards nothing"
+    assert unguarded_compose_entries(entry, "run: docker compose up -d --wait\n") == []
+    assert unguarded_compose_entries(entry, "# docker compose up -d\n") == ["docker-compose"]
+
+
 def test_the_pr_gate_can_be_re_run_on_the_default_branch():
     """A merge by the auto-merge workflow is a push made with `GITHUB_TOKEN`, which raises
     no `push` event, so nothing gates the new tip. The fix pass re-runs the gate there with

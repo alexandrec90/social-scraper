@@ -9,6 +9,9 @@ name: Auto-merge
 # nobody holds a judgement of whether a major breaks the code that a passing gate does
 # not already express: a hold label (`needs-manual-merge`, until 2026-11-02) only
 # stranded green bumps until someone merged them with nothing to add.
+# That holds only for what the gate runs. A compose image it never starts is the
+# exception, and it is held at the source, not here: `dependabot.yml` ignores that
+# ecosystem's majors, and `test_ci_workflow_contract.py` fails a project that does not.
 # Every other PR no person prompted for carries the label from creation too -- the
 # fix pass's fixer PRs, `upgrade-project.py`'s upgrade PRs, the Codex sync -- and a
 # human can apply it to any PR instead of babysitting the gate.

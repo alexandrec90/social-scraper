@@ -995,6 +995,119 @@ def test_tighten_and_record_share_one_call(project, capsys):
     assert "orphan::src/gone.py" not in sc.read_baseline(sc.baseline_path(root))
 
 
+def _renamed(root) -> None:
+    """`f` in `src/big.py` was `old_name` in `src/was.py` when the baseline was written."""
+    _oversized(root)
+    write(
+        root,
+        sc.BASELINE_NAME,
+        "function_lines::src/was.py::old_name = 42\norphan::src/big.py = 1\n",
+    )
+
+
+def test_a_rename_is_named_with_the_one_call_that_moves_it(project, capsys):
+    """c03808d0: a pure rename reads as one new line and one stale one, because a baseline
+    key is `rule::path::symbol`. The stale half said `--tighten`, which left the gate red,
+    and nothing named `--tighten --record --reason` until that had already failed."""
+    root = project(limits={"function_lines": 10})
+    _renamed(root)
+    assert sc.main([]) == 1
+    out = capsys.readouterr().out
+    assert "1 worse, 1 stale" in out and "--tighten --record --reason" in out
+    body = (root / sc.ARTIFACT).read_text(encoding="utf-8")
+    moved = "function_lines::src/was.py::old_name -> function_lines::src/big.py::f"
+    assert moved in body and "--tighten --record --reason" in body
+
+
+def test_the_named_call_clears_a_rename(project, capsys):
+    root = project(limits={"function_lines": 10})
+    _renamed(root)
+    assert sc.main(["--tighten", "--record", "--reason", "renamed old_name to f"]) == 0
+    assert sc.read_baseline(sc.baseline_path(root)) == {
+        "function_lines::src/big.py::f": 42,
+        "orphan::src/big.py": 1,
+    }
+
+
+def test_a_line_that_grew_past_the_gone_line_is_not_a_rename(tmp_path):
+    """Grown past what the gone line recorded is growth, whatever its name, and a growth
+    told it was a rename would be recorded with the wrong reason."""
+    _oversized(tmp_path, lines=60)
+    write(tmp_path, sc.BASELINE_NAME, "function_lines::src/was.py::old_name = 41\n")
+    worse, stale = sc.verdict(tmp_path, config(limits={"function_lines": 10}))
+    assert worse and stale
+    assert sc.renames(tmp_path, worse, stale) == []
+
+
+def test_a_rename_that_shrank_still_pairs_and_the_tightest_line_wins(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "")
+    new = sc.Finding("function_lines", "src/b.py", 41, "g")
+    stale = [
+        ("function_lines::src/a.py::loose", 90, None),
+        ("function_lines::src/a.py::tight", 50, None),
+        ("complexity::src/a.py::other", 90, None),
+        ("function_lines::src/a.py::shrank", 60, 45),
+    ]
+    assert sc.renames(tmp_path, [new], stale) == [("function_lines::src/a.py::tight", new)]
+
+
+def test_a_line_already_in_the_baseline_is_growth_never_a_rename(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "function_lines::src/b.py::g = 30\n")
+    grew = sc.Finding("function_lines", "src/b.py", 41, "g")
+    gone = [("function_lines::src/a.py::f", 50, None)]
+    assert sc.renames(tmp_path, [grew], gone) == []
+
+
+def test_one_gone_line_answers_for_one_new_line(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "")
+    new = [
+        sc.Finding("function_lines", "src/b.py", 41, "g"),
+        sc.Finding("function_lines", "src/b.py", 44, "h"),
+    ]
+    pairs = sc.renames(tmp_path, new, [("function_lines::src/a.py::f", 50, None)])
+    assert [finding.symbol for _, finding in pairs] == ["h"]
+
+
+def test_a_counter_moved_with_its_file_is_recorded_though_a_new_one_never_is(tmp_path):
+    """`--record` refuses a counter, so a renamed file holding a `noqa` had no working
+    call at all. The count did not grow, and the file it was charged to is gone."""
+    write(tmp_path, "src/new.py", "x = 1  # noqa\n")
+    write(tmp_path, sc.BASELINE_NAME, "suppressions::src/old.py = 1\n")
+    recorded, refused = sc.record(tmp_path, config(), "renamed old.py to new.py")
+    assert "suppressions::src/new.py" in [f.key for f in recorded] and refused == []
+
+
+def test_a_counter_cleared_from_a_living_file_does_not_excuse_a_new_one(tmp_path):
+    """Moving a suppression between two files that both still exist is a new decision to
+    suppress, which is exactly what `UNRECORDABLE` refuses."""
+    write(tmp_path, "src/old.py", "x = 1\n")
+    write(tmp_path, "src/new.py", "x = 1  # noqa\n")
+    write(tmp_path, sc.BASELINE_NAME, "suppressions::src/old.py = 1\n")
+    worse, stale = sc.verdict(tmp_path, config())
+    assert sc.renames(tmp_path, worse, stale) == []
+    recorded, refused = sc.record(tmp_path, config(), "moved it")
+    assert recorded == [] and [f.key for f in refused] == ["suppressions::src/new.py"]
+
+
+def test_rename_note_is_empty_without_a_pair_and_names_every_pair_with_one():
+    assert sc.rename_note([]) == ""
+    new = sc.Finding("orphan", "src/b.py", 1)
+    note = sc.rename_note([("orphan::src/a.py", new)])
+    assert "orphan::src/a.py -> orphan::src/b.py" in note
+    assert "--tighten --record --reason" in note
+
+
+def test_failed_line_names_the_rename_call_only_when_something_reads_as_one():
+    grew = [sc.Finding("function_lines", "src/big.py", 41, "f")]
+    pair = [("function_lines::src/a.py::g", grew[0])]
+    gone = [("function_lines::src/a.py::g", 41, None)]
+    said = sc.failed_line(grew, gone, "logs/x.log", tightened=False, moved=pair)
+    assert said.startswith("structure-check: 1 worse, 1 stale; 1 read(s) as a rename")
+    assert "--tighten --record --reason" in said and said.endswith("see logs/x.log")
+    plain = sc.failed_line(grew, gone, "logs/x.log", tightened=False)
+    assert plain == "structure-check: 1 worse, 1 stale -- see logs/x.log"
+
+
 def test_main_exits_two_on_a_configuration_error(project, capsys):
     project(limits={"nope": 1})
     assert sc.main([]) == 2
@@ -1019,19 +1132,23 @@ def test_the_manifest_configures_the_gate_correctly():
 
 @adopted
 def test_nothing_is_new_or_worse_than_the_baseline():
-    worse, _ = sc.verdict(REPO_ROOT, sc.CFG)
+    worse, stale = sc.verdict(REPO_ROOT, sc.CFG)
     lim = sc.limits(sc.CFG)
-    assert not worse, "fix the code, do not add to the baseline:\n" + "\n".join(
-        sc.describe(f, lim) for f in worse
+    note = sc.rename_note(sc.renames(REPO_ROOT, worse, stale))
+    assert not worse, (
+        "fix the code, do not add to the baseline:\n"
+        + "\n".join(sc.describe(f, lim) for f in worse)
+        + note
     )
 
 
 @adopted
 def test_the_baseline_holds_only_what_the_code_still_earns():
-    _, stale = sc.verdict(REPO_ROOT, sc.CFG)
+    worse, stale = sc.verdict(REPO_ROOT, sc.CFG)
     assert not stale, (
         f"run `python scripts/hooks/structure_check.py --tighten` to drop these from {sc.BASELINE_NAME}: "
         + ", ".join(key for key, _, _ in stale)
+        + sc.rename_note(sc.renames(REPO_ROOT, worse, stale))
     )
 
 
