@@ -55,6 +55,14 @@ def test_every_rule_has_a_remedy():
     assert set(sc.REMEDIES) == set(sc.RULES)
 
 
+def test_the_skip_remedy_and_the_local_tier_rule_name_each_other():
+    """A fixer writing the local tier was refused a `pytest.skip`, with a remedy that said
+    only un-skip or delete, under a rule that read as if a skip were the tier's shape."""
+    assert "local-e2e.md" in sc.REMEDIES["skipped_tests"]
+    rule = (REPO_ROOT / ".claude" / "rules" / "local-e2e.md").read_text(encoding="utf-8")
+    assert "`skipped_tests`" in rule
+
+
 def test_config_errors_name_an_unknown_limit_and_an_unknown_rule():
     errors = sc.config_errors(config(limits={"file_lnies": 1}, disabled=("orpan",)))
     assert any("file_lnies" in e for e in errors)
