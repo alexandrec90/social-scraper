@@ -112,7 +112,8 @@ REMEDIES: dict[str, str] = {
     "(`noqa: E402 - why`, `eslint-disable-line x -- why`)",
     "any_types": "give it a type; `unknown` if the shape is truly open",
     "todos": "do it, or file it and delete the comment",
-    "skipped_tests": "un-skip it, or delete it with the reason in the commit",
+    "skipped_tests": "un-skip it, or delete it with the reason in the commit; a test only this "
+    "workstation can run takes the local tier's marker instead (.claude/rules/local-e2e.md)",
     "focused_tests": "remove `.only` -- it silences every other test in the file",
     "swallowed_errors": "catch the specific exception, or re-raise after logging",
     "cycle": "break the cycle: move the shared piece below both modules",

@@ -12,10 +12,10 @@ paths:
 
 Vendored from devkit, like `engineering.md`: change it there.
 
-A test that needs this workstation is skipped in CI, and a skip is not coverage. That
-means a test that needs the live workspace file, a GUI, the Docker stack, a browser or a
-credential. Before this tier such tests ran only when a person happened to run the suite
-on the default branch.
+A test that needs this workstation cannot run in CI, and a skip there is not coverage.
+That means a test that needs the live workspace file, a GUI, the Docker stack, a browser
+or a credential. Before this tier such tests ran only when a person happened to run the
+suite on the default branch.
 
 **Reach them from `scripts/e2e.py`.** devkit's nightly `devkit-local-e2e` job runs that
 script in this checkout, fast-forwarded to origin's default-branch tip, once the PC has
@@ -32,8 +32,15 @@ fixer is told to run the script again.
 
 The usual shape is a pytest marker that `addopts` deselects and `scripts/e2e.py`
 selects; devkit's is `local`. Another runner works the same way, for example a Vitest
-config whose include pattern the default run never matches. Under `DEVKIT_E2E` a skip in that tier is a failure: the
-checkout is the one the tests were written for, so nothing has a reason left to skip.
+config whose include pattern the default run never matches.
+
+**Deselection keeps a tier test out of CI, so the test needs no skip of its own.** Where
+the machine is missing what it needs, fail and name what is missing (`pytest.fail`, say).
+`scripts/hooks/structure_check.py` refuses a new skip here as anywhere, through its
+`skipped_tests` counter, which `--record` cannot pass. And under `DEVKIT_E2E` a skip in
+the tier is a failure: the checkout is the one the tests were written for, so nothing
+has a reason left to skip.
+
 **Every project owes the script.** One whose default branch on origin has none is red
 the same night, as a missing tier, and the fix pass sends its fixer to write one. It is
 never a skip: a skip reads as green, which is the state this tier exists to end.
