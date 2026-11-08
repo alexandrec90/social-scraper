@@ -403,6 +403,10 @@ ROUTE_SCOPES = {
     "pulls/*": {("pull-requests", "read")},
     # Merging writes a commit to the base branch and closes the PR.
     "pulls/*/merge": {("contents", "write"), ("pull-requests", "write")},
+    # Starting the gate on what was just merged: `GITHUB_TOKEN`'s merge raises no `push`.
+    "actions/workflows/*/dispatches": {("actions", "write")},
+    # Deleting a merged PR's head, so a checkout on it reads as spent.
+    "git/refs/heads/*": {("contents", "write")},
 }
 
 # GitHub's own ordering. `write` implies `read`; an unlisted scope is `none`.
@@ -484,3 +488,442 @@ def test_the_sweep_reads_check_runs_at_all():
     run = FakeRun(world())
     merger.main(env(), run)
     assert any("check-runs" in arg for call in run.calls for arg in call), run.calls
+
+
+# --- one PR, one commit ----------------------------------------------------------
+
+
+def test_a_merge_is_a_squash_carrying_the_prs_title_and_body():
+    """One commit per PR is what makes reverting a change one `git revert`, and the body
+    is the only changelog a consumer of the repository gets."""
+    run = FakeRun(world(prs=[pr(title="Fix it", body="Why it was broken.")]))
+    assert merger.main(env(), run) == 0
+    merge = run.merges()[0]
+    assert "merge_method=squash" in merge
+    assert "commit_title=Fix it (#15)" in merge
+    assert "commit_message=Why it was broken." in merge
+
+
+def test_a_repository_with_squash_off_takes_a_merge_commit():
+    class Refusing(FakeRun):
+        def __call__(self, argv, **kwargs):
+            if "merge_method=squash" in argv:
+                self.calls.append(list(argv))
+                said = "HTTP 405: Squash merges are not allowed on this repository"
+                return SimpleNamespace(stdout="", stderr=said, returncode=1)
+            return super().__call__(argv, **kwargs)
+
+    run = Refusing(world())
+    assert merger.main(env(), run) == 0
+    assert "merge_method=merge" in run.merges()[-1]
+
+
+# --- the merge queue -------------------------------------------------------------
+
+
+ONTO_MAIN = {"ref": "main", "repo": {"default_branch": "main"}}
+
+
+def merge_now(number: int = 15, **overrides) -> dict:
+    labels = [{"name": "merge-now"}]
+    return pr(number=number, labels=labels, **overrides)
+
+
+def merged_numbers(run: FakeRun) -> list[int]:
+    found = (re.search(r"pulls/(\d+)/merge", " ".join(call)) for call in run.merges())
+    return [int(match.group(1)) for match in found if match]
+
+
+def direct_project(tmp_path):
+    (tmp_path / ".devkit.toml").write_text(
+        '[delivery]\nflow = "direct"\n[python]\nversion = "3.13"\n', encoding="utf-8"
+    )
+    return tmp_path
+
+
+def in_the_queue(run, tmp_path, **overrides) -> int:
+    """`main` as the `sweep` job runs it in a direct project."""
+    return merger.main(env(MERGE_QUEUE="yes", **overrides), run, root=direct_project(tmp_path))
+
+
+def test_merge_now_merges_with_no_gate_at_all(tmp_path):
+    """No gate ran, and that is the point: the direct flow checks after landing."""
+    run = FakeRun(world(prs=[merge_now()], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+    assert not any("actions/runs" in arg for call in run.calls for arg in call), run.calls
+
+
+def test_merge_now_outside_the_queue_job_merges_nothing(tmp_path):
+    """The `merge` job fires after every gate. Draining from there would merge outside the
+    one-at-a-time group and with no tidy behind it, and the gate it dispatched would read
+    the untidied commit as red."""
+    run = FakeRun(world(prs=[merge_now()], gate=""))
+    assert merger.main(env(), run, root=direct_project(tmp_path)) == 0
+    assert merged_numbers(run) == []
+
+
+def test_merge_now_in_a_gated_project_merges_nothing(tmp_path):
+    """A label someone applies by hand must not be a way past that project's gate."""
+    run = FakeRun(world(prs=[merge_now()], gate=""))
+    assert merger.main(env(MERGE_QUEUE="yes"), run, root=tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_both_labels_outside_the_queue_still_wait_for_the_gate(tmp_path):
+    labels = [{"name": "automerge"}, {"name": "merge-now"}]
+    run = FakeRun(world(prs=[pr(labels=labels)], gate=""))
+    assert merger.main(env(), run, root=direct_project(tmp_path)) == 0
+    assert merged_numbers(run) == []
+
+
+def test_the_queue_merges_oldest_first(tmp_path):
+    listing = [merge_now(30), merge_now(10), merge_now(20)]  # the API lists newest first
+    run = FakeRun(world(prs=listing, gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [10, 20, 30]
+
+
+def test_a_conflict_is_passed_over_and_the_line_behind_it_keeps_moving(tmp_path):
+    """Stopping for it would hold every PR behind one resolver session."""
+    listing = [
+        merge_now(10),
+        merge_now(20, mergeable=False, mergeable_state="dirty"),
+        merge_now(30),
+    ]
+    run = FakeRun(world(prs=listing, gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [10, 30]
+
+
+def test_a_draft_is_still_unfinished_with_merge_now(tmp_path):
+    run = FakeRun(world(prs=[merge_now(draft=True)], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_a_held_pr_carries_neither_label_and_stays(tmp_path):
+    run = FakeRun(world(prs=[pr(labels=[])], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_a_failed_read_of_one_pr_costs_only_that_pr(tmp_path):
+    """Raised past the loop, it would also lose the outputs saying what already landed,
+    and those commits would get no tidy and no gate."""
+    outputs = tmp_path / "outputs"
+    listing = [merge_now(10, base=ONTO_MAIN), merge_now(20, base=ONTO_MAIN)]
+
+    class Failing(FakeRun):
+        def __call__(self, argv, **kwargs):
+            if argv[-1].endswith("pulls/20"):
+                self.calls.append(list(argv))
+                return SimpleNamespace(stdout="", stderr="HTTP 502", returncode=1)
+            return super().__call__(argv, **kwargs)
+
+    run = Failing(world(prs=listing, gate=""))
+    assert in_the_queue(run, tmp_path, GITHUB_OUTPUT=str(outputs)) == 1
+    assert merged_numbers(run) == [10]
+    assert "tidy=true" in outputs.read_text(encoding="utf-8").splitlines()
+
+
+def test_one_refused_merge_does_not_cost_the_prs_behind_it_their_turn(tmp_path):
+    """And the job still ends red, so the refusal is on record."""
+
+    class Refusing(FakeRun):
+        def __call__(self, argv, **kwargs):
+            if any("pulls/10/merge" in arg for arg in argv):
+                self.calls.append(list(argv))
+                return SimpleNamespace(stdout="", stderr="HTTP 409: Conflict", returncode=1)
+            return super().__call__(argv, **kwargs)
+
+    run = Refusing(world(prs=[merge_now(10), merge_now(20)], gate=""))
+    assert in_the_queue(run, tmp_path) == 1
+    assert merged_numbers(run) == [10, 20]
+
+
+# --- a merge commit is the answer to one refusal only -----------------------------
+
+
+def refusal(said: str):
+    return merger.GhError(f"gh api --method PUT merge_method=squash exited 1: {said}", said)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "HTTP 405: Squash merges are not allowed on this repository.",
+        "HTTP 403: refusing to allow a GitHub App to update workflow `.github/workflows/x.yml`",
+    ],
+)
+def test_squash_refused_reads_a_refusal_of_squashing(said):
+    assert merger.squash_refused(refusal(said)) is True
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "HTTP 405: Base branch was modified. Review and try the merge again.",
+        "HTTP 405: Pull Request is not mergeable",
+        "HTTP 503: No server is currently available",
+    ],
+)
+def test_any_other_refusal_is_not_a_reason_for_a_merge_commit(said):
+    """Reading the whole message matched these: the argv itself contains "squash", and a
+    PR number could supply the 405. A merge commit would break one PR, one commit."""
+    assert merger.squash_refused(refusal(said)) is False
+
+
+def test_a_refused_merge_is_not_retried_as_a_merge_commit(tmp_path):
+    class Moved(FakeRun):
+        def __call__(self, argv, **kwargs):
+            if "merge_method=squash" in argv:
+                self.calls.append(list(argv))
+                said = "HTTP 405: Base branch was modified. Review and try the merge again."
+                return SimpleNamespace(stdout="", stderr=said, returncode=1)
+            return super().__call__(argv, **kwargs)
+
+    run = Moved(world(prs=[merge_now()], gate=""))
+    assert in_the_queue(run, tmp_path) == 1
+    assert not any("merge_method=merge" in call for call in run.merges())
+
+
+# --- a merged branch goes --------------------------------------------------------
+
+
+def head_of(ref: str, repo: str = REPO) -> dict:
+    return {"ref": ref, "sha": SHA, "repo": {"full_name": repo}}
+
+
+def deletes(run: FakeRun) -> list[list[str]]:
+    return [call for call in run.calls if "DELETE" in call]
+
+
+def test_a_merged_branch_is_deleted(tmp_path):
+    """A squash leaves a live branch that is no ancestor of the base, and a checkout still
+    on it reads as `needs-pr` for good, its home branch no longer advancing."""
+    run = FakeRun(world(prs=[merge_now(head=head_of("agent/x"), base=ONTO_MAIN)], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert [f"repos/{REPO}/git/refs/heads/agent/x" in call for call in deletes(run)] == [True]
+
+
+@pytest.mark.parametrize(
+    "head",
+    [head_of("main"), head_of("green"), head_of("agent/x", "someone/fork"), {"sha": SHA}],
+)
+def test_delete_branch_leaves_what_is_not_this_prs_to_delete(head):
+    run = FakeRun({})
+    merger.delete_branch(REPO, {"head": head, "base": ONTO_MAIN}, run)
+    assert run.calls == []
+
+
+def test_a_branch_that_will_not_delete_costs_nothing_else(tmp_path):
+    run = FakeRun(
+        world(prs=[merge_now(head=head_of("agent/x"), base=ONTO_MAIN)], gate=""),
+        fail={"git/refs/heads": (1, "HTTP 422: Reference does not exist")},
+    )
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+# --- what a merge starts ---------------------------------------------------------
+
+
+def dispatches(run: FakeRun) -> list[list[str]]:
+    return [call for call in run.calls if any("dispatches" in arg for arg in call)]
+
+
+def test_every_merge_to_the_default_branch_dispatches_the_gate(tmp_path):
+    """A `GITHUB_TOKEN` merge raises no `push`, so nothing else would judge that commit."""
+    listing = [pr(number=10, base=ONTO_MAIN), pr(number=20, base=ONTO_MAIN)]
+    run = FakeRun(world(prs=listing))
+    assert merger.main(env(), run, root=tmp_path) == 0
+    assert len(dispatches(run)) == 2, "one per merge, or a culprit cannot be told apart"
+    assert "ref=main" in dispatches(run)[0]
+
+
+def test_a_merge_elsewhere_dispatches_nothing(tmp_path):
+    other = {"ref": "develop", "repo": {"default_branch": "main"}}
+    run = FakeRun(world(prs=[pr(base=other)]))
+    assert merger.main(env(), run, root=tmp_path) == 0
+    assert dispatches(run) == []
+
+
+def test_a_refused_dispatch_costs_a_verdict_and_never_the_merge(tmp_path):
+    run = FakeRun(
+        world(prs=[pr(base=ONTO_MAIN)]),
+        fail={"dispatches": (1, "HTTP 403: Resource not accessible by integration")},
+    )
+    assert merger.main(env(), run, root=tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+def test_the_direct_flow_leaves_the_gate_to_the_tidy_job(tmp_path):
+    """Gated after tidying, it judges the tree tidy leaves, so a formatter's unfinished
+    work never reads as a red main."""
+    outputs = tmp_path / "outputs"
+    run = FakeRun(world(prs=[merge_now(base=ONTO_MAIN)], gate=""))
+    assert in_the_queue(run, tmp_path, GITHUB_OUTPUT=str(outputs)) == 0
+    assert dispatches(run) == []
+    written = outputs.read_text(encoding="utf-8").splitlines()
+    assert {"tidy=true", "branch=main", "python=3.13"} <= set(written)
+
+
+def test_a_job_with_no_tidy_behind_it_gates_a_direct_projects_merge(tmp_path):
+    """The `merge` job takes `automerge` PRs in a direct project too, Dependabot's among
+    them, and it cannot leave the commit to a tidy that will not run."""
+    run = FakeRun(world(prs=[pr(base=ONTO_MAIN)]))
+    assert merger.main(env(), run, root=direct_project(tmp_path)) == 0
+    assert len(dispatches(run)) == 1
+
+
+def test_nothing_merged_asks_for_no_tidy(tmp_path):
+    outputs = tmp_path / "outputs"
+    conflicted = merge_now(mergeable=False, mergeable_state="dirty")
+    run = FakeRun(world(prs=[conflicted], gate=""))
+    in_the_queue(run, tmp_path, GITHUB_OUTPUT=str(outputs))
+    assert "tidy=false" in outputs.read_text(encoding="utf-8").splitlines()
+
+
+def test_a_gated_project_is_never_tidied(tmp_path):
+    outputs = tmp_path / "outputs"
+    run = FakeRun(world(prs=[pr(base=ONTO_MAIN)]))
+    merger.main(env(MERGE_QUEUE="yes", GITHUB_OUTPUT=str(outputs)), run, root=tmp_path)
+    assert "tidy=false" in outputs.read_text(encoding="utf-8").splitlines()
+
+
+def test_a_broken_devkit_toml_reads_as_gated(tmp_path):
+    (tmp_path / ".devkit.toml").write_text("not [ toml", encoding="utf-8")
+    assert merger.flows_directly(merger.project_settings(tmp_path)) is False
+
+
+def test_the_tidy_job_can_start_the_gate_on_its_own():
+    run = FakeRun({})
+    assert merger.main(env(GATE_ONLY="main"), run) == 0
+    assert len(dispatches(run)) == 1
+    assert len(run.calls) == 1, "the tidy job's last step merges nothing and reads no PR"
+
+
+def test_a_merge_only_into_another_branch_asks_for_no_tidy(tmp_path):
+    """There is no default branch to tidy, and an empty ref would fail the job."""
+    outputs = tmp_path / "outputs"
+    other = {"ref": "develop", "repo": {"default_branch": "main"}}
+    run = FakeRun(world(prs=[merge_now(base=other)], gate=""))
+    in_the_queue(run, tmp_path, GITHUB_OUTPUT=str(outputs))
+    assert "tidy=false" in outputs.read_text(encoding="utf-8").splitlines()
+
+
+def test_default_branch_of_answers_only_for_the_default():
+    assert merger.default_branch_of({"base": ONTO_MAIN}) == "main"
+    other = {"ref": "develop", "repo": {"default_branch": "main"}}
+    assert merger.default_branch_of({"base": other}) == ""
+    assert merger.default_branch_of({}) == ""
+
+
+def test_python_version_comes_from_the_manifest_or_the_default():
+    assert merger.python_version({"python": {"version": "3.13"}}) == "3.13"
+    assert merger.python_version({}) == merger.DEFAULT_PYTHON
+
+
+def test_write_outputs_appends_and_is_silent_outside_actions(tmp_path):
+    target = tmp_path / "out"
+    merger.write_outputs({"GITHUB_OUTPUT": str(target)}, {"a": "1"})
+    merger.write_outputs({"GITHUB_OUTPUT": str(target)}, {"b": "2"})
+    assert target.read_text(encoding="utf-8") == "a=1\nb=2\n"
+    merger.write_outputs({}, {"c": "3"})  # no variable, no file, no error
+
+
+def test_dispatch_gate_names_the_gates_file_and_the_branch():
+    run = FakeRun({})
+    merger.dispatch_gate(REPO, "main", run)
+    call = run.calls[0]
+    assert f"repos/{REPO}/actions/workflows/pr-gate.yml/dispatches" in call
+    assert "ref=main" in call
+
+
+def test_in_line_keeps_either_label_only_in_the_queue_and_orders_by_age():
+    listing = [merge_now(9), pr(number=3), pr(number=5, labels=[])]
+    assert [entry["number"] for entry in merger.in_line(listing, queue=True)] == [3, 9]
+    assert [entry["number"] for entry in merger.in_line(listing)] == [3]
+
+
+def test_take_turn_says_what_became_of_the_pr():
+    run = FakeRun(world(prs=[merge_now()], gate=""))
+    outcome, detail = merger.take_turn(REPO, merge_now(), run, lambda _: None, "", queue=True)
+    assert outcome == merger.MERGED and detail["number"] == 15
+
+
+def test_drain_counts_and_names_the_branch_that_moved():
+    listing = [merge_now(10, base=ONTO_MAIN), merge_now(20, mergeable=False)]
+    run = FakeRun(world(prs=listing, gate=""))
+    assert merger.drain(REPO, listing, run, lambda _: None, "", True) == (1, 0, "main")
+    assert dispatches(run) == [], "the queue's tidy job gates after it"
+
+
+def test_gate_verdict_is_the_half_merge_now_skips():
+    run = FakeRun(world(gate=""))
+    should, why = merger.gate_verdict(REPO, pr(), run, "")
+    assert should is False and "PR Gate" in why
+
+
+# --- the workflow's shape --------------------------------------------------------
+
+
+def _job(name: str) -> str:
+    text = AUTOMERGE_WORKFLOW.read_text(encoding="utf-8")
+    body = text.split(f"\n  {name}:\n", 1)[1]
+    return re.split(r"\n  [a-z-]+:\n", body, maxsplit=1)[0]
+
+
+def test_the_drain_runs_one_at_a_time_and_runs_the_default_branchs_script():
+    """On `pull_request` the event's ref is the PR's own tree, and this job holds a token
+    that can merge: running the PR's copy of the merger would let a PR rewrite its gate."""
+    job = _job("sweep")
+    assert "group: merge-queue" in job
+    assert "cancel-in-progress: false" in job
+    assert "ref: ${{ github.event.repository.default_branch }}" in job
+    assert "merge-now" in job
+
+
+def test_tidying_never_shares_the_drains_group():
+    """Sharing it would make every merge wait on a formatter, the wait this flow removes."""
+    assert "group: tidy-main" in _job("tidy")
+
+
+def test_only_the_sweep_job_is_the_queue():
+    """The `merge` job fires after every gate, outside the one-at-a-time group."""
+    assert "MERGE_QUEUE" in _job("sweep")
+    assert "MERGE_QUEUE" not in _job("merge")
+
+
+def test_tidy_follows_a_drain_that_ended_red():
+    """A drain that merged two PRs and had a third refused ends red. The implied `success()`
+    would skip tidy, and what landed would get no tidy and no gate."""
+    assert "!cancelled()" in _job("tidy")
+
+
+def test_a_fork_cannot_start_the_drain():
+    """Its token is read-only, so all it could do is replace a good pending run."""
+    assert "head.repo.full_name == github.repository" in _job("sweep")
+
+
+def test_every_gate_completion_gets_a_run_of_its_own():
+    """GitHub keeps one pending run per group. Keyed on the branch, a failed gate's run
+    replaced a passing one's, and `green` stayed behind a commit that passed."""
+    text = AUTOMERGE_WORKFLOW.read_text(encoding="utf-8")
+    assert "group: dependabot-automerge-${{ github.event.workflow_run.head_sha" in text
+
+
+def test_the_gate_starts_even_when_tidying_failed():
+    assert "if: always()" in _job("tidy").split("Start the gate", 1)[1]
+
+
+def test_green_follows_only_a_default_branch_run_that_passed():
+    """A fork's branch can share the default branch's name, and its run arrives as a
+    `pull_request`, so the event list is what keeps it from moving `green`."""
+    job = _job("green")
+    assert "conclusion == 'success'" in job
+    assert "head_branch == github.event.repository.default_branch" in job
+    condition = job.split("if: >-", 1)[1].split("runs-on:", 1)[0]
+    assert '["push", "workflow_dispatch"]' in condition
+    assert "pull_request" not in condition

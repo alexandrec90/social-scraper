@@ -473,12 +473,45 @@ def _fix(explicit: list[str]) -> int:
     return code
 
 
+def tidy(runner=subprocess.run) -> int:
+    """`--fix`'s rewrites over the whole tree, with no opinion on what the checks say.
+
+    What `tidy-main.py` runs on a default branch in the direct flow, where nothing else
+    formats a change. Everything that rewrites a file: the commit-stage fixers, a covered
+    baseline line, the Codex mirror. A check that fails is not this step's to report: the
+    gate started after it says so, and stopping here would leave the rest untidied, which
+    is why the mirror does not wait for a quiet commit stage the way `--fix` does.
+    """
+    _, dropped = drop_covered_baseline([])
+    if dropped:
+        print(f"ship: {dropped}")
+    command = pre_commit_command(REPO_ROOT)
+    if command is None:
+        print("ship: pre-commit was not found; provision first.", file=sys.stderr)
+        return EXIT_FIXERS_FAILED
+    # Twice for the reason `run_fixers` is: a fixer's own rewrite can give the next fixer
+    # something to do, and nothing here may leave a tree the next run would change.
+    for _attempt in (1, 2):
+        try:
+            runner([*command, "run", "--all-files"], cwd=REPO_ROOT, check=False)
+        except OSError as exc:
+            print(f"ship: could not run pre-commit: {exc}", file=sys.stderr)
+            return EXIT_FIXERS_FAILED
+    if mirrored := mirror_codex_skills():
+        print(f"ship: {mirrored}")
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode, rest = (argv[0], argv[1:]) if argv else ("", [])
-    if mode not in ("", "--preflight", "--fix") or (mode != "--fix" and rest):
-        print("usage: ship.py [--preflight | --fix [PATH ...]]", file=sys.stderr)
+    known = mode in ("", "--preflight", "--fix", "--tidy")
+    if not known or (mode != "--fix" and rest):
+        print("usage: ship.py [--preflight | --tidy | --fix [PATH ...]]", file=sys.stderr)
         return EXIT_USAGE
+
+    if mode == "--tidy":
+        return tidy()
 
     # Before the branch rule, which is about where a new PR opens: `--fix` opens nothing,
     # and the pass runs it on an open PR's head whatever that branch is called (#390).
