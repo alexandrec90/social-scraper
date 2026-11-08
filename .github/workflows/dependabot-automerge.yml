@@ -30,6 +30,17 @@ name: Auto-merge
 # If a labelled PR fails the gate, nothing happens: the PR simply stays open with
 # its `automerge` label, and the next push's gate run owns the retry.
 #
+# Three things hang off the same file because they all start from a merge or a gate:
+#
+#   3. sweep also drains `merge-now` PRs, the direct flow's: no gate, oldest first, one
+#      at a time per repository, because its job-level group lets one run at once. A
+#      queued run replacing another queued run loses nothing, since each drains them all.
+#   4. tidy runs after a drain in the direct flow, then starts the gate, so the gate
+#      judges the tidied tree. Merging does not wait for it: it has its own group.
+#   5. green fast-forwards the `green` branch whenever the gate passes on a commit of the
+#      default branch. A merge made here raises no `push`, so `merge-dependabot-prs.py`
+#      dispatches the gate itself, and that dispatch is what reaches this job.
+#
 # NB: `workflow_run` only ever runs the copy of this file on the default branch. A
 # change here is inert until it lands there — including while its own PR is open.
 #
@@ -43,6 +54,10 @@ name: Auto-merge
 
 on:
   pull_request:
+    # The default three, for classify and for a resolver's push reaching the drain;
+    # `labeled` for the drain, the label being what a PR opened with it arrives by; and
+    # `ready_for_review`, or a draft marked ready would wait for the hourly pass.
+    types: [opened, reopened, synchronize, labeled, ready_for_review]
   workflow_run:
     workflows: ["PR Gate"]
     types: [completed]
@@ -58,10 +73,11 @@ on:
 # the issues API, and `gh pr edit --add-label` fails outright on a label the repo does
 # not have yet — which is every repo on its first Dependabot PR.
 permissions:
-  # `actions: read` is the sweep's: it asks the runs API whether `PR Gate` succeeded on a
-  # PR's current head SHA, which is the same evidence the merge job gets handed by its
-  # triggering event and has to go and find for itself on a schedule.
-  actions: read
+  # `actions: write` is the merge's: a merge made with this token raises no `push`, so it
+  # dispatches `PR Gate` itself. Reading is the sweep's: it asks the runs API whether
+  # `PR Gate` succeeded on a PR's current head SHA, which is the same evidence the merge
+  # job gets handed by its triggering event and has to go and find on a schedule.
+  actions: write
   # `checks: read` is the sweep's too, and for the half of its evidence the runs API does
   # not hold: `blocking_checks` asks `commits/{sha}/check-runs` whether anything *else*
   # wired onto the PR is unfinished or red. A `permissions:` block grants only what it
@@ -76,11 +92,14 @@ permissions:
 # This file carried NO concurrency block for most of its life, deliberately: its merge job
 # is driven by `workflow_run` completions, and two gate completions on two branches are
 # independent work that a shared group would drop one half of. The schedule made a group
-# mandatory, so the key is built to preserve that -- per branch for a `workflow_run`, and
+# mandatory, so the key is built to preserve that -- per commit for a `workflow_run`, and
 # `github.run_id` (unique per run) for anything without one, so a scheduled pass and a
-# dispatch each get a group of their own and can never supersede a real completion.
+# dispatch each get a group of their own and can never supersede a real completion. Per
+# commit rather than per branch because merges now gate one commit each on the default
+# branch: GitHub keeps one pending run per group, and a failed gate's run replacing a
+# passing one's would leave `green` behind a commit that passed.
 concurrency:
-  group: dependabot-automerge-${{ github.event.workflow_run.head_branch || github.run_id }}
+  group: dependabot-automerge-${{ github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -147,16 +166,91 @@ jobs:
         run: python scripts/merge-dependabot-prs.py
 
   sweep:
-    name: Retry stranded auto-merges
+    name: Drain the merge queue
     # Everything the event-driven job dropped. It fires once per gate completion and
     # nothing re-runs it, so a single transient failure -- an API outage, a rate limit, a
-    # cancelled run -- strands an already-approved bump permanently.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # cancelled run -- strands an already-approved bump permanently. It is also the
+    # direct flow's merger, started by a PR arriving with `merge-now`.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'merge-now'))
     runs-on: ubuntu-latest
+    # One drain at a time in a repository is what makes merging sequential there, and
+    # projects run in parallel because a group belongs to its repository.
+    concurrency:
+      group: merge-queue
+      cancel-in-progress: false
+    outputs:
+      tidy: ${{ steps.drain.outputs.tidy }}
+      branch: ${{ steps.drain.outputs.branch }}
+      python: ${{ steps.drain.outputs.python }}
     steps:
+      # The default branch, never the event's ref: on `pull_request` that is the PR's own
+      # tree, and this job runs what it checks out with a token that can merge.
       - uses: actions/checkout@v7
-      - name: Merge every cleared automerge PR still sitting open
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Merge every cleared PR still sitting open
+        id: drain
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          MERGE_QUEUE: "yes"
         run: python scripts/merge-dependabot-prs.py
+
+  tidy:
+    name: Tidy, then gate what landed
+    needs: sweep
+    # `!cancelled()`, because a drain that merged two PRs and had a third refused ends red
+    # and the implied `success()` would then leave what landed with no tidy and no gate.
+    if: ${{ !cancelled() && needs.sweep.outputs.tidy == 'true' }}
+    runs-on: ubuntu-latest
+    # Apart from the drain's group, or merging would wait on a formatter.
+    concurrency:
+      group: tidy-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sweep.outputs.branch }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        with:
+          python-version: ${{ needs.sweep.outputs.python }}
+      - name: Format, reconcile and mirror
+        env:
+          TIDY_BRANCH: ${{ needs.sweep.outputs.branch }}
+        run: uv run python scripts/tidy-main.py
+      - name: Start the gate on the tip
+        # Whatever tidying managed: an untidy tip with a verdict beats a tip with none.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          GATE_ONLY: ${{ needs.sweep.outputs.branch }}
+        run: python scripts/merge-dependabot-prs.py
+
+  green:
+    name: Advance green
+    # A commit of the default branch only: `head_branch` alone would also match a fork's
+    # branch of the same name, whose run arrives as a `pull_request`.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+      contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Fast-forward green to the commit that passed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python scripts/green-ref.py

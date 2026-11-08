@@ -601,8 +601,8 @@ def test_every_workflow_declares_concurrency():
     completions as superseded. That reasoning was about the *key*, not about concurrency
     itself -- and when the file gained a `schedule:` for its retry sweep, the exemption
     would have silently swallowed the requirement that a scheduled run be allowed to
-    finish. It keys on `github.event.workflow_run.head_branch || github.run_id` now, so
-    branches stay independent and anything without a branch gets a group of its own.
+    finish. It keys on `github.event.workflow_run.head_sha || github.run_id` now, so
+    commits stay independent and anything without one gets a group of its own.
     """
     for path in _workflows():
         assert _top_level_block(_read(path), "concurrency") is not None, (

@@ -615,6 +615,41 @@ def test_fix_re_mirrors_after_the_fixers_and_says_so(monkeypatch, capsys):
     assert "ship: did" in capsys.readouterr().out
 
 
+def test_tidy_runs_the_fixers_over_every_file_and_mirrors(monkeypatch, capsys):
+    """Nothing formatted the change before it landed, so nothing here may narrow to one."""
+    ran: list[list[str]] = []
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root: ["pre-commit"])
+    monkeypatch.setattr(ship, "mirror_codex_skills", lambda: "re-mirrored 1 file(s)")
+    assert ship.tidy(lambda argv, **_: ran.append(argv)) == ship.EXIT_OK
+    assert ran == [["pre-commit", "run", "--all-files"]] * 2
+    assert "re-mirrored" in capsys.readouterr().out
+
+
+def test_tidy_mirrors_even_when_a_check_failed(monkeypatch):
+    """A failed check is the gate's to report. `--fix` holds the mirror back for a commit
+    that will not happen; here the rest of the tree still wants tidying."""
+    mirrored: list[bool] = []
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root: ["pre-commit"])
+    monkeypatch.setattr(ship, "mirror_codex_skills", lambda: mirrored.append(True) or "")
+
+    def failing(argv, **_):
+        return _Result(1)
+
+    assert ship.tidy(failing) == ship.EXIT_OK
+    assert mirrored == [True]
+
+
+def test_tidy_without_pre_commit_says_so_and_fails(monkeypatch):
+    monkeypatch.setattr(ship, "pre_commit_command", lambda root: None)
+    assert ship.tidy() == ship.EXIT_FIXERS_FAILED
+
+
+def test_tidy_is_reachable_and_takes_no_paths(monkeypatch):
+    monkeypatch.setattr(ship, "tidy", lambda: 7)
+    assert ship.main(["--tidy"]) == 7
+    assert ship.main(["--tidy", "a.py"]) == ship.EXIT_USAGE
+
+
 def test_a_failed_fix_does_not_re_mirror(monkeypatch):
     called: list[str] = []
     monkeypatch.setattr(ship, "_porcelain", lambda: " M x.py\n")
