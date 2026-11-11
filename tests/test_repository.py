@@ -164,6 +164,49 @@ def test_upsert_post_inserts_then_refreshes_but_keeps_first_seen(db):
     assert repository.as_utc(row["updated_at"]) == later
 
 
+def test_upsert_post_strips_nul_from_every_string_on_insert_and_refresh(db):
+    # Postgres text and JSON refuse U+0000 (devkit ledger 00f22a0e); every domain's
+    # posts table is written here, so this is where it is removed.
+    raw = {"permalink": "/p\x00", "nested": {"k\x00": ["a\x00", 1, None, True]}}
+    with db.begin() as conn:
+        upsert_post(conn, post_row(title="t\x00", body="\x00b\x00", raw=raw), NOW)
+    with db.begin() as conn:
+        upsert_post(conn, post_row(body="edited\x00", symbols=["NV\x00DA"]), NOW)
+    with db.connect() as conn:
+        row = conn.execute(select(schema.posts)).mappings().one()
+    assert row["title"] == "t"
+    assert row["body"] == "edited"
+    assert row["symbols"] == ["NVDA"]
+    assert row["raw"] == {"permalink": "/p", "nested": {"k": ["a", 1, None, True]}}
+
+
+def test_upsert_post_strips_nul_on_the_sports_table_too(db):
+    row = post_row(body="b\x00", entities=["Q\x001"], leagues=["nhl"])
+    del row["symbols"]
+    with db.begin() as conn:
+        upsert_post(conn, row, NOW, schema.sports_posts)
+    with db.connect() as conn:
+        stored = conn.execute(select(schema.sports_posts)).mappings().one()
+    assert stored["body"] == "b" and stored["entities"] == ["Q1"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("a\x00b\x00", "ab"),
+        ("clean", "clean"),
+        ("", ""),
+        ({"k\x00": "v\x00"}, {"k": "v"}),
+        (["x\x00", ("y\x00",)], ["x", ("y",)]),
+        (5, 5),
+        (None, None),
+        (NOW, NOW),
+    ],
+)
+def test_strip_nul_recurses_and_leaves_non_strings_alone(value, expected):
+    assert repository.strip_nul(value) == expected
+
+
 def test_record_engagement_skips_unchanged_and_empty(db):
     values = {"score": 5, "num_comments": 1}
     with db.begin() as conn:

@@ -67,6 +67,22 @@ def test_ingest_stores_posts_mentions_and_snapshots(engine, universe):
         assert len(conn.execute(select(schema.mentions)).all()) == 4
 
 
+def test_ingest_strips_nul_from_a_posts_text_and_raw(db, universe):
+    # Devkit ledger 00f22a0e: a StockTwits body ending in U+0000 failed the whole
+    # platform's crawl, because Postgres text columns refuse NUL.
+    nul = post(
+        title="AMD\x00 and NVDA",
+        body="supplier for $NVDA \x00",
+        raw={"permalink": "/r/x/\x001", "link_title": "a\x00b"},
+    )
+    assert Ingestor(db, universe, Clock()).ingest([nul]).stored == 1
+    with db.connect() as conn:
+        row = conn.execute(select(schema.posts)).mappings().one()
+    assert row["title"] == "AMD and NVDA"
+    assert row["body"] == "supplier for $NVDA "
+    assert row["raw"] == {"permalink": "/r/x/1", "link_title": "ab"}
+
+
 def test_ingest_collapses_duplicates_in_a_batch(engine, universe):
     stats = Ingestor(engine, universe, Clock()).ingest([post(), post()])
     assert stats.seen == 2 and stats.stored == 1
