@@ -43,7 +43,7 @@ from social_scraper.runner import (
     x_plan,
 )
 from social_scraper.symbols.universe import Universe
-from social_scraper.throttle import Block
+from social_scraper.throttle import ERROR_STREAK, Block
 
 DIRECTORY = (
     "Nasdaq Traded|Symbol|Security Name|Listing Exchange|Market Category|ETF|Round Lot Size|Test Issue\n"
@@ -405,6 +405,227 @@ def test_run_cycle_crawls_new_platforms_in_parallel(settings, file_engine):
     assert report.platforms[STOCKTWITS]["ingest"]["stored"] == 1
     assert report.platforms[REDDIT]["ingest"]["stored"] >= 1
     assert "no Polymarket tags" in report.platforms[POLYMARKET]["skipped"]
+
+
+# --- an offline machine ------------------------------------------------------------------
+NO_DNS = "net::ERR_NAME_NOT_RESOLVED"
+# What X served in every cycle this PC had no network (2026-11-09 15:30 and 16:00,
+# 2026-11-11 09:45) and in none before or after: its app's own failure text, which
+# `x.scraper.classify` reads as a rate-limit page.
+X_SHELL = "Something went wrong. Try reloading."
+
+
+def unresolved(url: str = "u") -> PageResult:
+    return PageResult(None, url, text=NO_DNS, no_answer=NO_DNS)
+
+
+def offline_browser() -> FakeBrowser:
+    browser = FakeBrowser()
+    browser.default = unresolved()
+    return browser
+
+
+def x_shell_browser() -> FakeBrowser:
+    browser = FakeBrowser()
+    browser.default = PageResult(200, "https://x.com/search", text=X_SHELL)
+    return browser
+
+
+@pytest.fixture
+def feed_settings(settings):
+    """StockTwits and X crawlable, one after the other in this thread."""
+    settings.symbol_universe_max_age_hours = 1e9
+    return settings.model_copy(
+        update={
+            "crawl_workers": 1,
+            "watchlist": "NVDA",
+            "stocktwits_min_delay_s": 0,
+            "stocktwits_max_delay_s": 0,
+            "stocktwits_active_hours": "",
+        }
+    )
+
+
+def past_a_pause(engine, platform: str, failures: int, reason: str) -> None:
+    """The breaker as an offline stretch leaves it: `failures` failed loads running, and
+    the pause they set already over, so the next failure is an error (`Throttle.notice`)."""
+    now = datetime.now(UTC)
+    DbThrottleStore(engine).set_block(
+        platform, Block(now - timedelta(minutes=1), reason, failures), now
+    )
+
+
+def test_a_cycle_on_a_machine_with_no_network_is_offline_not_failed(feed_settings, engine):
+    """3703e9d6: 2026-11-09, this PC had no route anywhere. Every feed's load came back
+    `net::ERR_NAME_NOT_RESOLVED`, the first after the breaker's pause was an error, and
+    the scheduled scrape failed on `stocktwits: trending: server_error: HTTP None`."""
+    past_a_pause(engine, STOCKTWITS, ERROR_STREAK, "server_error: HTTP None")
+    report = run_cycle(
+        feed_settings, engine, (STOCKTWITS,), factory=lambda p: offline_browser(), export=False
+    )
+    runner.judge_offline(report, 0)
+    assert report.ok, report.errors
+    assert report.offline == f"no answer from the network: stocktwits ({NO_DNS})"
+    assert report.offline_streak == 1
+    assert [e.split(" <- ")[0] for e in report.offline_errors] == [
+        "stocktwits: trending: server_error: HTTP None"
+    ]
+    assert report.unanswered_loads == 1 and report.answered_loads == 0
+
+
+def test_xs_page_in_an_offline_cycle_is_part_of_it(feed_settings, engine):
+    """3a72cc5e: 2026-11-11, StockTwits failed name resolution, and X -- whose breaker
+    the same page had escalated in the offline cycles before -- served its "Something
+    went wrong" page, read as a rate limit after a pause: an error, and the failure."""
+    past_a_pause(engine, STOCKTWITS, ERROR_STREAK, "server_error: HTTP None")
+    past_a_pause(engine, X, 2, "rate_limited: rate-limit page")
+    browsers = {STOCKTWITS: offline_browser(), X: x_shell_browser()}
+    report = run_cycle(feed_settings, engine, (STOCKTWITS, X), factory=browsers.get, export=False)
+    runner.judge_offline(report, 0)
+    assert report.ok, report.errors
+    held = [e.split(" <- ")[0] for e in report.offline_errors]
+    assert held == [
+        "stocktwits: trending: server_error: HTTP None",
+        "x: rate_limited: rate-limit page",
+    ]
+
+
+def test_xs_page_alone_is_x_not_the_network(feed_settings, engine):
+    """With nothing else unanswered there is no offline signal: the rate-limit rules stand."""
+    past_a_pause(engine, X, 2, "rate_limited: rate-limit page")
+    report = run_cycle(
+        feed_settings, engine, (X,), factory=lambda p: x_shell_browser(), export=False
+    )
+    runner.judge_offline(report, 0)
+    assert report.offline is None and not report.ok
+    assert report.errors[0].startswith("x: rate_limited: rate-limit page")
+
+
+def test_one_site_unreachable_while_another_answers_is_that_site(feed_settings, engine):
+    """A site whose name will not resolve while Reddit reads fine is that site's trouble,
+    not the machine's: its error stands."""
+    past_a_pause(engine, STOCKTWITS, ERROR_STREAK, "server_error: HTTP None")
+    browsers = {STOCKTWITS: offline_browser(), REDDIT: reddit_browser()}
+    report = run_cycle(
+        feed_settings, engine, (REDDIT, STOCKTWITS), factory=browsers.get, export=False
+    )
+    runner.judge_offline(report, 0)
+    assert report.offline is None and report.offline_streak == 0
+    assert [e.split(" <- ")[0] for e in report.errors] == [
+        "stocktwits: trending: server_error: HTTP None"
+    ]
+
+
+def test_any_other_failure_in_the_cycle_means_it_is_not_offline(feed_settings, engine):
+    """X locked while StockTwits is unanswered: the lock is no network symptom, and an
+    offline verdict would hold it back too."""
+    past_a_pause(engine, STOCKTWITS, ERROR_STREAK, "server_error: HTTP None")
+    locked = FakeBrowser()
+    locked.default = PageResult(200, "https://x.com/account/access")
+    browsers = {STOCKTWITS: offline_browser(), X: locked}
+    report = run_cycle(feed_settings, engine, (STOCKTWITS, X), factory=browsers.get, export=False)
+    assert report.offline is None and report.offline_errors == []
+    assert {e.split(":")[0] for e in report.errors} == {STOCKTWITS, X}
+
+
+def test_the_load_tally_counts_answers_and_silences_per_platform():
+    tally = runner.LoadTally()
+    inner = FakeBrowser(
+        {
+            "a": PageResult(200, "a"),
+            "b": PageResult(503, "b"),
+            "c": unresolved("c"),
+            "d": PageResult(None, "d", timed_out=True),
+        }
+    )
+    with tally.wrap(lambda p: inner)(STOCKTWITS) as browser:
+        assert browser.get_json("a").status == 200
+        browser.get_html("b")
+        assert browser.capture("c", lambda u: True, 0, lambda: None).no_answer == NO_DNS
+        browser.get_json("d")
+    assert tally.answered[STOCKTWITS] == 2 and tally.unanswered[STOCKTWITS] == 1
+    assert tally.reasons == {STOCKTWITS: NO_DNS}
+    assert tally.totals() == (2, 1) and tally.loaded() == {STOCKTWITS}
+    assert inner.calls == ["a", "b", "c", "d"]
+    timed_out = runner.LoadTally()
+    timed_out.count(X, PageResult(None, "d", timed_out=True))
+    assert timed_out.loaded() == set(), "a timeout is neither answered nor unanswered"
+
+
+def tally_of(answered=(), unanswered=()) -> runner.LoadTally:
+    tally = runner.LoadTally()
+    for platform in answered:
+        tally.count(platform, PageResult(200, "u"))
+    for platform in unanswered:
+        tally.count(platform, unresolved())
+    return tally
+
+
+DNS_FAILED = {"requests": 1, "errors": ["trending: server_error: HTTP None <- u"]}
+
+
+def test_offline_verdict_reads_skipped_crawls_as_saying_nothing():
+    results = {STOCKTWITS: DNS_FAILED, REDDIT: {"skipped": "reddit: paused until"}}
+    reason, held = runner.offline_verdict(results, tally_of(unanswered=[STOCKTWITS]))
+    assert reason and held == {STOCKTWITS}
+
+
+def test_a_crawl_that_loaded_nothing_itself_did_not_fail_for_want_of_a_network():
+    """The stock crawl of Reddit unanswered, the sports one stopped by Chrome not
+    starting: the launch streak is no network symptom, and stays an error."""
+    launch = {"error": "browser did not start in 3 launches in a row: Timeout"}
+    results = {REDDIT: {**DNS_FAILED}, "reddit:sports": launch}
+    assert runner.offline_verdict(results, tally_of(unanswered=[REDDIT])) == (None, frozenset())
+
+
+def test_offline_verdict_needs_a_platform_the_network_never_answered():
+    """Stocktwits had an answer and then none: a network that dropped mid-cycle, or the
+    site -- not a machine with no network, so its own rules stand."""
+    tally = tally_of(answered=[STOCKTWITS], unanswered=[STOCKTWITS])
+    assert runner.offline_verdict({STOCKTWITS: DNS_FAILED}, tally) == (None, frozenset())
+
+
+def test_record_results_holds_an_offline_crawls_error_back():
+    report = RunReport("t")
+    runner.record_results(
+        report, {"stocktwits": {"error": "dns"}, "reddit": {"error": "boom"}}, {"stocktwits"}
+    )
+    assert report.offline_errors == ["stocktwits: dns"] and report.errors == ["reddit: boom"]
+
+
+OFFLINE = "no answer from the network: stocktwits (net::ERR_NAME_NOT_RESOLVED)"
+LAST = runner.OFFLINE_STREAK_FAILS - 1
+
+
+@pytest.mark.parametrize(
+    ("offline", "answered", "previous", "streak", "errors"),
+    [
+        (None, 3, 5, 0, []),
+        (None, 0, 5, 5, []),
+        (OFFLINE, 0, 0, 1, []),
+        (OFFLINE, 0, LAST - 1, LAST, []),
+        (OFFLINE, 0, LAST, LAST + 1, [runner.OFFLINE, "stocktwits: dns"]),
+    ],
+)
+def test_judge_offline_fails_only_at_the_streak(offline, answered, previous, streak, errors):
+    """A cycle the network answered ends the streak; one with nothing answered and no
+    verdict -- every platform paused, a stuck cycle -- learned nothing and carries it."""
+    report = RunReport(
+        "t", offline=offline, offline_errors=["stocktwits: dns"], answered_loads=answered
+    )
+    runner.judge_offline(report, previous)
+    assert report.offline_streak == streak and report.errors == errors
+
+
+def test_the_offline_error_names_no_count_so_devkit_groups_it_as_one():
+    assert runner.OFFLINE.startswith("offline: ")
+    assert not any(ch.isdigit() for ch in runner.OFFLINE)
+
+
+def test_a_stuck_report_carries_the_offline_streak(tmp_path):
+    runner.write_report(runner.RunReport("earlier", offline_streak=4), tmp_path)
+    report = runner.stuck_report("t", datetime.now(UTC), tmp_path)
+    assert report.offline_streak == 4
 
 
 def test_policy_for_carries_the_cycle_deadline(settings):

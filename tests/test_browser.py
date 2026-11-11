@@ -389,10 +389,27 @@ def test_a_dropped_connection_is_a_server_error_not_a_raise():
     "code", ["ERR_CONNECTION_RESET", "ERR_EMPTY_RESPONSE", "ERR_NAME_NOT_RESOLVED"]
 )
 def test_every_load_shape_returns_a_dropped_connection(code):
-    assert make(DroppedPage(code)).get_html("u").status is None
+    html = make(DroppedPage(code)).get_html("u")
+    assert html.status is None and html.no_answer == f"net::{code}"
     page = DroppedPage(code)
     r = make(page).capture("https://x.com/a", lambda u: True, 2, lambda: None)
     assert r.text == f"net::{code}" and page.removed == ["response"] and page.waits == []
+    assert r.no_answer == f"net::{code}"
+
+
+@pytest.mark.parametrize(
+    "code", ["ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_ADDRESS_UNREACHABLE"]
+)
+def test_a_load_the_network_never_answered_says_why(code):
+    """3703e9d6: offline, every load came back `net::ERR_NAME_NOT_RESOLVED`, which the
+    throttle reads as `HTTP None` -- a 5xx. `no_answer` keeps the real signal, so the
+    runner can tell an offline machine from a site in trouble (`runner.LoadTally`)."""
+    assert make(DroppedPage(code)).get_json(TV_IDEAS).no_answer == f"net::{code}"
+
+
+def test_a_load_that_was_answered_or_timed_out_is_not_unanswered():
+    assert make(FakePage(FakeResponse("u", 200, {"a": 1}))).get_json("u").no_answer == ""
+    assert make(SlowPage()).get_json("u").no_answer == ""
 
 
 @pytest.mark.parametrize("code", ["ERR_ABORTED", "ERR_BLOCKED_BY_CLIENT", "ERR_CONNECTION_X"])

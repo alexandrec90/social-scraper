@@ -444,6 +444,37 @@ def test_an_unreadable_previous_report_starts_the_streak_over(settings, body):
     assert runner.previous_streak(settings.logs_dir) == 0
 
 
+OFFLINE = "no answer from the network: stocktwits (net::ERR_NAME_NOT_RESOLVED)"
+HELD = "stocktwits: trending: server_error: HTTP None"
+
+
+def offline_report(*a, **kw):
+    return RunReport("t", offline=OFFLINE, offline_errors=[HELD], unanswered_loads=1)
+
+
+def test_an_offline_machine_fails_the_scrape_only_at_the_streak(
+    settings, engine, monkeypatch, capsys
+):
+    """3703e9d6, 3a72cc5e: this PC had no network for two days, and every cycle that ran
+    then failed the scheduled job, each a ledger row that sent a fixer at nothing."""
+    monkeypatch.setattr(cli, "run_cycle", offline_report)
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    limit = runner.OFFLINE_STREAK_FAILS
+    assert f"ok -- offline: {OFFLINE} (1 of {limit} before it fails)" in capsys.readouterr().out
+    assert report_body(settings)["offline_streak"] == 1
+    write_report(RunReport("earlier", offline_streak=limit - 1), settings.logs_dir)
+    assert cmd_scrape(settings, engine, scrape_args()) == 1
+    assert f"FAILED -- {runner.OFFLINE} -- details in" in capsys.readouterr().out
+    assert report_body(settings)["errors"] == [runner.OFFLINE, HELD]
+
+
+def test_a_cycle_the_network_answered_ends_the_offline_streak(settings, engine, monkeypatch):
+    write_report(RunReport("earlier", offline_streak=7), settings.logs_dir)
+    monkeypatch.setattr(cli, "run_cycle", lambda *a, **kw: RunReport("t", answered_loads=3))
+    assert cmd_scrape(settings, engine, scrape_args()) == 0
+    assert report_body(settings)["offline_streak"] == 0
+
+
 LAKE_DOWN = "lake not accepting writes: s3://data-lake: put k failed: InternalError"
 
 

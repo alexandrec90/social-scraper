@@ -36,6 +36,13 @@ class PageResult:
     # page: raised, it ended the whole platform's crawl and failed the cycle (2026-10-08,
     # one 45 s `Page.goto` timeout while a backfill loaded the machine).
     timed_out: bool = False
+    # Why the network gave this load no answer at all: Chrome's `net::` code for a
+    # connection that dropped or a name that never resolved (`browser.DROPPED_CONNECTION`),
+    # or the socket error `apiclient` met. Empty for a load that was answered or timed out.
+    # The throttle reads such a load by its missing status, as a 5xx -- `HTTP None` -- so
+    # this is the one place the reason survives, and the runner reads it to tell a machine
+    # with no network from a site in trouble (`runner.LoadTally`).
+    no_answer: str = ""
 
 
 class Browser(Protocol):

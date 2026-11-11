@@ -65,9 +65,10 @@ TIMED_OUT = "timed_out"
 # was refused, or never resolved. `_goto` returns one as a `PageResult` with no status,
 # which the throttle reads as a 5xx (`SERVER_ERROR`), the same as `apiclient` reads a
 # reset socket. Raised, it ended the platform's crawl and failed the scheduled scrape
-# (2026-10-30: one `net::ERR_CONNECTION_CLOSED` from TradingView). Any other `net::`
-# error -- an aborted navigation, a blocked request -- is not the site's trouble and
-# still raises.
+# (2026-10-30: one `net::ERR_CONNECTION_CLOSED` from TradingView). The code is kept as the
+# result's `no_answer`, since on a machine with no network every load ends this way
+# (`runner.offline_verdict`). Any other `net::` error -- an aborted navigation, a blocked
+# request -- is not the site's trouble and still raises.
 DROPPED_CONNECTION = re.compile(
     r"net::ERR_(?:CONNECTION_(?:CLOSED|RESET|REFUSED|ABORTED|FAILED|TIMED_OUT)"
     r"|TIMED_OUT|EMPTY_RESPONSE|NETWORK_CHANGED|INTERNET_DISCONNECTED|NAME_NOT_RESOLVED"
@@ -257,7 +258,9 @@ class PlaywrightBrowser:
             if dropped is None:
                 raise
             log.warning("page load got no answer: %s (%s)", url, dropped.group())
-            return PageResult(status=None, final_url=url, text=dropped.group())
+            return PageResult(
+                status=None, final_url=url, text=dropped.group(), no_answer=dropped.group()
+            )
 
     def get_json(self, url: str) -> PageResult:
         from playwright.sync_api import Error as PlaywrightError
