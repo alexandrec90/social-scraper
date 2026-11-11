@@ -206,6 +206,92 @@ def test_a_path_dependency_missing_from_a_worktree_is_named_with_where_the_check
     assert tc.missing_path_sources(main) == ()
 
 
+# The bytes of a uv trampoline that matter: its script's `#!` line and the path it starts.
+def _launcher(interpreter: Path) -> bytes:
+    return b"MZ\x00\x00PK\x03\x04__main__.py#!" + str(interpreter).encode() + b"\n# -*- coding"
+
+
+def _scripted(tmp_path: Path, launchers: dict[str, Path | bytes]) -> tuple[Path, Path]:
+    """A checkout with `launchers` in `.venv/Scripts`, and its live interpreter."""
+    root = _checkout(tmp_path, {"uv.lock": "", ".venv/pyvenv.cfg": ""})
+    scripts = root / ".venv" / "Scripts"
+    scripts.mkdir()
+    python = scripts / "python.exe"
+    python.write_bytes(b"MZ")
+    for name, body in launchers.items():
+        (scripts / f"{name}.exe").write_bytes(
+            body if isinstance(body, bytes) else _launcher(body or python)
+        )
+    return root, python
+
+
+def test_a_launcher_naming_a_deleted_tree_is_dead_and_one_naming_a_live_venv_is_not(tmp_path):
+    """513c55e5: a `uv run` in a tree linking `.venv` wrote the tree's path into the
+    checkout's launchers, and each died with `uv trampoline failed to canonicalize script
+    path` once that tree was deleted, while `python -m` went on working, so no gate saw it."""
+    gone = tmp_path / "worktrees" / "wobbly" / ".venv" / "Scripts" / "python.exe"
+    root, python = _scripted(tmp_path, {"mypy": gone, "ruff": b"MZ a native binary, no path"})
+    (root / ".venv/Scripts/pytest.exe").write_bytes(_launcher(python))
+    assert [path.stem for path in tc.dead_launchers(root)] == ["mypy"]
+
+
+def test_a_drive_letter_path_reads_as_a_path_on_any_platform(tmp_path):
+    """The tests above use `tmp_path`, POSIX on the CI: this keeps the spelling a real
+    trampoline carries under test there too."""
+    root, _ = _scripted(tmp_path, {"mypy": b"MZ\x00#!C:\\gone\\tree\\.venv\\Scripts\\python.exe\n"})
+    assert [path.stem for path in tc.dead_launchers(root)] == ["mypy"]
+
+
+def test_a_slash_inside_a_word_does_not_open_a_path(tmp_path):
+    """Otherwise `and/or` in a binary would swallow the live path after it, and read as a
+    file that is not there."""
+    root, python = _scripted(tmp_path, {})
+    body = b"MZ\x00and/or #!" + str(python).encode() + b"\n"
+    (root / ".venv/Scripts/mypy.exe").write_bytes(body)
+    assert tc.dead_launchers(root) == ()
+
+
+def test_no_venv_or_a_venv_of_shell_scripts_has_no_dead_launcher(tmp_path):
+    """POSIX's console scripts live under `bin/`, each a `#!` the kernel names itself."""
+    assert tc.dead_launchers(_checkout(tmp_path, {"bin/mypy": "#!/gone/python\n"})) == ()
+
+
+def test_a_binary_too_large_to_be_a_launcher_is_not_read(tmp_path, monkeypatch):
+    gone = tmp_path / "gone" / "python.exe"
+    root, _ = _scripted(tmp_path, {"ruff": gone})
+    monkeypatch.setattr(tc, "LAUNCHER_MAX_BYTES", 8)
+    assert tc.dead_launchers(root) == ()
+
+
+def test_a_dead_launcher_is_a_gap_naming_the_reinstall_that_rewrites_it(tmp_path):
+    """`uv sync` alone leaves an installed package's launcher as it found it."""
+    root, _ = _scripted(tmp_path, {"mypy": tmp_path / "gone" / "python.exe"})
+    (gap,) = tc.missing_toolchain(root)
+    assert "1 console script" in gap.what and "`mypy`" in gap.what and "python -m" in gap.what
+    assert gap.fix == "uv sync --all-extras --all-groups --reinstall"
+
+
+def test_a_linked_venv_is_repaired_from_the_checkout_it_belongs_to(tmp_path):
+    """Run through the link, the reinstall would write this tree's path all over again."""
+    home = _checkout(tmp_path / "checkout", {"uv.lock": ""})
+    tree = _checkout(tmp_path / "tree", {"uv.lock": ""})
+    assert tc.launcher_fix(tree, home) == (
+        f"uv sync --all-extras --all-groups --reinstall --project {home.as_posix()}"
+    )
+
+
+def test_a_venv_uv_did_not_lock_is_rebuilt_rather_than_reinstalled(tmp_path):
+    root = _checkout(tmp_path, {".venv/Scripts/x.txt": ""})
+    (root / ".venv/Scripts/mypy.exe").write_bytes(_launcher(tmp_path / "gone" / "python.exe"))
+    assert tc.launcher_gap(root).fix == "delete .venv and provision it again"
+
+
+def test_a_healthy_venv_has_no_launcher_gap(tmp_path):
+    root, python = _scripted(tmp_path, {"mypy": b""})
+    (root / ".venv/Scripts/mypy.exe").write_bytes(_launcher(python))
+    assert tc.launcher_gap(root) is None
+
+
 def test_a_path_dependency_nothing_has_is_still_named(tmp_path):
     root = _checkout(tmp_path / "solo", {"pyproject.toml": PATH_SOURCE, ".venv/pyvenv.cfg": ""})
     (gap,) = tc.missing_toolchain(root)

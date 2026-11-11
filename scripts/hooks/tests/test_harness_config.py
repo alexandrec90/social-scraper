@@ -21,6 +21,13 @@ from conftest import REPO_ROOT, load_module
 cfg = load_module("scripts/hooks/harness_config.py")
 
 
+def test_delivery_defaults_to_the_gated_flow_and_takes_only_a_name_it_knows():
+    assert cfg.Config().delivery == cfg.DeliveryConfig("gated")
+    assert cfg.from_dict({"delivery": {"flow": "direct"}}).delivery.flow == "direct"
+    for bad in ({"delivery": "direct"}, {"delivery": {"flow": "drect"}}, {"delivery": {"flow": 1}}):
+        assert cfg.from_dict(bad).delivery.flow == "gated", bad
+
+
 def test_defaults_are_a_minimal_neutral_harness():
     c = cfg.Config()
     assert c.env_prefix == "DEVKIT"

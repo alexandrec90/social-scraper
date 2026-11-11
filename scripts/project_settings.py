@@ -15,9 +15,10 @@ hook scripts are still vendored, and inert while nothing names them. And it **ad
 agent-shell environment** (`AGENT_ENV`) wherever a key is missing, never overwriting a
 value the project set itself. And it **links the checkout's dependency directories**
 into the trees `claude --worktree` cuts (`dependency_dirs`), which no git hook reaches --
-`.venv` only for a project that installs no package of its own (`borrows_venv`) -- and
-makes the project's `.gitignore` ignore each link (`ignore_links`), which is the one
-edit it makes outside the settings file.
+`.venv` only for a project that installs no package of its own (`borrows_venv`) -- stops
+`uv run` syncing through such a link (`BORROWED_ENV`), and makes the project's
+`.gitignore` ignore each link (`ignore_links`), which is the one edit it makes outside
+the settings file.
 
 Stdlib only, like everything else here that runs before a virtualenv exists.
 
@@ -148,6 +149,13 @@ def with_agent_env(payload: object) -> tuple[object, list[str]]:
 # instead, through `rerun_in_venv` in the vendored `scripts/hooks/toolchain.py`.
 VENV_DIR = ".venv"
 NODE_DIR = "node_modules"
+# What a session runs with where its tree links the checkout's `.venv`. `uv run` syncs the
+# environment first, and uv writes the path it was given into each console script it
+# installs: a tree behind that link wrote its own path into the checkout's mypy, pytest
+# and pre-commit launchers, every one dead the day that tree went (513c55e5). A borrowed
+# venv is the checkout's to sync (`toolchain.stale_dependency`), so `uv run` in the tree
+# just runs. No env value can name the real directory instead: it differs per machine.
+BORROWED_ENV = {"UV_NO_SYNC": "1"}
 
 
 def borrows_venv(root: Path) -> bool:
@@ -198,6 +206,20 @@ def with_worktree_links(payload: object, root: Path) -> tuple[object, list[str]]
     return {**payload, "worktree": {**worktree, "symlinkDirectories": [*links, *missing]}}, missing
 
 
+def with_borrowed_env(payload: object) -> tuple[object, list[str]]:
+    """`(settings, keys added)`: `payload` with `BORROWED_ENV` filled in where its trees
+    link `.venv`, on `with_agent_env`'s terms. A tree with its own syncs it as uv likes."""
+    if VENV_DIR not in worktree_links(payload) or not isinstance(payload, dict):
+        return payload, []
+    env = payload.get("env", {})
+    if not isinstance(env, dict):
+        return payload, []
+    missing = [key for key in BORROWED_ENV if key not in env]
+    if not missing:
+        return payload, []
+    return {**payload, "env": {**env, **{key: BORROWED_ENV[key] for key in missing}}}, missing
+
+
 def read(root: Path) -> object | None:
     """This project's settings tree, or None when it is absent or will not parse.
 
@@ -229,7 +251,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
         return []
     stripped, events = strip_hooks(payload)
     with_env, added = with_agent_env(stripped)
-    updated, linked = with_worktree_links(with_env, root)
+    with_links, linked = with_worktree_links(with_env, root)
+    updated, borrowed = with_borrowed_env(with_links)
     notes = []
     if updated is not payload:
         try:
@@ -244,6 +267,8 @@ def settings_pass(root: Path, retired: tuple[str, ...] = ()) -> list[str]:
         notes.append(f"(agent shell env) {SETTINGS_FILE}: {', '.join(added)}")
     if linked:
         notes.append(f"(worktree links) {SETTINGS_FILE}: {', '.join(linked)}")
+    if borrowed:
+        notes.append(f"(borrowed .venv) {SETTINGS_FILE}: {', '.join(borrowed)}")
     if ignored := ignore_links(root, worktree_links(updated)):
         notes.append(f"(worktree links ignored) {GITIGNORE}: {', '.join(ignored)}")
     return notes

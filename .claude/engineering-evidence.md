@@ -101,6 +101,15 @@ Moved here from `engineering.md` on 2026-09-26: the always-loaded tier had 12 to
 headroom, and this table is read only by a session waiting on a gate, which
 `session-scope.md` keeps project sessions from doing at all.
 
+### The foreground call Claude Code moves
+
+A `timeout` of 590000 does not keep a Bash call in the foreground: Claude Code answers
+`Command was moved to the background (ID: …) after running for 180s`, names an output file
+and promises a notice. A top-level session takes the notice and stops. A subagent cannot:
+ending its turn is returning, so it arms nothing and reads nothing after that. One `until`
+loop on that file, in the foreground, is the wait left to it, and
+`session_friction.MOVED_TO_BACKGROUND` excuses exactly that loop (ledger `2d4d52ac`).
+
 ### devkit#180: "no checks reported" was a gate that would never start
 
 GitHub builds a `pull_request` run against the *merge* ref, and a PR that has gone
@@ -187,6 +196,19 @@ host root. The rule's "PowerShell for a compound statement" sends a session stra
 into it. What passes both is what the session found: write the container's commands to a
 script file with the Write tool and run that file with `sh` in the container (a
 bind-mounted path, or `docker cp` first), so neither tool sees the text.
+
+The same check reads the whole call, not the `Remove-Item`'s own arguments. Reproduced
+2026-11-06 (ledger `1da8bf60`, `a8f9b83e`) on a scratch path that did not exist, the
+literal spelling and a `;` between the statements settling nothing:
+
+```
+Remove-Item -Recurse -Force 'C:\…\tmp\nope'; robocopy 'C:\…\a' 'C:\…\b' /E /L
+    → "Remove-Item on system path '/E' is blocked. This path is protected from removal."
+Remove-Item -Recurse -Force "$s\hl"; Start-Process -FilePath "C:\Program Files\…"
+    → "system path '"C:\Program'"
+```
+
+So a removal goes in a call of its own, which also leaves the rest of the call to run.
 
 ## An `rm` whose target is built from variables
 
@@ -326,3 +348,9 @@ or worse, the replacement writes a different regex than the one reviewed. On 202
 alone five sessions filed it (ledger `f5f07c62`, `c979d748`, `f0997a7c`, `b957e0cf`, and
 the session that retired those), each after the rule already said "use Write or Edit"
 without saying why. What devkit owns is putting the reason where the instruction is read.
+
+With no `assert`, nothing fails at all. A d2-trader session on 2026-11-06 (ledger
+`c04b397c`) patched with `s.replace('''…"\\\\_"…''', …)`, so the tool's halving left a
+search text the file did not hold, `replace` changed nothing, and it took three more
+heredocs to see why. That session was typed by a person, so it had the rule and not
+`agent_tabs.FILE_WRITES`, which only a launch through devkit carries.
