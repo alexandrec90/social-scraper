@@ -102,14 +102,31 @@ def dialect_insert(conn: Connection, table: Table):
     return dialect.insert(table)
 
 
+def strip_nul(value: Any) -> Any:
+    """`value` with U+0000 removed from every string in it, keys and nested JSON included.
+
+    Postgres text, varchar and JSON refuse NUL, and scraped text carries it: one
+    StockTwits body ending in it failed that platform's whole crawl (devkit ledger
+    00f22a0e). Nothing a reader wants is lost: NUL is never visible text.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {strip_nul(k): strip_nul(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(strip_nul(v) for v in value)
+    return value
+
+
 def upsert_post(
     conn: Connection, row: dict[str, Any], now: datetime, table: Table = schema.posts
 ) -> None:
     """Insert a post, or refresh its mutable fields; `created_at`/`first_seen_at` stick.
 
-    `table` is the domain's posts table (`posts`, `sports_posts`).
+    `table` is the domain's posts table (`posts`, `sports_posts`), so this is the one
+    write every platform's post passes through, and where NUL is stripped (`strip_nul`).
     """
-    values = {**row, "first_seen_at": now, "last_seen_at": now, "updated_at": now}
+    values = {**strip_nul(row), "first_seen_at": now, "last_seen_at": now, "updated_at": now}
     stmt = dialect_insert(conn, table).values(**values)
     update = {f: stmt.excluded[f] for f in POST_MUTABLE_FIELDS if f in row}
     update |= {"last_seen_at": now, "updated_at": now}
