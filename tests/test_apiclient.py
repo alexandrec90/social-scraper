@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 
 import pytest
 
@@ -94,6 +95,24 @@ def test_a_timeout_is_timed_out_and_a_dropped_connection_has_no_status():
     assert result.status is None and not result.timed_out and "ConnectionResetError" in result.text
     c, _ = client(http.client.RemoteDisconnected("gone"))
     assert c.get_json("https://api.example.com/").status is None
+
+
+def test_a_request_the_network_never_answered_says_why_in_every_load_shape():
+    """3703e9d6: offline, Bluesky's and Polymarket's requests failed name resolution and
+    read as `HTTP None`. `no_answer` keeps the socket error, so the runner can tell an
+    offline machine from an API in trouble (`runner.LoadTally`)."""
+    unresolved = socket.gaierror(11001, "getaddrinfo failed")
+    url = "https://api.example.com/p"
+    c, _ = client(unresolved)
+    assert c.get_json(url).no_answer == "gaierror: [Errno 11001] getaddrinfo failed"
+    c, _ = client(unresolved)
+    assert c.get_html(url).no_answer.startswith("gaierror")
+    c, _ = client(unresolved)
+    assert c.capture(url, lambda u: True, 0, lambda: None).no_answer.startswith("gaierror")
+    c, _ = client(TimeoutError("read timed out"))
+    assert c.get_json(url).no_answer == ""
+    c, _ = client(FakeResponse(503, b"down"))
+    assert c.get_json(url).no_answer == "", "an answer, however bad, is an answer"
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,10 @@ filled 20-25 minutes of a 30-minute cycle (`CYCLE_DEADLINE_SHARE`).
 
 One platform or domain failing never stops another, and a failed export never fails
 the cycle: the lake degrades, it does not block.
+
+Conditions of the machine rather than the scraper fail the scrape only once they last:
+a crawl timing out (`judge_timeouts`), the bucket refusing writes (`judge_lake`), and the
+machine having no network at all (`offline_verdict`, `judge_offline`).
 """
 
 from __future__ import annotations
@@ -22,10 +26,12 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 import time
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -44,7 +50,7 @@ from social_scraper.config import SPORTS, STOCKS, Settings
 from social_scraper.db.throttle_store import REQUEST_LOG_RETENTION_DAYS, DbThrottleStore
 from social_scraper.export import export_to_lake
 from social_scraper import launch
-from social_scraper.fetch import Browser, LaunchTimedOut
+from social_scraper.fetch import Browser, LaunchTimedOut, PageResult
 from social_scraper.models import (
     BLUESKY,
     POLYMARKET,
@@ -63,7 +69,7 @@ from social_scraper.sports.cycle import PolicyFor, SportsContext
 from social_scraper.sports.leagues import LeagueConfigError
 from social_scraper.stocktwits import scraper as stocktwits_scraper
 from social_scraper.symbols.universe import Universe, load_universe
-from social_scraper.throttle import Policy, Throttle, ThrottleStop
+from social_scraper.throttle import RATE_LIMITED, Policy, Throttle, ThrottleStop
 from social_scraper.tradingview import scraper as tradingview_scraper
 from social_scraper.x import accounts
 from social_scraper.x.scraper import XPlan, XScraper
@@ -113,6 +119,20 @@ TIMEOUT_STREAK_FAILS = 3
 # its two storage PCs is off, which is a night, not a fault (data-lake's
 # `storage-node.py`); a day of it is a lake someone has to bring back.
 LAKE_DOWN_FAILS_AFTER = timedelta(hours=24)
+# Offline cycles running (`offline_verdict`) at which the held-back crawl failures become
+# errors (`judge_offline`): a day of the default 30-minute `CYCLE_MINUTES`, the bound the
+# lake's outage has, for the same reason -- a condition of the machine, not the scraper,
+# that no code change answers. 2026-11-09 to -11-11 this PC had no network for two days
+# (3703e9d6, 3a72cc5e); the four cycles that ran in it each failed the scheduled job, and
+# the timeouts' three would still have failed the fourth. A cycle in which every platform
+# is paused makes no load and does not count, so this is a day of trying, not of waiting.
+OFFLINE_STREAK_FAILS = 48
+# The error an offline streak at `OFFLINE_STREAK_FAILS` leads with: no time and no count,
+# so devkit files every recurrence as one ledger group.
+OFFLINE = (
+    "offline: no answer from the network for a day of cycles running -- "
+    "this PC's connection, not the scraper"
+)
 # The hosts each API platform's client may reach (`apiclient.ApiClient`).
 API_HOSTS = {
     BLUESKY: frozenset({bluesky_live.HOST}),
@@ -136,16 +156,29 @@ class RunReport:
     # Why the bucket took nothing this cycle, and since when (ISO) it has taken nothing.
     lake_down: str | None = None
     lake_down_since: str | None = None
+    # Why this cycle reads as a machine with no network (`offline_verdict`), the crawl
+    # failures that holds back from `errors`, and how many cycles running one has been.
+    offline: str | None = None
+    offline_errors: list[str] = field(default_factory=list)
+    offline_streak: int = 0
+    # The cycle's page loads the network answered, and those it gave no answer at all.
+    answered_loads: int = 0
+    unanswered_loads: int = 0
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
 
-def previous_streak(logs_dir: Path) -> int:
-    """The last cycle's `timeout_streak`, from its report; 0 when there is none to read."""
+TIMEOUT_STREAK = "timeout_streak"
+OFFLINE_STREAK = "offline_streak"
+
+
+def previous_streak(logs_dir: Path, key: str = TIMEOUT_STREAK) -> int:
+    """The last cycle's `key` streak (`timeout_streak`, `offline_streak`), from its report;
+    0 when there is none to read."""
     try:
-        streak = json.loads((logs_dir / REPORT_FILE).read_text(encoding="utf-8"))["timeout_streak"]
+        streak = json.loads((logs_dir / REPORT_FILE).read_text(encoding="utf-8"))[key]
     except (OSError, ValueError, KeyError, TypeError):
         return 0
     return streak if isinstance(streak, int) and streak >= 0 else 0
@@ -193,6 +226,19 @@ def judge_lake(report: RunReport, previous: datetime | None, now: datetime) -> N
         )
 
 
+def judge_offline(report: RunReport, previous: int) -> None:
+    """Count an offline cycle onto `previous`, and once the streak reaches
+    `OFFLINE_STREAK_FAILS` fail it: `OFFLINE`, then the crawl failures it held back. A
+    cycle the network answered ends the streak; one it answered nothing in without being
+    offline -- every platform paused, a stuck cycle -- learned nothing, and carries it."""
+    if report.offline is None:
+        report.offline_streak = 0 if report.answered_loads else previous
+        return
+    report.offline_streak = previous + 1
+    if report.offline_streak >= OFFLINE_STREAK_FAILS:
+        report.errors.extend([OFFLINE, *report.offline_errors])
+
+
 def cycle_deadline(started: datetime, cycle_minutes: float) -> datetime:
     """When the last page load of a cycle that started at `started` may start."""
     return started + timedelta(minutes=cycle_minutes * CYCLE_DEADLINE_SHARE)
@@ -213,10 +259,12 @@ def hard_deadline(started: datetime, cycle_minutes: float) -> datetime:
 def stuck_report(started_at: str, now: datetime, logs_dir: Path) -> RunReport:
     """The report of a cycle its hard deadline ended: a timeout of the cycle, judged as
     any timeout is (`judge_timeouts`) -- one is the machine, three running fail it -- and
-    the bucket's outage carried on, since no export ran."""
+    the bucket's outage and the offline streak carried on, since it finished neither the
+    export nor its crawls."""
     report = RunReport(started_at=started_at, finished_at=now.isoformat(), timeouts=[STUCK])
     judge_timeouts(report, previous_streak(logs_dir))
     judge_lake(report, previous_lake_down(logs_dir), now)
+    judge_offline(report, previous_streak(logs_dir, OFFLINE_STREAK))
     return report
 
 
@@ -363,13 +411,142 @@ def prepare_sports(settings: Settings, engine: Engine, report: RunReport) -> Spo
     return ctx
 
 
-def record_results(report: RunReport, results: dict[str, dict[str, Any]]) -> None:
-    """Each crawl's result into `report`, its error into `errors` and its timeout into
-    `timeouts`, keyed by label."""
+class LoadTally:
+    """Every page load a cycle's crawls make, per platform: how many the network answered
+    (any status), how many it gave no answer at all (`PageResult.no_answer`), and the
+    first reason. A timeout is neither: it has a streak of its own (`judge_timeouts`).
+
+    Counted at the transport (`wrap`), not in the crawlers, because that is where the real
+    signal is: past it, a load nobody answered is `server_error: HTTP None` -- a 5xx -- to
+    every crawler and the throttle alike. The crawl threads share it, so under a lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.answered: Counter[str] = Counter()
+        self.unanswered: Counter[str] = Counter()
+        self.reasons: dict[str, str] = {}
+
+    def count(self, platform: str, result: PageResult) -> PageResult:
+        with self._lock:
+            if result.no_answer:
+                self.unanswered[platform] += 1
+                self.reasons.setdefault(platform, result.no_answer)
+            elif result.status is not None:
+                self.answered[platform] += 1
+        return result
+
+    def loaded(self) -> set[str]:
+        """The platforms that made a load the network answered or gave no answer to."""
+        with self._lock:
+            return set(+self.answered) | set(+self.unanswered)
+
+    def totals(self) -> tuple[int, int]:
+        """`(answered, unanswered)` over every platform."""
+        with self._lock:
+            return self.answered.total(), self.unanswered.total()
+
+    def wrap(self, factory: BrowserFactory) -> BrowserFactory:
+        """`factory`, with every load of the browsers it opens counted here."""
+
+        @contextmanager
+        def counted(platform: str) -> Iterator[Browser]:
+            with factory(platform) as browser:
+                yield _TalliedBrowser(browser, platform, self)
+
+        return counted
+
+
+class _TalliedBrowser:
+    """A `Browser` that hands each result to a `LoadTally` on its way back."""
+
+    def __init__(self, browser: Browser, platform: str, tally: LoadTally) -> None:
+        self._browser, self._platform, self._tally = browser, platform, tally
+
+    def get_json(self, url: str) -> PageResult:
+        return self._tally.count(self._platform, self._browser.get_json(url))
+
+    def get_html(self, url: str) -> PageResult:
+        return self._tally.count(self._platform, self._browser.get_html(url))
+
+    def capture(
+        self, url: str, want: Callable[[str], bool], scrolls: int, between: Callable[[], None]
+    ) -> PageResult:
+        result = self._browser.capture(url, want, scrolls, between)
+        return self._tally.count(self._platform, result)
+
+
+def _failures(result: dict[str, Any]) -> list[str]:
+    """A crawl's errors: every one its stats kept, else the one `error` it ended on."""
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        return [str(e) for e in errors]
+    return [str(result["error"])] if "error" in result else []
+
+
+def _rate_limit(line: str) -> bool:
+    """Whether a crawl's error or notice is a rate limit: `fetch.FetchFailed` spells every
+    failed load `<outcome>: <detail>`."""
+    return f"{RATE_LIMITED}: " in line
+
+
+def _offline_shaped(result: dict[str, Any], unanswered: bool, loaded: bool) -> bool:
+    """Whether one crawl's result fits a machine with no network (`offline_verdict`):
+    `unanswered` when its platform's every load got no answer, `loaded` when it made any."""
+    failures = _failures(result)
+    if unanswered:
+        # One that loaded nothing itself -- Chrome would not start, a bug -- did not fail
+        # for want of a network.
+        return bool(result.get("requests")) or not failures
+    if not (loaded or failures):
+        return True  # paused, out of hours, out of budget: it says nothing either way
+    notices = [str(n) for n in result.get("notices") or []]
+    limited = any(_rate_limit(line) for line in [*failures, *notices])
+    return limited and all(_rate_limit(f) for f in failures)
+
+
+def offline_verdict(
+    results: dict[str, dict[str, Any]], tally: LoadTally
+) -> tuple[str | None, frozenset[str]]:
+    """Whether this cycle ran on a machine with no network: why, and the crawl labels whose
+    failures that explains -- or `(None, frozenset())`.
+
+    It does when some platform's every load got no answer (`LoadTally.unanswered`) and
+    every other crawl that loaded or failed is one of those, or met a rate limit and failed
+    on nothing else. The rate limit is X's: in each cycle this PC had no network
+    (2026-11-09 15:30 and 16:00, 2026-11-11 09:45) X served its "Something went wrong"
+    page, which `x.scraper.classify` reads as one, while every other site failed name
+    resolution; in no cycle before or after did it. Any crawl the network answered without
+    a rate limit, or that failed any other way, is a working network -- one site that will
+    not answer is that site -- and the crawlers' own rules stand.
+    """
+    unanswered = {p for p, n in tally.unanswered.items() if n and not tally.answered[p]}
+    if not unanswered:
+        return None, frozenset()
+    held: set[str] = set()
+    loaded = tally.loaded()
+    for label, result in results.items():
+        platform = label.split(":")[0]
+        if not _offline_shaped(result, platform in unanswered, platform in loaded):
+            return None, frozenset()
+        if _failures(result):
+            held.add(label)
+    names = ", ".join(sorted(unanswered))
+    reasons = "; ".join(sorted({tally.reasons[p] for p in unanswered}))
+    return f"no answer from the network: {names} ({reasons})", frozenset(held)
+
+
+def record_results(
+    report: RunReport, results: dict[str, dict[str, Any]], offline: Collection[str] = ()
+) -> None:
+    """Each crawl's result into `report`, its error into `errors` -- or `offline_errors`
+    for a label in `offline` (`offline_verdict`) -- and its timeout into `timeouts`, keyed
+    by label."""
     for label, result in results.items():
         report.platforms[label] = result
         if "error" in result:
-            report.errors.append(f"{label}: {result['error']}")
+            held = report.offline_errors if label in offline else report.errors
+            held.append(f"{label}: {result['error']}")
         if TIMED_OUT in result:
             report.timeouts.append(f"{label}: {result[TIMED_OUT]}")
 
@@ -433,17 +610,22 @@ def run_cycle(
     stops at `export_deadline`, deferring what is left to the next cycle."""
     report = RunReport(started_at=datetime.now(UTC).isoformat())
     domains = settings.enabled_domains
+    tally = LoadTally()
     parts = CycleParts(
         settings=settings,
         engine=engine,
-        factory=factory or default_browser_factory(settings),
+        factory=tally.wrap(factory or default_browser_factory(settings)),
         policies=partial(policy_for, deadline=deadline),
         ingestor=Ingestor(engine, universe_for(settings)) if STOCKS in domains else None,
         sports=prepare_sports(settings, engine, report) if SPORTS in domains else None,
     )
     sports = parts.sports
-    for results in crawl_all(parts, platforms, settings.crawl_workers):
-        record_results(report, results)
+    results: dict[str, dict[str, Any]] = {}
+    for crawled in crawl_all(parts, platforms, settings.crawl_workers):
+        results.update(crawled)
+    report.offline, offline = offline_verdict(results, tally)
+    report.answered_loads, report.unanswered_loads = tally.totals()
+    record_results(report, results, offline)
     if sports is not None:
         report.sports["discovery"] = sports_cycle.discover_names(
             settings, engine, datetime.now(UTC)

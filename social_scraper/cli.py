@@ -73,12 +73,15 @@ from social_scraper.polymarket import store as polymarket_store
 from social_scraper.reddit import dumps
 from social_scraper.runner import (
     FIRED_AT_ENV,
+    OFFLINE_STREAK,
+    OFFLINE_STREAK_FAILS,
     TIMEOUT_STREAK_FAILS,
     RunReport,
     cycle_deadline,
     cycle_start,
     hard_deadline,
     judge_lake,
+    judge_offline,
     judge_timeouts,
     previous_lake_down,
     previous_streak,
@@ -196,6 +199,7 @@ def cmd_scrape(settings: Settings, engine: Engine, args: argparse.Namespace) -> 
         return guard.outcome()
     judge_timeouts(report, previous_streak(settings.logs_dir))
     judge_lake(report, previous_lake_down(settings.logs_dir), datetime.now(UTC))
+    judge_offline(report, previous_streak(settings.logs_dir, OFFLINE_STREAK))
     path = write_report(report, settings.logs_dir)
     print(outcome_line(report, path))
     return 0 if report.ok else 1
@@ -229,11 +233,15 @@ def outcome_line(report: RunReport, path: Path) -> str:
     X op and one dead account one ledger group, read as a fix that did not hold
     (2026-10-06). The URL, and every other error, are in the report. A deferred export
     is named on an ok line, so a lake falling behind is visible in the scheduled log, and
-    so is a crawl that timed out short of `TIMEOUT_STREAK_FAILS` cycles running, and a
-    bucket that has taken nothing for less than `LAKE_DOWN_FAILS_AFTER`.
+    so is a crawl that timed out short of `TIMEOUT_STREAK_FAILS` cycles running, a
+    bucket that has taken nothing for less than `LAKE_DOWN_FAILS_AFTER`, and a machine
+    with no network short of `OFFLINE_STREAK_FAILS` cycles running.
     """
     if report.ok:
         notes = []
+        if report.offline:
+            streak = f"{report.offline_streak} of {OFFLINE_STREAK_FAILS} before it fails"
+            notes.append(f"offline: {report.offline} ({streak})")
         if report.timeouts:
             timed_out = ", ".join(t.split(": ")[0] for t in report.timeouts)
             streak = f"{report.timeout_streak} of {TIMEOUT_STREAK_FAILS} before it fails"

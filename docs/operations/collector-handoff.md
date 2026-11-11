@@ -76,10 +76,12 @@ again.
 | `data/browser-profiles/` (about 3.2 GB) | no | Chrome encrypts its cookies with DPAPI, per Windows user, so they cannot decrypt on another PC |
 | `data/symbols/` | no | the first scrape downloads the symbol directory again when it is missing or older than `SYMBOL_UNIVERSE_MAX_AGE_HOURS` (`symbols/universe.py`) |
 
-**`logs/scrape-run.json` starts clean.** The next run reads two things from it.
+**`logs/scrape-run.json` starts clean.** The next run reads three things from it.
 `timeout_streak` counts crawl timeouts, which measure the machine's load, not the
-collector. `lake_down_since` dates a bucket outage, and a successful handoff has just
-written to that bucket, so the sender's value is stale by construction. Carrying the
+collector, and `offline_streak` counts cycles that got no answer from the network, which
+measure the sender's connection. `lake_down_since` dates a bucket outage, and a
+successful handoff has just written to that bucket, so the sender's value is stale by
+construction. Carrying the
 sender's report would therefore carry nothing true. The receiver's own report is worse:
 it dates from the last time that machine ran, perhaps weeks ago. With it, the first slow
 load would count as a long streak, and the first bucket refusal as an outage of weeks,

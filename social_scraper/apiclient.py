@@ -86,8 +86,10 @@ class ApiClient:
             log.warning("request timed out: %s (%s)", url, exc)
             return PageResult(status=None, final_url=url, timed_out=True)
         except (OSError, http.client.HTTPException) as exc:
-            # No answer at all: to the throttle, the same as a 5xx.
-            return PageResult(status=None, final_url=url, text=f"{type(exc).__name__}: {exc}")
+            # No answer at all: to the throttle, the same as a 5xx; to the runner, one
+            # load of a machine that may have no network (`PageResult.no_answer`).
+            why = f"{type(exc).__name__}: {exc}"
+            return PageResult(status=None, final_url=url, text=why, no_answer=why)
         finally:
             conn.close()
         if len(body) > MAX_BODY_BYTES:
@@ -111,6 +113,7 @@ class ApiClient:
             text=result.text,
             html=result.text,
             timed_out=result.timed_out,
+            no_answer=result.no_answer,
         )
 
     def capture(
@@ -129,4 +132,5 @@ class ApiClient:
             payloads=payloads if result.data is not None else [],
             text=result.text,
             timed_out=result.timed_out,
+            no_answer=result.no_answer,
         )
