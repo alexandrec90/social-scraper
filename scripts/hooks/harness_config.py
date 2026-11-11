@@ -271,6 +271,18 @@ class WorktreeConfig:
 
 
 @dataclass(frozen=True)
+class DeliveryConfig:
+    """How a finished session's work reaches the default branch.
+
+    `flow` is `gated` -- a PR the gate decides -- or `direct`, which merges first and
+    runs every check after the merge. Devkit's fix pass and ship task are what read it,
+    from each project's checkout; the field is here so the manifest's schema names it.
+    """
+
+    flow: str = "gated"
+
+
+@dataclass(frozen=True)
 class Config:
     """Shape of the project the harness scripts operate on."""
 
@@ -289,6 +301,7 @@ class Config:
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     test_contract: TestContractConfig = field(default_factory=TestContractConfig)
     structure: StructureConfig = field(default_factory=StructureConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -476,6 +489,13 @@ def _worktree_from(raw: dict[str, Any], default: WorktreeConfig) -> WorktreeConf
     )
 
 
+def _delivery_from(raw: dict[str, Any], default: DeliveryConfig) -> DeliveryConfig:
+    # An unknown word is the default: the other flow takes a gate away, so nothing but
+    # its exact name selects it.
+    flow = raw.get("flow")
+    return replace(default, flow=flow) if flow in ("gated", "direct") else default
+
+
 def from_dict(data: dict[str, Any]) -> Config:
     """Build a Config from an already-parsed manifest dict. Pure; never raises."""
     default = Config()
@@ -490,6 +510,7 @@ def from_dict(data: dict[str, Any]) -> Config:
     wt_raw = data.get("worktree", {}) if isinstance(data.get("worktree"), dict) else {}
     tc_raw = data.get("test_contract", {}) if isinstance(data.get("test_contract"), dict) else {}
     st_raw = data.get("structure", {}) if isinstance(data.get("structure"), dict) else {}
+    deliv_raw = data.get("delivery", {}) if isinstance(data.get("delivery"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -504,6 +525,7 @@ def from_dict(data: dict[str, Any]) -> Config:
         worktree=_worktree_from(wt_raw, default.worktree),
         test_contract=_test_contract_from(tc_raw, default.test_contract),
         structure=_structure_from(st_raw, default.structure),
+        delivery=_delivery_from(deliv_raw, default.delivery),
     )
 
 

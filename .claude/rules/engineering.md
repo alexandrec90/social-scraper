@@ -69,8 +69,6 @@ The wrapper runs through the platform shell — **`cmd.exe` on Windows** — so 
 single-quoted paths and escaped alternation do not survive it. For `ls`, `cat` and `find`
 the better answer is usually the Glob, Read and Grep tools, which cost no subprocess and
 page rather than dump. Codex caps shell output itself, so issue commands there directly.
-What preemptive wrapping has cost is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **A refusal saying a command is "too complex to verify that it stays inside the
 worktree" or "cannot be shown not to be git" is not a devkit hook** — none is wired. It
@@ -88,8 +86,9 @@ PowerShell tool is the answer for a compound statement, not a workaround.
 
 **The last two rows waste turns.** An irreducible line is tested whole for `git` as a
 substring (`.gitignore`, `github.com`, `digit`): split it. PowerShell reads a
-container's `rm` as hitting a "protected" host path, and `Remove-Item $d` as `/`: spell
-it out. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
+container's `rm` as hitting a "protected" host path, `Remove-Item $d` as `/`, and any
+path-shaped word in the call, `robocopy /E` too, as its target: give `Remove-Item` a call
+of its own and spell it out. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
 **Git Bash rewrites POSIX-looking arguments into Windows paths**: `rev:path` into what
 git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.
@@ -106,7 +105,8 @@ gh pr checks <N> --watch --fail-fast      # with run_in_background: true
 `--watch` returns once every check has settled: one call and its notice. **Backgrounding
 is the half that is easy to drop**, here and for an `until` loop on a file a job will
 write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent gets
-no notice before it returns**, so it runs the job itself in the foreground instead.
+no notice before it returns**, so it runs the job itself in the foreground instead, and
+one `until` loop on the file named when Claude Code moves that call out at 180 s.
 
 Diagnosing a failure (`gh run view --log-failed`) and asking once are not polling; the
 waste begins at the *second* identical poll.
@@ -117,8 +117,7 @@ the table in the evidence file: `CONFLICTING` is a gate that will never run, and
 `UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
 When the gate will outlast anything useful you could do, stop: report the branch pushed and
-the gate running, and let the result arrive in a fresh session. What polling has cost is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
+the gate running, and let the result arrive in a fresh session.
 
 ## Scripts
 

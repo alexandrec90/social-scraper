@@ -17,7 +17,7 @@ A coding session makes the change and describes it. It does **not**:
 Running the tests for what you touched is optional. Where `scripts/run-tests.py --help`
 says it picks them, run it bare: it builds the `.venv` a `claude --worktree` tree
 arrives without, which `uv run pytest` builds lacking the dev extra.
-The scheduled fix pass commits, pushes, opens the PR and runs the full gate in CI; a red
+The scheduled jobs commit, push, open the PR and run the full gate in CI; a red
 gate comes back to a fresh session with the failures named.
 
 **Fixer sessions are exempt:** one the fix pass dispatched, as its prompt's first

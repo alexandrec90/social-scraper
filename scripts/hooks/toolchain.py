@@ -428,6 +428,8 @@ def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> t
         fix = python_fix(root, config.python.install_command, config.python.version)
         if fix:
             gaps.append(Gap("No .venv here -- ruff/mypy/pytest are unavailable", fix))
+    if launchers := launcher_gap(root):
+        gaps.append(launchers)
     frontend = config.frontend
     if frontend.enabled and (root / frontend.dir).is_dir():
         if not (root / frontend.dir / "node_modules").is_dir():
@@ -438,6 +440,65 @@ def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> t
                 )
             )
     return tuple(gaps)
+
+
+# A console script uv installs on Windows: a small trampoline holding the interpreter's
+# absolute path as plain bytes, which it dies on with `uv trampoline failed to canonicalize
+# script path` once that path is gone. Anything larger is the tool itself, as ruff is.
+# The path is read in either spelling, drive letter or POSIX root, so the check means the
+# same on the Linux CI as on the PC; a `/` only opens one at the start of a token, so a
+# slash inside some other string in the binary is not read as a path.
+LAUNCHER_MAX_BYTES = 1 << 20
+EMBEDDED_INTERPRETER = re.compile(
+    rb"(?:[A-Za-z]:[\\/]|(?<![^\x00-\x20!\"'])/)[^\x00\r\n]{1,400}?pythonw?\.exe"
+)
+VENV_INTERPRETERS = frozenset({"python", "pythonw"})
+
+
+def dead_launchers(root: Path) -> tuple[Path, ...]:
+    """The console scripts in `root`'s `.venv` that name an interpreter no longer there.
+
+    `python -m <tool>` runs through `pyvenv.cfg` and survives this, which is why no gate
+    notices: only the next session to type `.venv/Scripts/mypy` does (513c55e5).
+    """
+    found = []
+    for launcher in sorted((root / ".venv" / "Scripts").glob("*.exe")):
+        if launcher.stem.lower() in VENV_INTERPRETERS:
+            continue
+        try:
+            if launcher.stat().st_size > LAUNCHER_MAX_BYTES:
+                continue
+            named = EMBEDDED_INTERPRETER.findall(launcher.read_bytes())
+        except OSError:
+            continue
+        if named and not Path(named[-1].decode("utf-8", "replace")).is_file():
+            found.append(launcher)
+    return tuple(found)
+
+
+def launcher_fix(root: Path, home: Path) -> str:
+    """What rewrites the launchers of the `.venv` that `home` owns, seen from `root`.
+
+    `--reinstall`, since a plain sync leaves an installed package's launcher as it found
+    it, and `--project`, since uv writes the path it was given: from a tree linking that
+    `.venv`, a bare one would write the tree's path into them all over again.
+    """
+    if not (home / "uv.lock").is_file():
+        return "delete .venv and provision it again"
+    where = "" if home == root else f" --project {home.as_posix()}"
+    return f"uv sync --all-extras --all-groups --reinstall{where}"
+
+
+def launcher_gap(root: Path) -> Gap | None:
+    """`dead_launchers` as one gap; None when `root`'s `.venv` has none."""
+    dead = dead_launchers(root)
+    if not dead:
+        return None
+    what = (
+        f"{len(dead)} console script(s) in .venv name an interpreter that is gone, "
+        f"`{dead[0].stem}` first -- `python -m` still runs them"
+    )
+    return Gap(what, launcher_fix(root.resolve(), (root / ".venv").resolve().parent))
 
 
 def venv_python(root: Path) -> Path:

@@ -203,6 +203,7 @@ def test_the_pull_links_the_venv_and_each_node_modules_a_manifest_names(tmp_path
     linked = ".venv, node_modules, frontend/node_modules"
     assert ps.settings_pass(root) == [
         f"(worktree links) {ps.SETTINGS_FILE}: {linked}",
+        f"(borrowed .venv) {ps.SETTINGS_FILE}: UV_NO_SYNC",
         f"(worktree links ignored) {ps.GITIGNORE}: {linked}",
     ]
     assert _settings(root)["worktree"] == {
@@ -223,12 +224,37 @@ def test_a_project_that_installs_itself_builds_its_own_venv_but_links_node_modul
     assert _settings(root)["worktree"] == {"symlinkDirectories": ["node_modules"]}
 
 
+def test_a_borrowed_venv_is_never_synced_through_the_link(tmp_path):
+    """513c55e5: uv writes the path it was given into every console script it installs, so
+    a `uv run` in a tree linking `.venv` wrote that tree's path into the checkout's mypy,
+    pytest and pre-commit launchers, each dead the day its tree went."""
+    root = _project(tmp_path, {"env": _env(), "worktree": {"symlinkDirectories": [".venv"]}})
+    _seed(root, ps.GITIGNORE, ".venv\n")
+    assert ps.settings_pass(root) == [f"(borrowed .venv) {ps.SETTINGS_FILE}: UV_NO_SYNC"]
+    assert _settings(root)["env"] == _env(UV_NO_SYNC="1")
+    assert ps.settings_pass(root) == [], "a second pull has nothing left to add"
+
+
+def test_a_project_that_set_the_key_keeps_its_value_and_one_that_links_no_venv_gets_none(tmp_path):
+    """Its own `.venv` is a tree's own to sync, which is `uv run`'s default."""
+    root = _project(
+        tmp_path,
+        {"env": _env(UV_NO_SYNC="0"), "worktree": {"symlinkDirectories": [".venv"]}},
+    )
+    _seed(root, ps.GITIGNORE, ".venv\n")
+    assert ps.settings_pass(root) == []
+    assert _settings(root)["env"]["UV_NO_SYNC"] == "0"
+    own, added = ps.with_borrowed_env({"worktree": {"symlinkDirectories": ["node_modules"]}})
+    assert added == [] and "env" not in own
+
+
 def test_every_link_the_settings_name_is_ignored_as_a_link_not_a_directory(tmp_path):
     """carameli #444: Claude Code linked `frontend/node_modules` into the tree, the
     project ignored `node_modules/` -- directories only, and a link is a file to git --
     so the fix pass's `git add -A` committed the link, an absolute path into the checkout."""
     links = [".venv", "frontend/node_modules", "/web/node_modules/"]
-    root = _project(tmp_path, {"env": _env(), "worktree": {"symlinkDirectories": links}})
+    env = _env(UV_NO_SYNC="1")
+    root = _project(tmp_path, {"env": env, "worktree": {"symlinkDirectories": links}})
     (root / ps.GITIGNORE).write_bytes(b"# Node\r\nnode_modules/\r\n.venv/\r\n/web/node_modules")
     assert ps.settings_pass(root) == [
         f"(worktree links ignored) {ps.GITIGNORE}: .venv, frontend/node_modules"
