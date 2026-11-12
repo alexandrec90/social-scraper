@@ -457,3 +457,75 @@ def record(
     except Exception:
         return None
     return path
+
+
+# --- a machine cut off is not a defect --------------------------------------------------
+#
+# What a failure says when the name it needed could not be looked up: git, curl, gh,
+# Python's socket and httpx, Node, Rust's reqwest. Name resolution only, deliberately:
+# that is what `resolves` can confirm, and a refused or reset connection is as often a
+# service's own outage as this machine's, which is worth a session.
+UNRESOLVED_SAYS = (
+    "could not resolve host",
+    "could not resolve hostname",
+    "enotfound",
+    "eai_again",
+    "getaddrinfo failed",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "no such host is known",
+    "nodename nor servname",
+    "failed to lookup address",
+    "dns error",
+    # gh's own words for the same: "error connecting to api.github.com" followed by
+    # "check your internet connection or https://githubstatus.com".
+    "check your internet connection",
+)
+# The name `resolves` looks up: every job the ledger hears from fetches from it.
+PROBE_HOST = "github.com"
+# `getaddrinfo` takes no timeout, and a resolver that answers nothing holds it for the
+# system's own; the lookup runs on a thread this long, and one still waiting is a no.
+PROBE_SECONDS = 5.0
+
+
+def says_unresolved(text: str) -> bool:
+    """Whether `text` reports a name that could not be looked up (`UNRESOLVED_SAYS`)."""
+    lowered = text.lower()
+    return any(said in lowered for said in UNRESOLVED_SAYS)
+
+
+def resolves(host: str = PROBE_HOST, lookup=None, seconds: float = PROBE_SECONDS) -> bool:
+    """Whether this machine can look `host` up now, within `seconds`.
+
+    `lookup` is `socket.getaddrinfo` unless a test hands one in. A lookup error
+    (`socket.gaierror` is an `OSError`; a name IDNA cannot encode a `UnicodeError`) is a
+    no."""
+    import socket
+    import threading
+
+    look = lookup or socket.getaddrinfo
+    answered: list[bool] = []
+
+    def ask() -> None:
+        try:
+            answered.append(bool(look(host, 443)))
+        except (OSError, UnicodeError):
+            answered.append(False)
+
+    worker = threading.Thread(target=ask, name="harness-events-probe", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return bool(answered and answered[0])
+
+
+def cut_off(text: str, lookup=None) -> bool:
+    """Whether a failure saying `text` is this machine having no network, not a defect:
+    it names a lookup that failed, and `PROBE_HOST` does not resolve now either.
+
+    Both halves, so neither alone files nothing. On 2026-11-12 a night without DNS filed
+    32 `Worktree Reconcile` failures, the same job's earlier outages had been retired as
+    "not a defect: offline" seven times, and each fixer sent at it died on the API it
+    could not reach. A lookup failing while github.com resolves is a bad host or a
+    container's own DNS, which stays a finding, and a job that fails for a different
+    reason while offline is filed by its next run on a network."""
+    return says_unresolved(text) and not resolves(lookup=lookup)
