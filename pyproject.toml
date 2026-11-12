@@ -53,8 +53,13 @@ where = ["."]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["tests/"]
-addopts = "-p devkit_temproot"
+# `-m "not local"` keeps the local end-to-end tier out of every run but its own:
+# `scripts/e2e.py` passes `-m local`, and the later `-m` wins (.claude/rules/local-e2e.md).
+addopts = "-p devkit_temproot -m 'not local'"
 pythonpath = ["scripts/pytest-plugins"]
+markers = [
+  "local: needs this workstation (a real Chrome, the network, live platforms); run by scripts/e2e.py only",
+]
 
 [tool.mypy]
 python_version = "3.12"
