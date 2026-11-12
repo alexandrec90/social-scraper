@@ -454,15 +454,17 @@ def rerun_in_tree_venv(module: str, argv: list[str] | None) -> int | None:
     `scripts/hooks/toolchain.py` provisions it with this project's own install command
     and runs this script again inside it; where this interpreter already has `module`,
     or the vendored copy predates that, nothing changes.
+
+    Imported by name at run time, not by an `import` statement, as `lint-all.py` does:
+    the vendored tree is on no mypy search path here, so a run naming this file reported
+    `import-not-found` on the statement, a finding no edit to the project's code can fix.
     """
     hooks = REPO_ROOT / "scripts" / "hooks"
     if not (hooks / "toolchain.py").is_file():
         return None
     sys.path.insert(0, str(hooks))
     try:
-        import toolchain
-
-        rerun = toolchain.rerun_in_venv
+        rerun = importlib.import_module("toolchain").rerun_in_venv
     except (ImportError, AttributeError):
         return None
     return rerun(

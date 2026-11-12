@@ -1,11 +1,11 @@
 {
-  "devkit_tag": "v0.11.87",
+  "devkit_tag": "v0.11.88",
   "files": {
-    ".claude/engineering-evidence.md": "9ce58f09f79f4de8a62d917250737b1ffa9867a6159b0cba3c2aa2ca7fb20930",
+    ".claude/engineering-evidence.md": "fa60ac2928253ec7aa7420a465f383a9a33122500a2ba45cff3c62f363b9e799",
     ".claude/fixer.md": "ee785d24c9e2974c8fc8911d67c66bd1358e7534a5dc88f68ba5a6a29c9b950a",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
     ".claude/rules/authoring.md": "6b2ac11c4fbfe094c1c7b4fa64406d8a5af6fef57467090848c3983dd076ea11",
-    ".claude/rules/engineering.md": "0a4960854da7bba94030f661bf8cf4f7b986f723060aec035801994db59fcaef",
+    ".claude/rules/engineering.md": "dc24e64d5cd06fb6bd2fc58f0d870c4dc8f8d3d60e254e57ea5aa66f9a25b909",
     ".claude/rules/local-e2e.md": "d9a44c7778f569d79e8fb745dae22593c89c0d4f4ec3b7726d55ecf832c62bfe",
     ".claude/rules/session-scope.md": "1ea48d639eee665670935403779d46a15f998c979ec7f663376a1fbbaf5b139d",
     ".claude/rules/task-scripts.md": "8a91fdbf9e1a01285423a7cb06df084c19ce4fed6fda3a808f4eaf744929d9df",

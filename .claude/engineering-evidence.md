@@ -105,10 +105,20 @@ headroom, and this table is read only by a session waiting on a gate, which
 
 A `timeout` of 590000 does not keep a Bash call in the foreground: Claude Code answers
 `Command was moved to the background (ID: …) after running for 180s`, names an output file
-and promises a notice. A top-level session takes the notice and stops. A subagent cannot:
-ending its turn is returning, so it arms nothing and reads nothing after that. One `until`
-loop on that file, in the foreground, is the wait left to it, and
+and promises a notice. A top-level session takes the notice and stops. A subagent cannot
+stop: ending its turn is returning, so it reads nothing after that. One `until` loop on
+that file, in the foreground, is the wait left to it, and
 `session_friction.MOVED_TO_BACKGROUND` excuses exactly that loop (ledger `2d4d52ac`).
+
+**The notice does reach a subagent that is still working.** A sweep's subagent on Claude
+Code 2.1.322 (ledger `977b93dc`) had a background command's and a `Monitor`'s
+`<task-notification>` delivered between two of its own `Read` calls, and acted on it. So
+a subagent with other work to do backgrounds the job and keeps working, as a top-level
+session would; only one left with nothing but the wait needs the foreground loop. A
+leading `sleep` is never that loop: `Start-Sleep 170; Get-Content <the task file>` was
+refused with "Blocked: Start-Sleep 170 followed by: Get-Content ... To wait for a
+condition, use Monitor with an until-loop", and three turns went to finding the shape
+the rule had already named.
 
 ### devkit#180: "no checks reported" was a gate that would never start
 
