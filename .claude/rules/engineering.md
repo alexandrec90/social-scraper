@@ -105,8 +105,9 @@ gh pr checks <N> --watch --fail-fast      # with run_in_background: true
 `--watch` returns once every check has settled: one call and its notice. **Backgrounding
 is the half that is easy to drop**, here and for an `until` loop on a file a job will
 write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent gets
-no notice before it returns**, so it runs the job itself in the foreground instead, and
-one `until` loop on the file named when Claude Code moves that call out at 180 s.
+no notice before it returns**, so it runs the job in the foreground instead, and
+one `until` loop on the file named when Claude Code moves that call out at 180 s, or
+when it backgrounded the call itself.
 
 Diagnosing a failure (`gh run view --log-failed`) and asking once are not polling; the
 waste begins at the *second* identical poll.
