@@ -90,3 +90,33 @@ its tree is kept for it, and your report names it to be moved to the checkout.
 command, say so in your report with the exact command, put it in `logs/friction.md`,
 and stop. The pass also reads every session's transcript for refusals and files them
 itself (`scripts/session_friction.py` in devkit).
+
+## Never end by telling the person to do something
+
+Nothing may depend on the person remembering. They forget what is left waiting on them,
+so a session NEVER ends with "you need to", "after this merges, run" or "on the other
+PC". **Anything that must happen later goes in a task file, in the same change**, and
+every PC carries it out on its own:
+
+```toml
+# .devkit-queue/<name>.toml
+when = "green"     # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>
+on = "any"         # or every-machine, docker, or a hostname
+run = "<command>"  # or agent = "<prompt>", or elevated = "<verb>": exactly one of the three
+```
+
+`when` and `on` are optional, and these are their defaults. `run` executes in that
+project's checkout, and a failure goes to an agent on that machine with the output.
+`agent` starts a fresh session. `elevated` takes `restart-wsl-service` and nothing else.
+A task is its path and the commit that added it: a revert removes it, an edit never runs
+a finished one again, so **to run something again, add a new file**. A malformed file
+becomes an agent task saying so.
+
+**Anything that does not fit, a case nobody thought of, is a plain `agent` task**, written
+for a session with no memory of this one: what to do, in which files, and what finished
+looks like. **A session with no code change still commits that one file:** write it, then
+ship as above.
+
+Only what truly needs the human, a payment or a login, reaches them, and only through a
+task the agent attempts first. Your report may say what you queued; it may not leave
+anyone a job.
