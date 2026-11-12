@@ -44,7 +44,9 @@ was a person trying to cut a release by hand and finding a stale branch. A
 sends it to the devkit session. **A clicked task records too**, its message saying it
 was run by hand: it once did not, on the theory that the person had watched it fail,
 but watching is not fixing. Failures share causes, so every routine one goes to the one
-place they are aggregated, triaged and fixed together.
+place they are aggregated, triaged and fixed together. **Bar one a machine without DNS
+caused** (`harness_events.cut_off`): it is kept as `OFFLINE_EVENT`, off the backlog,
+since no session can act on it and the job's next run on a network files the rest.
 
 **And the event needs evidence still on disk when it is triaged**, which is the half
 that was missing. The ledger entry survived; the file it pointed at did not. `Scheduled:
@@ -89,6 +91,12 @@ LOGS_DIR = "logs"
 # The ledger event an unattended failure leaves behind. Read by `harness_triage.py`,
 # which lists it in `TRIAGE_EVENTS`.
 FAILED_EVENT = "scheduled-job-failed"
+# The same row, for a run that failed because this machine could not look a name up and
+# still cannot (`harness_events.cut_off`). Kept, as every row is, and not in
+# `TRIAGE_EVENTS`: no session can fix a night without DNS, and the 32 rows one filed on
+# 2026-11-12 sent fixers that died on the same outage. The job's next run on a network
+# files whatever else is wrong with it.
+OFFLINE_EVENT = "scheduled-job-offline"
 
 # Suffix of the kept copy an unattended failure leaves beside its per-run artifact, and
 # the path the ledger event names. See the docstring: the event outlives the artifact,
@@ -456,7 +464,7 @@ def archive_artifact(
     reason to change what the job reported."""
     folder = root / LOGS_DIR / ARCHIVE_DIR
     stem = f"{name}-{(now or _dt.datetime.now()).strftime(ARCHIVE_STAMP)}"
-    mine = re.compile(rf"^{re.escape(name)}-\d{{8}}-\d{{6}}(?:-\d+)?\.log$")
+    mine = re.compile(rf"^{re.escape(name)}-(\d{{8}}-\d{{6}})(?:-(\d+))?\.log$")
     try:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{stem}.log"
@@ -465,10 +473,12 @@ def archive_artifact(
             n += 1
             path = folder / f"{stem}-{n}.log"
         path.write_text(body, encoding="utf-8")
-        copies = sorted(
-            (p for p in folder.iterdir() if mine.match(p.name)), key=lambda p: p.stat().st_mtime
-        )
-        for old in copies[:-ARCHIVE_KEEP]:
+        # Ordered by the name, stamp then its same-second count, not by mtime: copies
+        # written within one tick of the filesystem's clock tie on mtime, and Windows
+        # then pruned whichever `sorted` left first, the newest included.
+        found = ((p, mine.match(p.name)) for p in folder.iterdir())
+        copies = sorted((m[1], int(m[2] or 1), p) for p, m in found if m)
+        for *_, old in copies[:-ARCHIVE_KEEP]:
             old.unlink(missing_ok=True)
     except OSError:
         return None
@@ -804,8 +814,10 @@ def record_failure(failure: Failure, root: Path | None = None) -> None:
         # that imports but is broken -- is a defect worth a traceback rather than a
         # scheduled job that reports nothing and looks fine.
         return
+    # An older `scripts/hooks/` tier has no `cut_off`: it files as before.
+    offline = getattr(harness_events, "cut_off", None)
     harness_events.record(
-        FAILED_EVENT,
+        OFFLINE_EVENT if offline is not None and offline(failure.output) else FAILED_EVENT,
         (
             ("project", harness_events.project_name(root or Path.cwd())),
             ("command", " ".join(failure.command)),

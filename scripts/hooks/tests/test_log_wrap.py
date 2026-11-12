@@ -668,6 +668,25 @@ def test_each_failure_names_its_own_copy_not_the_jobs(tmp_path, monkeypatch):
     assert "second cause" in (tmp_path / "logs" / "nightly.failed.log").read_text(encoding="utf-8")
 
 
+def test_the_copies_pruned_are_the_oldest_by_name_not_by_mtime(tmp_path, monkeypatch):
+    """Copies written in one tick of Windows' file clock tie on mtime, and the prune then
+    took whichever `sorted` left first: `test_the_per_failure_copies_are_bounded_per_job`
+    failed one run in four on 2026-11-12. The name says the order; an mtime need not."""
+    monkeypatch.setattr(lw, "ARCHIVE_KEEP", 2)
+    folder = tmp_path / lw.LOGS_DIR / lw.ARCHIVE_DIR
+    folder.mkdir(parents=True)
+    first, second = folder / "nightly-20261008-123000.log", folder / "nightly-20261008-123000-2.log"
+    for path, mtime in ((first, 3000), (second, 1000)):
+        path.write_text("old", encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+    when = lw._dt.datetime(2026, 10, 8, 12, 31, 0)
+    lw.archive_artifact(tmp_path, "nightly", "new", now=when)
+    assert sorted(p.name for p in folder.iterdir()) == [
+        "nightly-20261008-123000-2.log",
+        "nightly-20261008-123100.log",
+    ]
+
+
 def test_the_per_failure_copies_are_bounded_per_job(tmp_path, monkeypatch):
     monkeypatch.setattr(lw, "ARCHIVE_KEEP", 2)
     folder = tmp_path / lw.LOGS_DIR / lw.ARCHIVE_DIR
@@ -985,6 +1004,34 @@ def test_record_failure_names_the_run_the_artifact_keeps(tmp_path, monkeypatch):
     assert "Devkit: Cut Release" in fields["message"]
     assert fields["cause"] == "E: x"
     assert "started" not in fields, "no start given: none invented"
+
+
+_UNRESOLVED = (
+    "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: github.com"
+)
+
+
+def test_a_failure_on_a_machine_cut_off_is_kept_off_the_backlog(tmp_path, monkeypatch):
+    """d65de517: a night without DNS filed 32 `Worktree Reconcile` failures for triage,
+    after seven earlier outages had each been retired as "not a defect: offline"."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    events = load_module("scripts/hooks/harness_events.py")
+    monkeypatch.setattr(events, "resolves", lambda **_: False)
+    failure = lw.Failure("Reconcile", ["python", "worktree.py"], 1, "logs/x.log", _UNRESOLVED)
+    lw.record_failure(failure, tmp_path)
+    [fields] = _fields(ledger)
+    assert fields["event"] == lw.OFFLINE_EVENT, "kept, under its own event"
+
+
+def test_a_lookup_failing_while_github_resolves_is_still_filed(tmp_path, monkeypatch):
+    """A bad host, or a container's own DNS: the machine has a network, so it is a defect."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    events = load_module("scripts/hooks/harness_events.py")
+    monkeypatch.setattr(events, "resolves", lambda **_: True)
+    failure = lw.Failure("Reconcile", ["python", "worktree.py"], 1, "logs/x.log", _UNRESOLVED)
+    lw.record_failure(failure, tmp_path)
+    [fields] = _fields(ledger)
+    assert fields["event"] == lw.FAILED_EVENT
 
 
 def test_a_failure_records_when_its_run_began_beside_when_it_ended(tmp_path, monkeypatch):

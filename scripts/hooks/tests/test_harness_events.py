@@ -7,6 +7,7 @@ every consumer it is vendored into.
 
 import datetime as dt
 
+import pytest
 from conftest import load_module
 
 events = load_module("scripts/hooks/harness_events.py")
@@ -564,3 +565,67 @@ class TestTheSuiteCannotReachTheRealLedger:
         assert "project=whatever" in text
         # And it is this test's own scratch ledger, freshly made, not one with history.
         assert len(text.strip().splitlines()) == 1
+
+
+def _refused(host, port):
+    raise OSError(11001, "getaddrinfo failed")
+
+
+def _answered(host, port):
+    return [("addr",)]
+
+
+class TestCutOff:
+    """2026-11-12: a night without DNS put 55 rows on the backlog that no session could act
+    on, and killed the four fixers sent at them. `cut_off` is what keeps such a failure
+    off it: a lookup that failed, on a machine that still cannot look GitHub up."""
+
+    @pytest.mark.parametrize(
+        "said",
+        [
+            "fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host: x",
+            "ConnectError: [Errno -2] Name or service not known",
+            "error connecting to api.github.com\ncheck your internet connection or https://x",
+            "getaddrinfo ENOTFOUND registry.npmjs.org",
+            "socket.gaierror: [Errno 11001] getaddrinfo failed",
+        ],
+    )
+    def test_each_way_a_tool_says_a_lookup_failed_is_read(self, said):
+        assert events.says_unresolved(said)
+
+    @pytest.mark.parametrize(
+        "said", ["", "HTTP 404: Not Found", "Connection refused", "EACCES: permission denied"]
+    )
+    def test_anything_else_is_not(self, said):
+        assert not events.says_unresolved(said)
+
+    def test_resolves_asks_the_lookup_it_is_given(self):
+        assert events.resolves(lookup=_answered)
+        assert not events.resolves(lookup=_refused)
+        assert not events.resolves(lookup=lambda host, port: [])
+
+    def test_a_lookup_that_never_answers_is_a_no(self):
+        import threading
+
+        held = threading.Event()
+
+        def hangs(host, port):
+            held.wait(5)
+            return [("addr",)]
+
+        try:
+            assert not events.resolves(lookup=hangs, seconds=0.05)
+        finally:
+            held.set()
+
+    def test_cut_off_needs_both_halves(self):
+        said = "Could not resolve host: github.com"
+        assert events.cut_off(said, lookup=_refused)
+        assert not events.cut_off(said, lookup=_answered), "a network: a real defect"
+        assert not events.cut_off("exit 2: boom", lookup=_refused), "offline, failing otherwise"
+
+    def test_cut_off_asks_nothing_of_a_failure_that_names_no_lookup(self):
+        def never(host, port):
+            raise AssertionError("probed")
+
+        assert not events.cut_off("exit 2: boom", lookup=never)
