@@ -337,6 +337,26 @@ def desktop_sources(paths: list[str]) -> list[str]:
     return [p.replace("\\", "/") for p in paths if p.endswith(DESKTOP_SUFFIXES)]
 
 
+def dotnet_sdk_missing() -> str:
+    """Why this host cannot build the desktop app, or "" when it can.
+
+    A `dotnet` on PATH is only the host: with no SDK installed it answers every build with
+    "No .NET SDKs were found", which read as a red suite on a PC that simply lacks one
+    (8448cfc1). So the SDK list is asked too, and an empty one is the same missing host.
+    """
+    if not shutil.which("dotnet"):
+        return "no dotnet on PATH"
+    try:
+        listed = subprocess.run(
+            ["dotnet", "--list-sdks"], capture_output=True, text=True, check=False, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"dotnet --list-sdks did not answer ({exc})"
+    if not (listed.stdout or "").strip():
+        return "dotnet on PATH lists no SDK"
+    return ""
+
+
 def run_desktop(root: Path) -> str:
     """`scripts/desktop.py test`; the artifact's text for a failure, empty for a pass.
 
@@ -352,8 +372,8 @@ def run_desktop(root: Path) -> str:
     if not WINDOWS:
         print("run-tests: the desktop tier needs Windows; desktop tests skipped")
         return ""
-    if not shutil.which("dotnet"):
-        print("run-tests: no dotnet on PATH; desktop tests skipped (global.json names the SDK)")
+    if missing := dotnet_sdk_missing():
+        print(f"run-tests: {missing}; desktop tests skipped (global.json names the SDK)")
         return ""
     print("run-tests: scripts/desktop.py test")
     result = subprocess.run(
@@ -572,8 +592,12 @@ def run_pytest(cmd: list[str]) -> str:
     print(f"run-tests: {' '.join(cmd[2:])}")
     with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
         run = with_basetemp(cmd, basetemp)
-        result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
-    raw = result.stdout + result.stderr
+        # UTF-8 whatever the locale, and a stream a reader thread lost is empty: in
+        # cp1252 one `0x9d` byte left `stdout` None and crashed the push gate (0f982488).
+        result = subprocess.run(
+            run, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+    raw = (result.stdout or "") + (result.stderr or "")
     if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
         return ""
     body = cap_failure_blocks(filter_output(raw))

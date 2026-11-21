@@ -217,9 +217,17 @@ jobs:
         with:
           ref: ${{ needs.sweep.outputs.branch }}
           fetch-depth: 0
-      - uses: ./.github/actions/setup-python-env
+      # Spelled out, not the project's composite action: this file is vendored and that
+      # action is a one-shot template, so a project generated before it has none and the
+      # job would die at startup. A project that installs another way opts out of `tidy`
+      # by keeping `[delivery] flow` off `direct`.
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ needs.sweep.outputs.python }}
+      - name: Install uv
+        run: pip install uv
+      - name: Sync the project from uv.lock
+        run: uv sync --all-extras --all-groups
       - name: Format, reconcile and mirror
         env:
           TIDY_BRANCH: ${{ needs.sweep.outputs.branch }}

@@ -103,9 +103,10 @@ run = "<command>"  # or agent = "<prompt>", or elevated = "<verb>": exactly one 
 ```
 
 `when` and `on` are optional, and these are their defaults. A task that must wait for
-the clock names a window, `when = "outside:09:30-16:00 UTC-05:00 mon-fri"` (or
-`inside:`), in a UTC offset, never a zone name: it waits in the queue rather than costing a
-session per retry. `run` executes in that
+the clock waits in the queue rather than costing a session per retry: for a recurring
+window, `when = "outside:09:30-16:00 UTC-05:00 mon-fri"` (or `inside:`); for one moment,
+`when = "after:2026-11-12T16:05-05:00"`, ISO 8601. Both take a UTC offset, never a zone
+name. `run` executes in that
 project's checkout, and a failure goes to an agent on that machine with the output.
 `agent` starts a fresh session. `elevated` takes `restart-wsl-service` and nothing else.
 A task is its path and the commit that added it: a revert removes it, an edit never runs

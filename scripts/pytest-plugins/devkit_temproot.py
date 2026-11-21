@@ -65,6 +65,12 @@ def pytest_configure(config: Any) -> None:
         return
     root = run_root()
     os.environ[ENV] = str(root)
+    # The root as pytest's `--basetemp` as well, not only through the variable: under the
+    # variable alone pytest nests `pytest-of-<user>/pytest-<n>/` inside it, and a test whose
+    # fixture mangles its `tmp_path` into a directory name (Claude Code's project slug)
+    # carries that twice -- 23 of `tests/test_fix_loop.py` went past Windows' MAX_PATH
+    # (c0ea32a9). The variable stays, so a pytest this run spawns stands aside.
+    config.option.basetemp = str(root)
 
     def release() -> None:
         os.environ.pop(ENV, None)

@@ -121,6 +121,8 @@ def _toml_schema() -> dict[str, frozenset[str]]:
         "worktree": fields(cfg.WorktreeConfig),
         "test_contract": fields(cfg.TestContractConfig),
         "structure": fields(cfg.StructureConfig),
+        "delivery": fields(cfg.DeliveryConfig),
+        "schedule": fields(cfg.ScheduleConfig),
     }
 
 
