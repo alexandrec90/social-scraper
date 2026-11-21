@@ -1,7 +1,7 @@
 ---
 name: ship
-description: 'Mark the task done: write the commit message as an intent file and stop. The fix pass or the ship task commits, pushes and opens the PR. `/ship auto` opens it to merge itself once green; `/ship hold` keeps it for a person.'
-argument-hint: '[auto|hold]'
+description: 'Mark the task done: write the commit message as an intent file and stop. The fix pass or the ship task commits, pushes and opens the PR, which merges itself once green; `/ship hold` keeps it for a person.'
+argument-hint: '[hold]'
 disable-model-invocation: false
 ---
 
@@ -24,15 +24,12 @@ fixer if it is red. The only thing this session knows that nothing else can reco
    - a body explaining *why*, in Markdown. Name identifiers in backticks. This body is
      the PR description and the only changelog a consumer of this repository gets, so
      write it for the reader who did not watch the work;
-   - only when the arguments above are `auto`: a blank line, then `Automerge: yes` as
-     the file's last line. The pass labels that PR `automerge`, and it merges once the
-     gate is green with nobody reviewing it. That is the person's call, made by typing
-     `/ship auto`: never add the line on your own judgement, nor because a change looks
-     trivial to you;
    - only when the arguments above are `hold`: `Hold: yes`, standing alone on a line of
      its own, with nothing else on that line. The PR gets no merge label and waits for
-     the person, whichever flow the project is in. The same rule: never add the line on
-     your own judgement.
+     the person, whichever flow the project is in; without it, the PR merges itself once
+     its gate is green. That is the person's call, made by typing `/ship hold`. The same
+     rule: never add the line on your own judgement, nor because a change looks risky to
+     you. (`/ship auto` is what the default used to need, and now asks nothing extra.)
 3. If the harness cost you turns -- a refusal, a missing tool, an instruction that sent
    you the wrong way -- add one line per thing to `logs/friction.md`, keeping the lines
    already there: another session in this tree may have written them. Write each
@@ -57,9 +54,9 @@ A project is in one of two flows, `[delivery] flow` in its `.devkit.toml`.
 **Gated, the default.** The fix pass (`scripts/fix-pass.py`, scheduled every half hour,
 or the *Agent: Fix What Is Red* task by hand) finds the intent, runs the commit-stage
 fixers, commits with your message, pushes with the push gate skipped, and opens the PR.
-On a PC whose `devkit.fixPass` is `off`, the ship task does the same. A PR from a tree
-the fix pass cut for a fixer is labelled `automerge` and merges once green; yours is not,
-and waits for a person -- unless the intent ends `Automerge: yes`.
+On a PC whose `devkit.fixPass` is `off`, the ship task does the same. The PR is labelled
+`automerge` and merges once green, yours as much as a fixer's -- unless the intent holds
+the `Hold: yes` line, and then it waits for a person, a resolver's commits included.
 
 **Direct.** The ship task (`scripts/ship-pass.py`, every two minutes) commits with your
 message, with no fixers and no pre-commit framework, pushes, and opens the PR labelled
@@ -105,7 +102,10 @@ on = "any"         # or every-machine, docker, or a hostname
 run = "<command>"  # or agent = "<prompt>", or elevated = "<verb>": exactly one of the three
 ```
 
-`when` and `on` are optional, and these are their defaults. `run` executes in that
+`when` and `on` are optional, and these are their defaults. A task that must wait for
+the clock names a window, `when = "outside:09:30-16:00 UTC-05:00 mon-fri"` (or
+`inside:`), in a UTC offset, never a zone name: it waits in the queue rather than costing a
+session per retry. `run` executes in that
 project's checkout, and a failure goes to an agent on that machine with the output.
 `agent` starts a fresh session. `elevated` takes `restart-wsl-service` and nothing else.
 A task is its path and the commit that added it: a revert removes it, an edit never runs
