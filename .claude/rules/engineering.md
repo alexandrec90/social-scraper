@@ -34,8 +34,8 @@ that has no test, write the test in the same commit even if the logic didn't cha
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
 
 Running tests is optional, and the full suite is not yours to run — see
-`.claude/rules/session-scope.md`. The gate runs once, in CI, on the PR the fix pass opens
-for you.
+`.claude/rules/session-scope.md`, which says how. A bare `python` is the machine's, with
+no pytest.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
