@@ -21,6 +21,18 @@ from conftest import REPO_ROOT, load_module
 cfg = load_module("scripts/hooks/harness_config.py")
 
 
+def test_schedule_claims_no_task_by_default_and_only_named_ones():
+    assert cfg.Config().schedule == cfg.ScheduleConfig(())
+    claimed = cfg.from_dict({"schedule": {"tasks": ["Pool", "  Guard ", ""]}})
+    assert claimed.schedule.tasks == ("Pool", "Guard")
+    for bad in (
+        {"schedule": ["Pool"]},
+        {"schedule": {"tasks": "Pool"}},
+        {"schedule": {"tasks": [1]}},
+    ):
+        assert cfg.from_dict(bad).schedule.tasks == (), bad
+
+
 def test_delivery_defaults_to_the_gated_flow_and_takes_only_a_name_it_knows():
     assert cfg.Config().delivery == cfg.DeliveryConfig("gated")
     assert cfg.from_dict({"delivery": {"flow": "direct"}}).delivery.flow == "direct"

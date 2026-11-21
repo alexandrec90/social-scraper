@@ -19,6 +19,7 @@ class Config:
 
     def __init__(self, basetemp=None, worker=False):
         self._basetemp = basetemp
+        self.option = type("Option", (), {"basetemp": basetemp})()
         self.cleanups = []
         if worker:
             self.workerinput = {}
@@ -52,6 +53,7 @@ def test_configure_points_pytest_at_a_root_it_removes_afterwards(tmp_path, monke
     plugin.pytest_configure(config)
     root = Path(os.environ[plugin.ENV])
     assert root.is_dir() and root.parent == tmp_path / plugin.PARENT
+    assert config.option.basetemp == str(root), "the root is the base temp, not its parent"
     (root / "pytest-of-x").mkdir()
     [release] = config.cleanups
     release()
@@ -87,7 +89,10 @@ def test_a_run_loading_it_by_p_keeps_its_tmp_path_out_of_the_shared_root(tmp_pat
         "def test_where(tmp_path):\n"
         "    root = os.environ['PYTEST_DEBUG_TEMPROOT']\n"
         "    assert str(tmp_path).startswith(root), (tmp_path, root)\n"
-        "    assert 'pytest-runs' in root\n",
+        "    assert 'pytest-runs' in root\n"
+        # c0ea32a9: no `pytest-of-<user>/pytest-<n>` between the root and the test's own
+        # directory, which a slug of `tmp_path` would carry twice past MAX_PATH.
+        "    assert tmp_path.parent == __import__('pathlib').Path(root).resolve(), tmp_path\n",
         encoding="utf-8",
     )
     env = {k: v for k, v in os.environ.items() if k not in (plugin.ENV, "PYTEST_ADDOPTS")}
