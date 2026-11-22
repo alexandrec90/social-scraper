@@ -143,6 +143,23 @@ returns in about a second never waited for anything. A `CONFLICTING` PR gives th
 message and does not get better on a retry — which is what asking `mergeStateStatus`
 once, at the front, settles before the ambiguity can arise.
 
+## Why a subagent's `until` loop has a deadline
+
+On 2026-11-22 a top-level fixer waited on its own backgrounded pytest run with
+`until grep -qE "[0-9]+ (passed|failed)" <file>; do sleep 10; done` (044e15bd), although
+Claude Code had answered that call with "You will be notified when it completes — do
+not poll that file". The rule's loop is for a subagent left with nothing but the wait.
+A top-level session ends its turn, and the notice wakes it.
+
+A second loop from the same session matched `passed|failed|error`. pytest's `-x` run
+ends on "stopping after 1 failures", so that loop never ended. It outlived the session,
+and its Git Bash held `git.exe` open until an elevated `winget upgrade Git.Git` failed
+with "Installer failed with exit code: 1" (26022937). A pattern is a guess at a job's
+last line, and a wrong guess costs nothing until the loop is orphaned, so the loop's
+condition ends `|| [ $SECONDS -gt 900 ]`. `$SECONDS` is the shell's own clock, so this
+takes no command substitution and no `for` loop, neither of which the worktree guard
+would pass.
+
 ## The worktree isolation guard: what it actually reads
 
 Read out of the installed Claude Code binary and reproduced by hand in a worktree
