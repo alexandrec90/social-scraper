@@ -68,10 +68,12 @@ scripts/run-tests.py::frontend_run
 scripts/run-tests.py::frontend_sources
 scripts/run-tests.py::frontend_tier
 scripts/run-tests.py::harness_tier
+scripts/run-tests.py::pinned_sdk
 scripts/run-tests.py::rerun_in_tree_venv
 scripts/run-tests.py::run_desktop
 scripts/run-tests.py::run_pytest
 scripts/run-tests.py::run_vitest
+scripts/run-tests.py::sdk_listed
 scripts/run-tests.py::tests_for
 scripts/run-tests.py::vitest_related
 scripts/run-tests.py::with_basetemp

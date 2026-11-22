@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -38,6 +39,12 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 USAGE = "%(prog)s [-h] [--all | --changed] [--only] [test file or pytest argument ...]"
+# `--changed` is not `lint-all.py --changed`: a fixer took it for the changed files and
+# read "passed" as theirs tested (e6929429), so the run says what it is.
+LAST_FAILED_NOTE = (
+    "run-tests: --changed reruns the tests that failed last time (every test when none "
+    "did), not the files you changed -- run it bare for those"
+)
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -337,12 +344,14 @@ def desktop_sources(paths: list[str]) -> list[str]:
     return [p.replace("\\", "/") for p in paths if p.endswith(DESKTOP_SUFFIXES)]
 
 
-def dotnet_sdk_missing() -> str:
+def dotnet_sdk_missing(root: Path = REPO_ROOT) -> str:
     """Why this host cannot build the desktop app, or "" when it can.
 
     A `dotnet` on PATH is only the host: with no SDK installed it answers every build with
     "No .NET SDKs were found", which read as a red suite on a PC that simply lacks one
     (8448cfc1). So the SDK list is asked too, and an empty one is the same missing host.
+    So is a list without the SDK `global.json` pins: every build then says "A compatible
+    .NET SDK was not found" (176a4fa4).
     """
     if not shutil.which("dotnet"):
         return "no dotnet on PATH"
@@ -354,7 +363,39 @@ def dotnet_sdk_missing() -> str:
         return f"dotnet --list-sdks did not answer ({exc})"
     if not (listed.stdout or "").strip():
         return "dotnet on PATH lists no SDK"
+    pinned = pinned_sdk(root)
+    if pinned and not sdk_listed(listed.stdout, pinned):
+        return f"dotnet on PATH lists no SDK that global.json's {pinned} rolls forward to"
     return ""
+
+
+def pinned_sdk(root: Path) -> str:
+    """The SDK version `root`'s `global.json` pins, or "" with none to read."""
+    try:
+        return str(json.loads((root / "global.json").read_text(encoding="utf-8"))["sdk"]["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def _sdk_version(text: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in text.split("-", 1)[0].split("."))
+    except ValueError:
+        return None
+
+
+def sdk_listed(listed: str, pinned: str) -> bool:
+    """Whether `dotnet --list-sdks`' `listed` holds an SDK the `latestFeature` roll-forward
+    `global.json` names accepts for `pinned`: its major.minor, at that version or later.
+    A pin this cannot read is not second-guessed."""
+    want = _sdk_version(pinned)
+    if want is None or len(want) < 3:
+        return True
+    for line in listed.splitlines():
+        have = _sdk_version(line.strip().split(" ", 1)[0]) if line.strip() else None
+        if have and have[:2] == want[:2] and have >= want:
+            return True
+    return False
 
 
 def run_desktop(root: Path) -> str:
@@ -372,7 +413,7 @@ def run_desktop(root: Path) -> str:
     if not WINDOWS:
         print("run-tests: the desktop tier needs Windows; desktop tests skipped")
         return ""
-    if missing := dotnet_sdk_missing():
+    if missing := dotnet_sdk_missing(root):
         print(f"run-tests: {missing}; desktop tests skipped (global.json names the SDK)")
         return ""
     print("run-tests: scripts/desktop.py test")
@@ -512,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q"]
     if args.changed:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
+        print(LAST_FAILED_NOTE)
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     plan = None if whole else _plan_changed(REPO_ROOT)

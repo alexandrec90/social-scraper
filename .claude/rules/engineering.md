@@ -107,7 +107,7 @@ is the half that is easy to drop**, here and for an `until` loop on a file a job
 write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent's
 notice arrives only between its calls**: left with only the wait, it runs the job in the
 foreground, then one `until` loop on the file named when Claude Code moves that call out
-at 180 s or it backgrounded it; never `sleep`.
+at 180 s or it backgrounded it, ending `|| [ $SECONDS -gt 900 ]`; never `sleep`.
 
 Diagnosing a failure and asking once are not polling; the waste begins at the *second*
 identical poll.
@@ -118,7 +118,7 @@ the table in the evidence file: `CONFLICTING` is a gate that will never run, and
 `UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
 When the gate will outlast anything useful you could do, stop: report the branch pushed and
-the gate running, and let the result arrive in a fresh session.
+the gate running.
 
 ## Scripts
 
