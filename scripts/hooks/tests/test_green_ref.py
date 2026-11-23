@@ -20,15 +20,27 @@ NEW = "2" * 40
 
 
 class FakeRun:
-    def __init__(self, statuses: dict[str, str], current: str = OLD, read_error: str = ""):
+    def __init__(
+        self,
+        statuses: dict[str, str],
+        current: str = OLD,
+        read_error: str = "",
+        runs: list[tuple[str, str]] | None = None,
+    ):
         self.calls: list[list[str]] = []
         self.statuses = statuses
         self.current = current
         self.read_error = read_error
+        self.runs = runs or []
 
     def __call__(self, argv, capture_output=False, text=False, check=False):
         self.calls.append(list(argv))
         joined = " ".join(argv)
+        if "/runs?" in joined:
+            rows = [{"head_sha": sha, "event": event} for sha, event in self.runs]
+            return SimpleNamespace(
+                stdout=json.dumps({"workflow_runs": rows}), stderr="", returncode=0
+            )
         for fragment, status in self.statuses.items():
             if f"compare/{fragment}" in joined:
                 return SimpleNamespace(
@@ -105,6 +117,60 @@ def test_a_failed_read_is_not_a_missing_branch():
 
 def test_it_refuses_to_guess():
     assert green.main(env(RUN_HEAD_SHA=""), FakeRun({})) == 1
+
+
+def catching_up() -> dict[str, str]:
+    return env(RUN_HEAD_SHA="", CATCH_UP="true")
+
+
+def test_with_no_event_to_name_the_commit_it_asks_which_one_passed():
+    """2026-11-23: a gate the merge job dispatched completed and raised no `workflow_run`,
+    twice, and `green` sat two merges behind a default branch that had passed on both."""
+    run = FakeRun(on_main(), runs=[(NEW, "workflow_dispatch"), (OLD, "push")])
+    assert green.main(catching_up(), run) == 0
+    [write] = run.writes()
+    assert "PATCH" in write and f"sha={NEW}" in write and "force=false" in write
+    asked = next(" ".join(call) for call in run.calls if "/runs?" in " ".join(call))
+    assert "workflows/pr-gate.yml/runs?branch=main&status=success" in asked
+
+
+def test_catching_up_reads_only_the_default_branchs_own_runs():
+    """A fork's branch of the same name arrives as a `pull_request`, as in the workflow."""
+    runs = [(NEW, "pull_request"), (OLD, "push"), (OLD, "workflow_dispatch")]
+    assert green.passed(REPO, "main", "pr-gate.yml", FakeRun({}, runs=runs)) == [OLD]
+    run = FakeRun({f"{OLD}...main": "ahead"}, runs=runs)
+    assert green.main(catching_up(), run) == 0
+    assert run.writes() == [], "green is already at the only commit that passed"
+
+
+def test_catching_up_passes_over_a_rerun_of_an_older_commit():
+    """The newest run can be a re-run of a commit `green` has passed; the one before it is
+    still ahead, and stopping at the first would leave `green` behind for another hour."""
+    older = "0" * 40
+    statuses = {
+        f"{older}...main": "ahead",
+        f"{OLD}...{older}": "behind",
+        f"{NEW}...main": "identical",
+        f"{OLD}...{NEW}": "ahead",
+    }
+    run = FakeRun(statuses, runs=[(older, "workflow_dispatch"), (NEW, "workflow_dispatch")])
+    assert green.catch_up(REPO, "main", "pr-gate.yml", run).startswith("green moved")
+    [write] = run.writes()
+    assert f"sha={NEW}" in write
+
+
+def test_catching_up_with_nothing_passed_moves_nothing():
+    run = FakeRun({}, runs=[])
+    assert green.main(catching_up(), run) == 0
+    assert run.writes() == []
+    assert "no gate run has passed on main" in green.catch_up(REPO, "main", "pr-gate.yml", run)
+
+
+def test_catching_up_is_asked_for_never_assumed():
+    """An empty `RUN_HEAD_SHA` alone is a broken event, not a request to go looking."""
+    run = FakeRun(on_main(), runs=[(NEW, "push")])
+    assert green.main(env(RUN_HEAD_SHA="", CATCH_UP="false"), run) == 1
+    assert run.calls == []
 
 
 def test_relation_reads_githubs_compare():
