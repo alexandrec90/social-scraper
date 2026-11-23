@@ -927,3 +927,14 @@ def test_green_follows_only_a_default_branch_run_that_passed():
     condition = job.split("if: >-", 1)[1].split("runs-on:", 1)[0]
     assert '["push", "workflow_dispatch"]' in condition
     assert "pull_request" not in condition
+
+
+def test_green_catches_up_on_the_schedule_with_no_run_to_name_the_commit():
+    """2026-11-23: the gate this file's own merge dispatched passed on two commits and
+    raised no `workflow_run` for either, so `green` stayed two merges behind for eleven
+    hours. The hourly pass moves it, and says it has no commit in hand."""
+    job = _job("green")
+    condition = job.split("if: >-", 1)[1].split("runs-on:", 1)[0]
+    assert "github.event_name == 'schedule' ||" in condition
+    assert "CATCH_UP: ${{ github.event_name == 'schedule' }}" in job
+    assert "RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}" in job

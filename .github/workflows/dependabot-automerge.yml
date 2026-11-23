@@ -39,7 +39,8 @@ name: Auto-merge
 #      judges the tidied tree. Merging does not wait for it: it has its own group.
 #   5. green fast-forwards the `green` branch whenever the gate passes on a commit of the
 #      default branch. A merge made here raises no `push`, so `merge-dependabot-prs.py`
-#      dispatches the gate itself, and that dispatch is what reaches this job.
+#      dispatches the gate itself -- and that run's completion raises no `workflow_run`
+#      either, so the hourly pass moves `green` for it.
 #
 # NB: `workflow_run` only ever runs the copy of this file on the default branch. A
 # change here is inert until it lands there — including while its own PR is open.
@@ -245,11 +246,16 @@ jobs:
     name: Advance green
     # A commit of the default branch only: `head_branch` alone would also match a fork's
     # branch of the same name, whose run arrives as a `pull_request`.
+    # The schedule is the catch-up, and not a spare: a gate the merge job dispatched
+    # completes without raising a `workflow_run` here, so for a merge made by this file
+    # the first arm never fires and `green` waited for a person's push to move at all.
+    # With no run to name the commit, `green-ref.py` asks which one passed (`CATCH_UP`).
     if: >-
-      github.event_name == 'workflow_run' &&
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == github.event.repository.default_branch &&
-      contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)
+      contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -260,5 +266,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CATCH_UP: ${{ github.event_name == 'schedule' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: python scripts/green-ref.py
