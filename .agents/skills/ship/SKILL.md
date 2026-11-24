@@ -102,8 +102,9 @@ on = "any"         # or every-machine, docker, or a hostname
 run = "<command>"  # or agent = "<prompt>", or elevated = "<verb>": exactly one of the three
 ```
 
-`when` and `on` are optional, and these are their defaults. A task that must wait for
-the clock waits in the queue rather than costing a session per retry: for a recurring
+`when` and `on` are optional, and these are their defaults. Work that needs a vendored
+change waits with `when = "adopted:<devkit commit>"`, true once this project's
+`DEVKIT_VERSION` holds that commit. A task that must wait for the clock waits in the queue rather than costing a session per retry: for a recurring
 window, `when = "outside:09:30-16:00 UTC-05:00 mon-fri"` (or `inside:`); for one moment,
 `when = "after:2026-11-12T16:05-05:00"`, ISO 8601. Both take a UTC offset, never a zone
 name. `run` executes in that
