@@ -43,6 +43,9 @@ did not need to:
   for growth the change cannot avoid, and it needs the reason written down.
 - **Is the obstacle an instruction?** If it is one written for project sessions, the
   table above answers it.
+- **Is the PR obsolete?** Its change already on the base, or a newer PR superseding it.
+  Then closing it is the fix: `gh pr close <n> --delete-branch --comment` saying why,
+  and the intent says so. A red PR is never left open for nobody.
 - **Is the fix another PR's merge?** That PR is open, in this repository or another,
   and nothing short of merging it turns yours green. Merging is not a fixer's, and it is
   none of the three blockers either: write `logs/fix-blocked.md` with a line
