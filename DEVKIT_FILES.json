@@ -1,13 +1,13 @@
 {
-  "devkit_tag": "v0.11.96",
+  "devkit_tag": "v0.11.97",
   "files": {
     ".claude/engineering-evidence.md": "c0cc4b984fe4c0f211ab848b23126a458f2a0d49c557524f64cc805a3c451827",
-    ".claude/fixer.md": "b602fe2cc51de376118d6b9252a29ebc515d0ecc48c30198e29629f104eac1d6",
+    ".claude/fixer.md": "376f02d8c1413731726c994238201294f0ea1d621a49dcf614498c0f9cf73094",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
     ".claude/rules/authoring.md": "6b2ac11c4fbfe094c1c7b4fa64406d8a5af6fef57467090848c3983dd076ea11",
-    ".claude/rules/engineering.md": "4eb98f9e0468a41d73648ff3d9843a8836e7e1141bce92024b1461b8bd7fced7",
+    ".claude/rules/engineering.md": "9016569b0a8021121401a4d6d4c56b74154ef772132cd722f5a80509760bb4d3",
     ".claude/rules/local-e2e.md": "d9a44c7778f569d79e8fb745dae22593c89c0d4f4ec3b7726d55ecf832c62bfe",
-    ".claude/rules/session-scope.md": "1ea48d639eee665670935403779d46a15f998c979ec7f663376a1fbbaf5b139d",
+    ".claude/rules/session-scope.md": "f303ad2efba64bf6b781ab43e878705b808a42278753e43e2f93319d237ec884",
     ".claude/rules/task-scripts.md": "8a91fdbf9e1a01285423a7cb06df084c19ce4fed6fda3a808f4eaf744929d9df",
     ".claude/skills/go-nuts/SKILL.md": "78bed86970494e5176b46060ef48fbcaa4fe08bc9d9ea804023f2e7145a63bf2",
     ".claude/skills/ship/SKILL.md": "40b3641a59e1eccec5d90fd5f90d1afc1adb6e5fed320f07a68d2b72713b3c60",

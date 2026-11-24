@@ -22,8 +22,9 @@ Every code change must include tests in the same commit. If you touch something
 that has no test, write the test in the same commit even if the logic didn't change.
 
 - **New unit of logic:** the happy path, the error cases, and the edge cases.
-- **Bug fix:** write the regression test first and watch it fail before you fix it. One
-  that has never failed is asserting the wrong thing.
+- **Bug fix:** write the regression test first, against the behaviour the bug breaks. One
+  that has never failed is asserting the wrong thing; CI or a fixer watches it fail, not
+  a project session.
 - **Coverage floors are ratchets:** never lower it merely to make a change pass. The
   other end of the same rule is the one that slips quietly, because raising a ceiling —
   a timeout, a retry count, a size or complexity limit, a baseline of known gaps — reads
@@ -33,9 +34,8 @@ that has no test, write the test in the same commit even if the logic didn't cha
   you found.
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
 
-Running tests is optional, and the full suite is not yours to run — see
-`.claude/rules/session-scope.md`, which says how. A bare `python` is the machine's, with
-no pytest.
+A project session runs no tests and provisions nothing to run them — see
+`.claude/rules/session-scope.md`. CI and the scheduled jobs run them.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.

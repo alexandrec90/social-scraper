@@ -24,6 +24,32 @@ last sentence stands in the way.
 | `session-scope.md`, no commit, push or PR | Still true: every fixer finishes with the `ship` skill, and the scheduled jobs commit, push and open or update the PR. What differs is that a fixer runs the targeted tests and the linter first, as its prompt says. |
 | *the change the user asked for and nothing else* | The scope is whatever turns the named failure green: another branch in its own worktree, the PR's own diff, room made in a module at its limit, a vendored file here in devkit. |
 
+## An environment that cannot run the checks is part of the fix
+
+Project sessions run no checks and never provision; a fixer does both. A fixer that
+finds the linter or the tests unable to *start* fixes that in the same session. A
+missing `.venv` or `node_modules`, or a runtime off the project's pin, for example. It
+does not mention the problem in passing, write `logs/fix-blocked.md` over it, or leave
+it: the next fixer on this machine hits the same wall.
+
+1. Run the project's provisioning command — the one its preflight names, or devkit's
+   `python "$DEVKIT_DIR/scripts/worktree.py" provision .` from the tree (it installs;
+   `--dry-run` only prints the plan).
+2. If that command cannot close the gap and is the project's own script, extend it, with
+   tests, in the same change. The pattern is `uv venv --python`: fetch the pinned
+   version into a per-user cache, not the machine's.
+3. Only a gap that needs something outside the repository is a blocker: admin rights,
+   a credential, a paid service. Write that in `logs/fix-blocked.md` and lead the report
+   with it.
+
+**Then fix why it was open** if what cut the checkout is the fix pass's own dispatcher:
+the next tree it cuts would arrive just as empty. A `claude --worktree` tree is bare by
+design, and is not this defect. "Nothing else about the PR" scopes the *change under
+review*, not this.
+
+Never "fix" it by hand-installing one binary, or by upgrading the machine's
+system-wide runtime. That fixes this turn, not the next checkout.
+
 ## Before you stop
 
 The prompt's last sentence is the only way to stop without a fix, and it names three
