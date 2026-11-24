@@ -126,3 +126,9 @@ url_env = ["DATABASE_URL"]
 
 [frontend]
 enabled = false
+
+# How a finished session's work reaches the default branch: `direct`, by the owner's
+# decision (2026-11-23). A PR from Claude Code's built-in `/ship` merges as it opens,
+# no hook gates its commit or push, and every check runs after the merge.
+[delivery]
+flow = "direct"
