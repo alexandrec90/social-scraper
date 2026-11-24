@@ -1,8 +1,8 @@
 {
-  "devkit_tag": "v0.11.95",
+  "devkit_tag": "v0.11.96",
   "files": {
     ".claude/engineering-evidence.md": "c0cc4b984fe4c0f211ab848b23126a458f2a0d49c557524f64cc805a3c451827",
-    ".claude/fixer.md": "ee785d24c9e2974c8fc8911d67c66bd1358e7534a5dc88f68ba5a6a29c9b950a",
+    ".claude/fixer.md": "b602fe2cc51de376118d6b9252a29ebc515d0ecc48c30198e29629f104eac1d6",
     ".claude/hooks/session-start.sh": "4f24e041227b901c6bd50b4ad2e2d3c10a67aed1037807b2a749625de86da98a",
     ".claude/rules/authoring.md": "6b2ac11c4fbfe094c1c7b4fa64406d8a5af6fef57467090848c3983dd076ea11",
     ".claude/rules/engineering.md": "4eb98f9e0468a41d73648ff3d9843a8836e7e1141bce92024b1461b8bd7fced7",
