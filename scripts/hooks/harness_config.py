@@ -277,9 +277,15 @@ class DeliveryConfig:
     `flow` is `gated` -- a PR the gate decides -- or `direct`, which merges first and
     runs every check after the merge. Devkit's fix pass and ship task are what read it,
     from each project's checkout; the field is here so the manifest's schema names it.
+
+    `guarded` names the paths that transact money -- order placement, a bet slip. A
+    change to one waits for its gate and then merges itself; nothing else does. A glob
+    where `*` crosses `/`, or a directory with a trailing `/`. Declared here ahead of its
+    reader, the merge queue of devkit #809: until that lands, nothing enforces it.
     """
 
     flow: str = "gated"
+    guarded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -506,7 +512,9 @@ def _delivery_from(raw: dict[str, Any], default: DeliveryConfig) -> DeliveryConf
     # An unknown word is the default: the other flow takes a gate away, so nothing but
     # its exact name selects it.
     flow = raw.get("flow")
-    return replace(default, flow=flow) if flow in ("gated", "direct") else default
+    chosen = replace(default, flow=flow) if flow in ("gated", "direct") else default
+    guarded = _as_str_tuple(raw.get("guarded"), default.guarded)
+    return replace(chosen, guarded=tuple(g.strip() for g in guarded if g.strip()))
 
 
 def _schedule_from(raw: dict[str, Any], default: ScheduleConfig) -> ScheduleConfig:

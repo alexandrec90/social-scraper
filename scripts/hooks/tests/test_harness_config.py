@@ -40,6 +40,16 @@ def test_delivery_defaults_to_the_gated_flow_and_takes_only_a_name_it_knows():
         assert cfg.from_dict(bad).delivery.flow == "gated", bad
 
 
+def test_delivery_guarded_is_a_list_of_paths_and_nothing_else():
+    """The paths that transact money; empty by default, so nothing is guarded by accident
+    and nothing reads a misspelt value as "guard everything"."""
+    assert cfg.Config().delivery.guarded == ()
+    raw = {"delivery": {"flow": "direct", "guarded": ["src/execution/", " ", "x/*.js "]}}
+    assert cfg.from_dict(raw).delivery == cfg.DeliveryConfig("direct", ("src/execution/", "x/*.js"))
+    for bad in ("src/", ["src/", 3], None):
+        assert cfg.from_dict({"delivery": {"guarded": bad}}).delivery.guarded == (), bad
+
+
 def test_defaults_are_a_minimal_neutral_harness():
     c = cfg.Config()
     assert c.env_prefix == "DEVKIT"
