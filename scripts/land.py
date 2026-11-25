@@ -7,7 +7,8 @@ in the person's own checkout, with nobody asked to merge anything. The owner's d
 
 1. Commit everything with the given message, on a fresh branch when the checkout is on
    the default one. No local hook gates it (`git_policy`'s framework is skipped).
-2. Push, and open the branch's PR, or reuse the one already open.
+2. Push, and open the branch's PR, or reuse the one already open -- unless a changed file
+   is one nothing could read (`land_check.py`), which is said and nothing is pushed.
 3. **Money.** A change to a path `[delivery] guarded` names (`.devkit.toml`) is labelled
    `automerge`: it merges itself once its gate is green, and this script does not wait.
 4. **Everything else** is labelled `merge-now`, which the merge queue
@@ -37,6 +38,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 MERGER_PATH = HERE / "merge-dependabot-prs.py"
+CHECK_PATH = HERE / "land_check.py"
 
 # How long the queue gets before this merges the PR itself. A drain is an Actions job: it
 # starts in tens of seconds, and merges one PR at a time per repository.
@@ -59,9 +61,14 @@ HELD = "held"
 def load_merger():
     """`merge-dependabot-prs.py`, which is vendored beside this file: its REST helpers and
     its reading of `[delivery] guarded`, so the two can never disagree on what is money."""
-    spec = importlib.util.spec_from_file_location("merge_dependabot_prs", MERGER_PATH)
+    return load_beside("merge_dependabot_prs", MERGER_PATH)
+
+
+def load_beside(name: str, path: Path):
+    """A script vendored beside this one, as a module."""
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {MERGER_PATH}")
+        raise ImportError(f"cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module  # before exec: see scripts/CLAUDE.md
     spec.loader.exec_module(module)
@@ -143,6 +150,18 @@ def changed_files(repo: Repo, run) -> list[str]:
     return [path for path in listed.split("\0") if path]
 
 
+def refuse_unreadable(repo: Repo, files: list[str], run) -> None:
+    """Raise `LandError` naming what `land_check` finds: a file nothing could read once
+    it landed. The commit stays; the session fixes the file and runs this again."""
+
+    def on_base(path: str) -> str | None:
+        return git(["show", f"origin/{repo.default}:{path}"], run, repo.root, check=False) or None
+
+    found = load_beside("land_check", CHECK_PATH).problems(repo.root, files, on_base)
+    if found:
+        raise LandError("fix these and run this again, nothing was pushed:\n" + "\n".join(found))
+
+
 def open_pr(repo: Repo, branch: str, title: str, body: str, merger, run) -> int:
     """The number of `branch`'s open PR, opened here when there is none."""
     owner = repo.slug.split("/", 1)[0]
@@ -199,6 +218,7 @@ def merge_it(repo: Repo, number: int, merger, run, sleep, clock) -> str:
         return QUEUED
     merger.merge_pr(repo.slug, number, run, str(pr.get("title") or ""), str(pr.get("body") or ""))
     merger.delete_branch(repo.slug, pr, run)
+    merger.cancel_gate(repo.slug, pr, run)
     return LANDED
 
 
@@ -259,6 +279,7 @@ def land(args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None
     files = changed_files(repo, run)
     if not files:
         raise LandError(f"nothing differs from origin/{repo.default}: there is nothing to land")
+    refuse_unreadable(repo, files, run)
     git(["push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}"], run, repo.root)
     number = open_pr(repo, branch, args.title, args.body, merger, run)
     # A reused PR may already be held, whatever this run was told.

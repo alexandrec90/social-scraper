@@ -267,6 +267,33 @@ def delete_branch(repo: str, pr: dict, run) -> None:
         print(f"Could not delete {ref}: {failed}")
 
 
+# What a run that has not finished reads as, in the runs API.
+UNFINISHED = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
+
+
+def cancel_gate(repo: str, pr: dict, run) -> None:
+    """Cancel the gate still running on a PR that merged without waiting for it.
+
+    The merge gets a gate of its own on the default branch, so this one is the same work
+    over again: with no branch protection nothing reads it, and at a hundred merges a day
+    it holds the runners that commit's verdict is waiting for. A failure costs those
+    minutes and is said.
+    """
+    sha = str((pr.get("head") or {}).get("sha") or "")
+    if not sha:
+        return
+    try:
+        payload = gh_json(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100", run) or {}
+        for entry in payload.get("workflow_runs") or []:
+            if entry.get("name") != GATE_WORKFLOW or entry.get("event") != "pull_request":
+                continue
+            if entry.get("status") in UNFINISHED:
+                run_id = entry.get("id")
+                gh(["api", "--method", "POST", f"repos/{repo}/actions/runs/{run_id}/cancel"], run)
+    except (GhError, ValueError) as failed:
+        print(f"Could not cancel {GATE_WORKFLOW} on {sha[:7]}: {failed}")
+
+
 def dispatch_gate(repo: str, branch: str, run) -> None:
     """Start `PR Gate` on `branch`, for the commit just merged there.
 
@@ -573,6 +600,8 @@ def take_turn(
         print(f"#{number}: {failed}", file=sys.stderr)
         return REFUSED, detail
     delete_branch(repo, detail, run)
+    if lane.queue:
+        cancel_gate(repo, detail, run)
     return MERGED, detail
 
 
