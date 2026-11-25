@@ -1377,16 +1377,19 @@ def _mirrored_project(root: Path) -> Path:
         (sh.REPO_ROOT / sh.CODEX_CONTEXT_SCRIPT).read_text(encoding="utf-8"),
     )
     for tier in (".claude/skills", sh.CODEX_SKILLS_DIR):
-        _seed(root, f"{tier}/ship/SKILL.md", "old ship")
+        _seed(root, f"{tier}/review/SKILL.md", "old review")
         _seed(root, f"{tier}/local/SKILL.md", "the project's own")
     return root
 
 
 def test_pull_re_mirrors_the_skills_it_changed(tmp_path, monkeypatch, capsys):
-    """social-scraper #26: v0.11.38 changed `ship` and added `go-nuts`, the pull copied
+    """social-scraper #26: v0.11.38 changed a vendored skill and added `go-nuts`, the pull copied
     both into `.claude/skills/`, and the vendored mirror test failed the adoption PR on
     the `.agents/skills/` copy nothing rewrote."""
-    skills = {".claude/skills/ship/SKILL.md": "new ship", ".claude/skills/go-nuts/SKILL.md": "go"}
+    skills = {
+        ".claude/skills/review/SKILL.md": "new review",
+        ".claude/skills/go-nuts/SKILL.md": "go",
+    }
     src = _repo(tmp_path / "src", tag="v0.5.3", files=skills)
     repo = _mirrored_project(tmp_path / "proj")
     _seed(repo, sh.PRECOMMIT_FILE, CONFIG)
@@ -1395,7 +1398,7 @@ def test_pull_re_mirrors_the_skills_it_changed(tmp_path, monkeypatch, capsys):
 
     assert sh.main(["--pull", "--src", str(src)]) == 0
     mirror = repo / sh.CODEX_SKILLS_DIR
-    assert (mirror / "ship/SKILL.md").read_text() == "new ship"
+    assert (mirror / "review/SKILL.md").read_text() == "new review"
     assert (mirror / "go-nuts/SKILL.md").read_text() == "go"
     assert (mirror / "local/SKILL.md").read_text() == "the project's own"
     out = capsys.readouterr().out
@@ -1411,7 +1414,7 @@ def test_a_project_with_no_mirror_gets_none(tmp_path):
     """No `.agents/skills/` is a project that never opted into Codex."""
     root = _mirrored_project(tmp_path)
     shutil.rmtree(root / sh.CODEX_SKILLS_DIR)
-    _seed(root, ".claude/skills/ship/SKILL.md", "new ship")
+    _seed(root, ".claude/skills/review/SKILL.md", "new review")
     assert sh.remirror_codex_skills(root) == []
     assert not (root / sh.CODEX_SKILLS_DIR).exists()
 
@@ -1420,9 +1423,9 @@ def test_a_mirror_without_its_script_is_left_alone(tmp_path):
     """A consumer several releases behind: its gate names the drift, not a crash here."""
     root = _mirrored_project(tmp_path)
     (root / sh.CODEX_CONTEXT_SCRIPT).unlink()
-    _seed(root, ".claude/skills/ship/SKILL.md", "new ship")
+    _seed(root, ".claude/skills/review/SKILL.md", "new review")
     assert sh.remirror_codex_skills(root) == []
-    assert (root / sh.CODEX_SKILLS_DIR / "ship/SKILL.md").read_text() == "old ship"
+    assert (root / sh.CODEX_SKILLS_DIR / "review/SKILL.md").read_text() == "old review"
 
 
 # --- the interpreter the generator is spawned with --------------------------

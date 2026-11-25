@@ -46,11 +46,10 @@ above says otherwise, do not:
   issues or public artifacts;
 - spend money, or change credentials or machine-wide settings.
 
-`.claude/rules/session-scope.md` still holds: the run does not commit, push or open a PR.
-
 ## When you finish
 
-Finish with the `/ship` skill, even when only part of the goal is done. Its body says
+Finish with the intent file `.claude/ship-intent.md` describes, even when only part of
+the goal is done: nobody is there to type `/ship`. Its body says
 what got done, what did not and why, and points at `logs/overnight.md`. List the
 decisions the user is most likely to want reversed first. Then report the same in a
 few lines and stop.
