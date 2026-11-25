@@ -21,7 +21,7 @@ last sentence stands in the way.
 | --- | --- |
 | `engineering.md`, *the harness is not your job* | In devkit, the harness is the job: fix the vendored file, the test or the template the failure names. In a consumer, a vendored file is drift-checked and cannot change there, so a failure whose fix is vendored is the *outside this repository* blocker: name the file and stop. |
 | `engineering.md`, *never silently work around a refusal* | Still true of a refusal you did not cause and cannot fix: quote the command and stop. A dead end that *is* the failure you were sent at is the work, not a reason to stop. |
-| `session-scope.md`, no commit, push or PR | Still true: every fixer finishes with the `ship` skill, and the scheduled jobs commit, push and open or update the PR. What differs is that a fixer runs the targeted tests and the linter first, as its prompt says. |
+| `session-scope.md`, no full suite | A fixer runs the targeted tests and the linter first, as its prompt says, and finishes with the intent file [`ship-intent.md`](ship-intent.md) describes: it is how the pass reads the outcome. |
 | *the change the user asked for and nothing else* | The scope is whatever turns the named failure green: another branch in its own worktree, the PR's own diff, room made in a module at its limit, a vendored file here in devkit. |
 
 ## An environment that cannot run the checks is part of the fix
@@ -83,5 +83,5 @@ did not need to:
 Whatever the outcome, report: what was red, what you changed and where (the branch or
 the PR), and what now passes. If you stopped, `logs/fix-blocked.md` is the report the
 pass reads: name the blocker there and what you tried. If the failure was already fixed
-and you changed nothing, the ship skill's intent is still the report, saying what fixed
+and you changed nothing, the ship intent is still the report, saying what fixed
 it. A final message alone is none: the pass reads an outcome only from those two files.

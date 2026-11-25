@@ -39,6 +39,18 @@ landed, so every wait in front of `main` is one the person loses track of. Its P
 conflicted one is passed over rather than waited on: its resolver's push fires the next
 drain, and the rest of the line has no reason to stop for it.
 
+**In the direct flow a PR needs no label at all** (`ships_unlabelled`). Claude Code's
+built-in `/ship` opens a PR and applies nothing, and the person decided the harness
+defers to it, so the queue merges any open PR a collaborator pushed to this repository
+unless something says wait: a draft, a `hold` label, a `Hold: yes` line in the body, a
+bot author (a Dependabot major left unlabelled for review), or a `release/` branch,
+whose PR is red by construction until its tag exists. A label still decides when one is
+there: `automerge` waits for its gate here as everywhere.
+
+**Money never skips its gate.** `[delivery] guarded` lists the paths of a project that
+transact money -- order placement, a bet slip. A PR touching one waits for a green gate
+however it is labelled, and still merges itself once it has one (`guarded_paths`).
+
 **Everything it merges it also gets checked.** A merge made with `GITHUB_TOKEN` raises no
 `push`, so without `dispatch_gate` the only run a bot merge ever got was the fix pass's
 half-hourly re-gate of whatever the tip was by then, which cannot say which merge broke it.
@@ -49,12 +61,15 @@ repository arrives in the environment and the gate's title is one every project 
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +84,14 @@ AUTOMERGE_LABEL = "automerge"
 # in this file. Spelled again in `dependabot-automerge.yml`'s `sweep` condition.
 MERGE_NOW_LABEL = "merge-now"
 MERGE_LABELS = (AUTOMERGE_LABEL, MERGE_NOW_LABEL)
+
+# What keeps an unlabelled PR in a direct project open (`held`): a label a person applies,
+# or the line a held ship intent leaves in the PR body (`ship_intent.HOLD_TRAILER`).
+HOLD_LABEL = "hold"
+HOLD_LINE = re.compile(r"hold:\s*yes", re.IGNORECASE)
+# `release.py`'s branch. Its PR fails the newest-tag test until the tag exists, and the
+# release pipeline is what merges it, after reading that the failure is that test alone.
+RELEASE_BRANCH_PREFIX = "release/"
 
 # `green-ref.py`'s branch, which a PR's head must never be deleted as.
 GREEN_BRANCH = "green"
@@ -101,6 +124,9 @@ PASSING_CONCLUSIONS = ("success", "skipped", "neutral")
 # first page and picks the rest up on the next pass -- the sweep is idempotent, so a
 # partial pass costs a delay and never a wrong decision.
 PR_SCAN_LIMIT = 100
+
+# GitHub lists at most 3000 files of a PR, a hundred a page.
+PR_FILE_PAGES = 30
 
 # GitHub computes `mergeable` lazily, on request, and forgets it whenever the base moves.
 # A gate that finishes just after another PR merged reads null, and so does the hourly
@@ -293,11 +319,96 @@ def write_outputs(env: dict[str, str], outputs: dict[str, str]) -> None:
         handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
 
 
-def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) -> tuple[bool, str]:
+def held(pr: dict) -> bool:
+    """Whether someone said this PR waits: the `hold` label, or a `Hold: yes` line."""
+    if HOLD_LABEL in labels_of(pr):
+        return True
+    body = str(pr.get("body") or "")
+    return any(HOLD_LINE.fullmatch(line.strip()) for line in body.splitlines())
+
+
+def ships_unlabelled(pr: dict) -> bool:
+    """Whether the direct flow's queue merges `pr` though it carries no merge label.
+
+    Only a PR whose head is a branch of this very repository, so pushing it took write
+    access, which is the authorization a label stands for elsewhere. Every unknown reads
+    as no: a head or base the listing did not describe is not known to be this repo's.
+    """
+    labels = labels_of(pr)
+    if any(label in labels for label in MERGE_LABELS) or held(pr) or pr.get("draft"):
+        return False
+    if not _same_repo(pr) or _by_bot(pr):
+        return False
+    head = pr.get("head") or {}
+    return not str(head.get("ref") or "").startswith(RELEASE_BRANCH_PREFIX)
+
+
+def _same_repo(pr: dict) -> bool:
+    """Whether `pr`'s head is a branch of its base's repository; unknown reads as no."""
+    head, base = pr.get("head") or {}, pr.get("base") or {}
+    head_repo = str((head.get("repo") or {}).get("full_name") or "")
+    return bool(head_repo) and head_repo == str((base.get("repo") or {}).get("full_name") or "")
+
+
+def _by_bot(pr: dict) -> bool:
+    """Whether a bot account opened `pr`."""
+    user = pr.get("user") or {}
+    return user.get("type") == "Bot" or str(user.get("login") or "").endswith("[bot]")
+
+
+def guarded_globs(settings: dict) -> tuple[str, ...]:
+    """`[delivery] guarded` in `.devkit.toml`: the paths whose change waits for its gate."""
+    delivery = settings.get("delivery")
+    globs = delivery.get("guarded") if isinstance(delivery, dict) else None
+    if not isinstance(globs, list):
+        return ()
+    return tuple(str(glob).strip() for glob in globs if str(glob).strip())
+
+
+def guarded_paths(paths: list[str], globs: tuple[str, ...]) -> list[str]:
+    """The `paths` a `glob` covers: `fnmatch`, where `*` crosses `/`, or a directory
+    named with a trailing `/`, which covers everything beneath it. Sorted, for a stable
+    message; empty when nothing is guarded."""
+    hits = {
+        path
+        for path in paths
+        for glob in globs
+        if fnmatch.fnmatchcase(path, glob) or (glob.endswith("/") and path.startswith(glob))
+    }
+    return sorted(hits)
+
+
+def pr_files(repo: str, number: int, run) -> list[str]:
+    """Every path `number` changes, both sides of a rename. A `GhError` propagates, so a
+    list nobody could read refuses the merge rather than reading as "nothing guarded"."""
+    paths: list[str] = []
+    for page in range(1, PR_FILE_PAGES + 1):
+        listing = gh_json(f"repos/{repo}/pulls/{number}/files?per_page=100&page={page}", run)
+        entries = [entry for entry in listing or [] if isinstance(entry, dict)]
+        for entry in entries:
+            paths += [
+                str(entry[key]) for key in ("filename", "previous_filename") if entry.get(key)
+            ]
+        if len(entries) < 100:
+            break
+    return paths
+
+
+def verdict(
+    repo: str,
+    pr: dict,
+    run,
+    env_sha: str = "",
+    queue: bool = False,
+    guarded: tuple[str, ...] = (),
+) -> tuple[bool, str]:
     """`(should_merge, why)` for one open PR. Every guard re-derived from scratch.
 
     `env_sha` is the commit the triggering gate run actually tested, and is passed only in
     branch mode; the sweep has no such commit and judges the head as it finds it.
+
+    `guarded` is `[delivery] guarded`: a PR touching one of those paths -- the code that
+    moves money -- never skips its gate, whatever its label says (`guarded_paths`).
 
     `merge-now` skips the gate and nothing else: a draft is still unfinished, and a merge
     nobody can compute is still a conflict. It counts only in `queue`, the job a direct
@@ -308,7 +419,8 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) ->
     # is the whole authorization -- see the module docstring. The head-SHA check below is
     # what defuses a stray human commit on the branch, not the author field.
     labels = labels_of(pr)
-    if not any(label in labels for label in MERGE_LABELS):
+    unlabelled = queue and ships_unlabelled(pr)
+    if not unlabelled and not any(label in labels for label in MERGE_LABELS):
         return False, f"not labelled {AUTOMERGE_LABEL!r} (unclassified, or held for review)"
     if pr.get("draft"):
         return False, "still a draft"
@@ -320,9 +432,16 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) ->
     if pr.get("mergeable") is not True:
         state = pr.get("mergeable_state") or "undecided"
         return False, f"not known-mergeable ({state})"
-    if queue and MERGE_NOW_LABEL in labels:
+    if not (queue and (MERGE_NOW_LABEL in labels or unlabelled)):
+        return gate_verdict(repo, pr, run, env_sha)
+    number = int(pr.get("number") or 0)
+    touched = guarded_paths(pr_files(repo, number, run), guarded) if guarded else []
+    if touched:
+        should_merge, why = gate_verdict(repo, pr, run, env_sha)
+        return should_merge, f"it touches guarded {touched[0]}, so it waits for its gate: {why}"
+    if MERGE_NOW_LABEL in labels:
         return True, f"labelled {MERGE_NOW_LABEL}: its checks run after it lands"
-    return gate_verdict(repo, pr, run, env_sha)
+    return True, "a direct project's PR, unheld: its checks run after it lands"
 
 
 def gate_verdict(repo: str, pr: dict, run, env_sha: str) -> tuple[bool, str]:
@@ -404,12 +523,30 @@ def in_line(found: list[dict], queue: bool = False) -> list[dict]:
     is the other way round. On the label only, so the per-PR read that follows is spent on
     candidates alone; `verdict` re-checks it against the fresh detail regardless."""
     labels = MERGE_LABELS if queue else (AUTOMERGE_LABEL,)
-    labelled = (pr for pr in found if any(label in labels_of(pr) for label in labels))
+    labelled = (
+        pr
+        for pr in found
+        if any(label in labels_of(pr) for label in labels) or (queue and ships_unlabelled(pr))
+    )
     return sorted(labelled, key=lambda pr: pr.get("number") or 0)
 
 
+@dataclass(frozen=True)
+class Lane:
+    """Which line a PR stands in: the direct flow's `queue`, and the project's `guarded`
+    paths, which no PR in it skips its gate for."""
+
+    queue: bool = False
+    guarded: tuple[str, ...] = ()
+
+
+# The line outside the queue. A name because ruff's B008 refuses a call in a default: ruff
+# 0.17 knows a frozen dataclass of this module, and the 0.16 that consumers pin does not.
+SWEEP = Lane()
+
+
 def take_turn(
-    repo: str, pr: dict, run, sleep, gated_sha: str, queue: bool = False
+    repo: str, pr: dict, run, sleep, gated_sha: str, lane: Lane = SWEEP
 ) -> tuple[str, dict]:
     """Judge and merge one PR: `(MERGED, REFUSED or LEFT, the PR as last read)`.
 
@@ -425,7 +562,7 @@ def take_turn(
         # on the PRs before this one.
         detail = gh_json(f"repos/{repo}/pulls/{number}", run) or pr
         detail = settled(repo, number, run, sleep, detail)
-        should_merge, why = verdict(repo, detail, run, gated_sha, queue)
+        should_merge, why = verdict(repo, detail, run, gated_sha, lane.queue, lane.guarded)
         if not should_merge:
             print(f"#{number}: leaving open -- {why}.")
             return LEFT, detail
@@ -440,7 +577,7 @@ def take_turn(
 
 
 def drain(
-    repo: str, line: list[dict], run, sleep, gated_sha: str, queue: bool
+    repo: str, line: list[dict], run, sleep, gated_sha: str, lane: Lane
 ) -> tuple[int, int, str]:
     """Give each PR its turn: `(merged, refused, the default branch that moved, or "")`.
 
@@ -451,14 +588,14 @@ def drain(
         if pr.get("number") is None:
             print("A PR arrived with no number; skipping it rather than guessing.")
             continue
-        outcome, detail = take_turn(repo, pr, run, sleep, gated_sha, queue)
+        outcome, detail = take_turn(repo, pr, run, sleep, gated_sha, lane)
         refused += outcome == REFUSED
         if outcome != MERGED:
             continue
         merged += 1
         branch = default_branch_of(detail)
         moved = branch or moved
-        if branch and not queue:
+        if branch and not lane.queue:
             dispatch_gate(repo, branch, run)
     return merged, refused, moved
 
@@ -492,7 +629,9 @@ def main(
 
     # Only branch mode has a gated commit of the PR's: a sweep's run gated the base.
     gated_sha = "" if scope.startswith("sweep") else env.get("RUN_HEAD_SHA", "").strip()
-    merged, refused, moved = drain(repo, considered, run, sleep, gated_sha, queue)
+    merged, refused, moved = drain(
+        repo, considered, run, sleep, gated_sha, Lane(queue, guarded_globs(settings))
+    )
     write_outputs(
         env,
         {

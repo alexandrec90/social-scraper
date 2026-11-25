@@ -32,7 +32,8 @@ name: Auto-merge
 #
 # Three things hang off the same file because they all start from a merge or a gate:
 #
-#   3. sweep also drains `merge-now` PRs, the direct flow's: no gate, oldest first, one
+#   3. sweep also drains a direct project's PRs, `merge-now` or unlabelled and unheld
+#      (`merge-dependabot-prs.ships_unlabelled`): no gate, oldest first, one
 #      at a time per repository, because its job-level group lets one run at once. A
 #      queued run replacing another queued run loses nothing, since each drains them all.
 #   4. tidy runs after a drain in the direct flow, then starts the gate, so the gate
@@ -171,13 +172,14 @@ jobs:
     # Everything the event-driven job dropped. It fires once per gate completion and
     # nothing re-runs it, so a single transient failure -- an API outage, a rate limit, a
     # cancelled run -- strands an already-approved bump permanently. It is also the
-    # direct flow's merger, started by a PR arriving with `merge-now`.
+    # direct flow's merger, started by any PR event from a branch of this repository:
+    # Claude Code's built-in `/ship` applies no label, so waiting for `merge-now` would
+    # leave its PRs for the hourly pass. In a gated project the drain finds nothing new.
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      contains(github.event.pull_request.labels.*.name, 'merge-now'))
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     # One drain at a time in a repository is what makes merging sequential there, and
     # projects run in parallel because a group belongs to its repository.
