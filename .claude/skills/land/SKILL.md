@@ -46,7 +46,10 @@ None of those is a job for the person, so never end with "you need to merge" or 
 this merges, run ...". Anything that must happen later goes in a task file in the same
 change: `.claude/ship-intent.md` gives the format, in its last section.
 
-If the script fails, report its error verbatim, add the same line to `logs/friction.md`,
+If it stops naming files to fix -- one that does not parse, one with a conflict marker
+left in it (`scripts/land_check.py`) -- nothing was pushed: fix them and run it again.
+
+If the script fails any other way, report its error verbatim, add the same line to `logs/friction.md`,
 and stop: do not merge, rebase or force-push around it by hand.
 
 Leave the worktree alone afterwards: the harness reaps it once the PR has merged.

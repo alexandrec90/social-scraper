@@ -195,6 +195,9 @@ MANIFEST: tuple[str, ...] = (
     ".claude/skills/land/SKILL.md",
     "scripts/land.py",
     "scripts/hooks/tests/test_land.py",
+    # What `land.py` refuses to push, loaded from beside it.
+    "scripts/land_check.py",
+    "scripts/hooks/tests/test_land_check.py",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
     # compatibility layer mirrors repository skills and, when a project opts into
     # `.codex/`, translates Claude hook wiring.

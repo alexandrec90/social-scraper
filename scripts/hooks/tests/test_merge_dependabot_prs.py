@@ -407,6 +407,8 @@ ROUTE_SCOPES = {
     "pulls/*/merge": {("contents", "write"), ("pull-requests", "write")},
     # Starting the gate on what was just merged: `GITHUB_TOKEN`'s merge raises no `push`.
     "actions/workflows/*/dispatches": {("actions", "write")},
+    # Ending the gate of a PR the queue merged without it.
+    "actions/runs/*/cancel": {("actions", "write")},
     # Deleting a merged PR's head, so a checkout on it reads as spent.
     "git/refs/heads/*": {("contents", "write")},
 }
@@ -553,7 +555,58 @@ def test_merge_now_merges_with_no_gate_at_all(tmp_path):
     run = FakeRun(world(prs=[merge_now()], gate=""))
     assert in_the_queue(run, tmp_path) == 0
     assert merged_numbers(run) == [15]
-    assert not any("actions/runs" in arg for call in run.calls for arg in call), run.calls
+    assert not gate_read_before_the_merge(run), run.calls
+
+
+def gate_read_before_the_merge(run: FakeRun) -> bool:
+    """Whether any run was asked after while the PR was still open. After, the queue
+    looks for the PR's own gate, to cancel it."""
+    at = next(i for i, call in enumerate(run.calls) if "PUT" in call)
+    return any("actions/runs" in arg for call in run.calls[:at] for arg in call)
+
+
+def gate_runs(*entries: dict) -> dict:
+    return {"workflow_runs": [{"name": "PR Gate", "event": "pull_request", **e} for e in entries]}
+
+
+def cancelled(run: FakeRun) -> list[str]:
+    paths = [arg for call in run.calls for arg in call if arg.endswith("/cancel")]
+    return [path.split("/")[-2] for path in paths]
+
+
+def test_the_gate_of_a_pr_that_did_not_wait_for_it_is_cancelled(tmp_path):
+    """The merge is gated on the default branch, so the PR's own run is the same work
+    twice, on a runner the one verdict that counts is waiting for."""
+    routes = world(prs=[merge_now()])
+    routes["actions/runs"] = gate_runs(
+        {"id": 1, "status": "in_progress"},
+        {"id": 2, "status": "queued"},
+        {"id": 3, "status": "completed"},
+        {"id": 4, "status": "in_progress", "event": "workflow_dispatch"},
+        {"id": 5, "status": "in_progress", "name": "Auto-merge"},
+    )
+    run = FakeRun(routes)
+    assert in_the_queue(run, tmp_path) == 0
+    assert cancelled(run) == ["1", "2"]
+
+
+def test_outside_the_queue_no_gate_is_cancelled():
+    routes = world()
+    routes["actions/runs"]["workflow_runs"].append(
+        {"name": "PR Gate", "event": "pull_request", "id": 9, "status": "in_progress"}
+    )
+    run = FakeRun(routes)
+    assert merger.main(env(), run) == 0
+    assert merged_numbers(run) == [15] and cancelled(run) == []
+
+
+def test_a_gate_that_cannot_be_cancelled_costs_the_merge_nothing(tmp_path, capsys):
+    routes = world(prs=[merge_now()])
+    run = FakeRun(routes, fail={"actions/runs?": (1, "HTTP 503")})
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+    assert "Could not cancel PR Gate" in capsys.readouterr().out
+    merger.cancel_gate(REPO, {}, run)  # a PR with no head: nothing to look for
 
 
 def test_merge_now_outside_the_queue_job_merges_nothing(tmp_path):
@@ -627,7 +680,7 @@ def test_an_unlabelled_pr_merges_with_no_gate_in_a_direct_project(tmp_path):
     run = FakeRun(world(prs=[shipped()], gate=""))
     assert in_the_queue(run, tmp_path) == 0
     assert merged_numbers(run) == [15]
-    assert not any("actions/runs" in arg for call in run.calls for arg in call), run.calls
+    assert not gate_read_before_the_merge(run), run.calls
 
 
 def test_an_unlabelled_pr_waits_in_a_gated_project(tmp_path):

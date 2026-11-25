@@ -164,6 +164,35 @@ def test_a_change_merges_and_reaches_the_persons_checkout(world):
     assert sh(["git", "log", "-1", "--format=%s"], world.checkout) == "Add a greeting"
 
 
+def test_a_file_nothing_could_read_is_said_and_never_pushed(world):
+    """The session that wrote it is still here: it fixes the file and lands again."""
+    broken = world.tree / "greeting.py"
+    broken.write_text("def greet(:\n", encoding="utf-8")
+    github = FakeGitHub(world)
+    with pytest.raises(land.LandError, match=r"greeting\.py: does not parse"):
+        run_land(world, github)
+    assert github.prs == {}, "no PR"
+    broken.write_text("def greet(): ...\n", encoding="utf-8")
+    assert run_land(world, github) == land.LANDED
+
+
+def test_a_file_broken_on_the_base_already_does_not_stop_a_change(world):
+    bad = world.checkout / "fixture.json"
+    bad.write_text("{,}", encoding="utf-8")
+    sh(["git", "add", "-A"], world.checkout)
+    sh(["git", "commit", "--quiet", "-m", "a fixture"], world.checkout)
+    sh(["git", "push", "--quiet", "origin", "main"], world.checkout)
+    sh(["git", "merge", "--quiet", "--ff-only", "main"], world.tree)
+    (world.tree / "fixture.json").write_text("{,,}", encoding="utf-8")
+    assert run_land(world, FakeGitHub(world)) == land.LANDED
+
+
+def test_load_beside_and_refuse_unreadable_read_the_vendored_check(world):
+    assert land.load_beside("land_check", land.CHECK_PATH).problem_in("a.json", "{,}")
+    repo = land.read_repo(world.tree, land.utf8_run)
+    land.refuse_unreadable(repo, ["README.md"], land.utf8_run)
+
+
 def test_the_pr_carries_the_why(world):
     (world.tree / "a.txt").write_text("a\n", encoding="utf-8")
     github = FakeGitHub(world)

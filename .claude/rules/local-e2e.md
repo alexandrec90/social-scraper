@@ -17,9 +17,9 @@ That means a test that needs the live workspace file, a GUI, the Docker stack, a
 or a credential. Before this tier such tests ran only when a person happened to run the
 suite on the default branch.
 
-**Reach them from `scripts/e2e.py`.** devkit's nightly `devkit-local-e2e` job runs that
+**Reach them from `scripts/e2e.py`.** devkit's `devkit-local-e2e` job runs that
 script in this checkout, fast-forwarded to origin's default-branch tip, once the PC has
-been idle. A red run reaches the fix pass as this project's red default branch, and its
+been idle for a while. A red run reaches the fix pass as this project's red default branch, and its
 fixer is told to run the script again.
 
 | The contract | |
@@ -42,7 +42,7 @@ the tier is a failure: the checkout is the one the tests were written for, so no
 has a reason left to skip.
 
 **Every project owes the script.** One whose default branch on origin has none is red
-the same night, as a missing tier, and the fix pass sends its fixer to write one. It is
+at the next run, as a missing tier, and the fix pass sends its fixer to write one. It is
 never a skip: a skip reads as green, which is the state this tier exists to end.
 
 By hand: `python scripts/e2e.py` here. From devkit's checkout,
