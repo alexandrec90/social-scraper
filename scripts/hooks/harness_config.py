@@ -280,8 +280,8 @@ class DeliveryConfig:
 
     `guarded` names the paths that transact money -- order placement, a bet slip. A
     change to one waits for its gate and then merges itself; nothing else does. A glob
-    where `*` crosses `/`, or a directory with a trailing `/`. Declared here ahead of its
-    reader, the merge queue of devkit #809: until that lands, nothing enforces it.
+    where `*` crosses `/`, or a directory with a trailing `/`. Read by
+    `merge-dependabot-prs.guarded_paths`, which `land.py` shares.
     """
 
     flow: str = "gated"
