@@ -86,8 +86,19 @@ jobs:
           path: logs/lint-errors.log
 
   test:
-    name: Tests
+    name: Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    strategy:
+      # One shard's red says nothing about another's, and all belong in one verdict.
+      fail-fast: false
+      matrix:
+        # Serially the suite took seven minutes, and it is not evenly spread. Measured
+        # 2026-11-25: tests/test_runner.py ~140 s, tests/test_cli.py ~70 s, every other
+        # file ~65 s together. So each of the two gets a shard of its own and `rest` takes
+        # every other file -- a new test file lands there with no edit here. A round-robin
+        # by NR put both heavy files in one shard. tests/test_pr_gate_shards.py fails if
+        # a file runs in no shard or two, or a named shard's file is gone.
+        shard: [cli, runner, rest]
     services:
       db:
         # The same official image, from Google's mirror: a runner pulls anonymously on
@@ -121,18 +132,40 @@ jobs:
           # Explicit at every call site: the action is copied from devkit verbatim
           # rather than rendered, so its own default cannot know this project's version.
           python-version: "3.12"
-      - name: Application suite
-        run: uv run python scripts/run-tests.py
-      - name: Harness hook tests
-        # Separate from the application suite: pytest's testpaths excludes these,
-        # and they are stdlib-only by contract.
-        run: uv run python -m pytest scripts/hooks/tests/ -q
+      - name: Application suite (this shard's files)
+        # `--only`: the named files and nothing else, so the contract tests run once,
+        # in whichever shard holds them, rather than in all three.
+        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_${{ matrix.shard }}.py" || "${{ matrix.shard }}" == "rest" && $0 != "tests/test_cli.py" && $0 != "tests/test_runner.py"' | xargs uv run python scripts/run-tests.py --only
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-failures
+          name: test-failures-${{ matrix.shard }}
           path: logs/test-failures.log
+
+  hook-tests:
+    name: Harness hook tests
+    runs-on: ubuntu-latest
+    # Its own job, with no database: pytest's testpaths excludes these, and they are
+    # stdlib-only by contract.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "3.12"
+      - name: Harness hook tests
+        # A junit file, because this step never reaches `run-tests.py`, which writes
+        # `logs/test-failures.log`: without it a red hook suite uploads nothing a fixer
+        # can read.
+        run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-failures-hooks
+          path: logs/junit-hooks.xml
 
   devkit-drift:
     name: Vendored harness drift
