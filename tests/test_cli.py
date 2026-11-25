@@ -42,6 +42,7 @@ from social_scraper.hackernews import dumps as hn_dumps
 from social_scraper.reddit import dumps
 from social_scraper.stocktwits import dumps as stocktwits_dumps
 from social_scraper.x import tweet_dumps
+from social_scraper.db import repository
 from social_scraper.db.repository import make_engine
 from social_scraper.db.throttle_store import DbThrottleStore
 from social_scraper.models import PLATFORMS, REDDIT, X, AuthorInfo, Post
@@ -570,8 +571,13 @@ def test_an_ok_scrape_names_a_deferred_export(tmp_path):
     assert cli.outcome_line(done, tmp_path).startswith("ok -- details in")
 
 
-def test_scrape_with_the_database_down_raises_and_overwrites_the_report(settings, tmp_path):
+def test_scrape_with_the_database_down_raises_and_overwrites_the_report(
+    settings, tmp_path, monkeypatch
+):
     # Raised, not returned: the process exits 1 with the traceback, as any uncaught error.
+    # No patience: `make_engine` otherwise retries for `CONNECT_PATIENCE` real seconds
+    # against a file that can never appear -- 180 s, which was 44% of the whole suite.
+    monkeypatch.setattr(repository, "CONNECT_PATIENCE", 0)
     write_report(RunReport("earlier"), settings.logs_dir)
     unreachable = sqlite_engine_at(tmp_path / "no-such-dir" / "db.sqlite")
     with pytest.raises(OperationalError):
