@@ -1,0 +1,18 @@
+# devkit's gate was split the same way on 2026-11-25; this one is the fleet's slowest after it.
+agent = """
+Split this project's PR gate so its verdict comes in three to four minutes rather than
+eight. In .github/workflows/pr-gate.yml the `test` job runs the application suite (about
+420 s) and the harness hook tests (about 60 s) one after the other. Run the application
+suite as a matrix of three shards, each with its own Postgres service, and the hook tests
+as a job of their own with no database.
+
+devkit's .github/workflows/pr-gate.yml has the shape: `printf '%s\\n' tests/test_*.py | awk`
+picks a shard's files and hands them to `scripts/run-tests.py --only`. Check first whether
+tests here sit in subfolders or share state between files, and balance the shards by how
+long files take if one dominates. Every test file must run in exactly one shard, with a
+test that fails if one is missed. Artifact names must differ per shard
+(`test-failures-<shard>`). Keep the workflow's title and every other job as they are, and
+update any test that reads the workflow.
+
+Finished means the change is shipped as .claude/ship-intent.md says.
+"""
