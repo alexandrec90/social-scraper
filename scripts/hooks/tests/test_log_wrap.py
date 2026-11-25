@@ -1023,6 +1023,17 @@ def test_a_failure_on_a_machine_cut_off_is_kept_off_the_backlog(tmp_path, monkey
     assert fields["event"] == lw.OFFLINE_EVENT, "kept, under its own event"
 
 
+def test_a_run_the_shutdown_ended_is_kept_off_the_backlog(tmp_path, monkeypatch):
+    """29db2b4e, d7745ac7, 3016ebec: one power-off filed three running jobs for triage,
+    each exiting 1073807364 with no output."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    for code in (1073807364, 0xC000013A):
+        lw.record_failure(lw.Failure("Reap", ["python", "x.py"], code, "logs/x.log"), tmp_path)
+    ended, closed = _fields(ledger)
+    assert ended["event"] == lw.ENDED_EVENT, "kept, under its own event"
+    assert closed["event"] == lw.FAILED_EVENT, "a closed console can be the job's own doing"
+
+
 def test_a_lookup_failing_while_github_resolves_is_still_filed(tmp_path, monkeypatch):
     """A bad host, or a container's own DNS: the machine has a network, so it is a defect."""
     ledger = _ledger(tmp_path, monkeypatch)

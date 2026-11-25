@@ -47,6 +47,7 @@ but watching is not fixing. Failures share causes, so every routine one goes to 
 place they are aggregated, triaged and fixed together. **Bar one a machine without DNS
 caused** (`harness_events.cut_off`): it is kept as `OFFLINE_EVENT`, off the backlog,
 since no session can act on it and the job's next run on a network files the rest.
+**And bar one a sign-out or shutdown ended** (`SESSION_ENDED`), kept as `ENDED_EVENT`.
 
 **And the event needs evidence still on disk when it is triaged**, which is the half
 that was missing. The ledger entry survived; the file it pointed at did not. `Scheduled:
@@ -97,6 +98,13 @@ FAILED_EVENT = "scheduled-job-failed"
 # 2026-11-12 sent fixers that died on the same outage. The job's next run on a network
 # files whatever else is wrong with it.
 OFFLINE_EVENT = "scheduled-job-offline"
+# The same again, for a run Windows ended because the session was: `DBG_TERMINATE_PROCESS`,
+# what a console process exits with at a sign-out or a shutdown, and no code a job picks.
+# A power-off on 2026-11-24 filed all three jobs then running, with no output to read
+# (29db2b4e, d7745ac7, 3016ebec). `STATUS_CONTROL_C_EXIT` is not here: a job can be ended
+# that way by its own child or a closed console, so it stays a failure.
+ENDED_EVENT = "scheduled-job-ended"
+SESSION_ENDED = 0x40010004
 
 # Suffix of the kept copy an unattended failure leaves beside its per-run artifact, and
 # the path the ledger event names. See the docstring: the event outlives the artifact,
@@ -816,8 +824,13 @@ def record_failure(failure: Failure, root: Path | None = None) -> None:
         return
     # An older `scripts/hooks/` tier has no `cut_off`: it files as before.
     offline = getattr(harness_events, "cut_off", None)
+    event = FAILED_EVENT
+    if failure.code == SESSION_ENDED:
+        event = ENDED_EVENT
+    elif offline is not None and offline(failure.output):
+        event = OFFLINE_EVENT
     harness_events.record(
-        OFFLINE_EVENT if offline is not None and offline(failure.output) else FAILED_EVENT,
+        event,
         (
             ("project", harness_events.project_name(root or Path.cwd())),
             ("command", " ".join(failure.command)),

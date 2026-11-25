@@ -180,13 +180,21 @@ MANIFEST: tuple[str, ...] = (
     # where every `.md` is loaded into every session -- which neither may be.
     ".claude/engineering-evidence.md",
     ".claude/fixer.md",
-    # The one portable task workflow. Its script detects the remote default branch
-    # and owns the mechanical checks; the skill supplies the semantic commit/PR text.
-    ".claude/skills/ship/SKILL.md",
-    # The unattended run: decide instead of asking, log each call, finish through `/ship`.
+    # How a session nobody can type `/ship` for finishes: the intent file, and the task
+    # queue every session leaves later work in. `/ship` itself is Claude Code's built-in,
+    # by the owner's decision (2026-11-23), so no skill here may take its name.
+    ".claude/ship-intent.md",
+    # The unattended run: decide instead of asking, log each call, finish with an intent.
     # Vendored rather than per-user because the operator works across machines, and a
     # skill under `~/.claude/` is one more copy per machine that nothing drift-checks.
     ".claude/skills/go-nuts/SKILL.md",
+    # How a person ships: `/land` commits, opens the PR and gets it merged and synced,
+    # money paths (`[delivery] guarded`) after their gate. Named so it never shadows the
+    # built-in `/ship`, which never merges. The script loads `merge-dependabot-prs.py`
+    # beside it, so the two read `guarded` alike.
+    ".claude/skills/land/SKILL.md",
+    "scripts/land.py",
+    "scripts/hooks/tests/test_land.py",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
     # compatibility layer mirrors repository skills and, when a project opts into
     # `.codex/`, translates Claude hook wiring.
@@ -301,6 +309,8 @@ _RETIRED_CLAUDE_PATHS: tuple[str, ...] = (
     ".claude/skills/refactor/SKILL.md",
     ".claude/skills/retro/SKILL.md",
     ".claude/skills/retro/extract.py",
+    # Shadowed Claude Code's built-in `/ship`; replaced by `.claude/ship-intent.md`.
+    ".claude/skills/ship/SKILL.md",
     ".claude/skills/task/SKILL.md",
     ".claude/skills/test-skill/SKILL.md",
     ".claude/skills/test-skill/write-artifacts.py",
