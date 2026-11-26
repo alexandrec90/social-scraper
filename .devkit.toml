@@ -132,6 +132,3 @@ enabled = false
 # no hook gates its commit or push, and every check runs after the merge.
 [delivery]
 flow = "direct"
-# The end-to-end tier runs in CI (the PR Gate's E2E job, `scripts/e2e.py --ci`): no test
-# needs this PC, so devkit's local heavy tier records the project as "runs in CI".
-e2e = "ci"
