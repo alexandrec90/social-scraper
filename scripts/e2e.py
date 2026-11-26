@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""social-scraper's local end-to-end tier: the tests that need this workstation.
+"""social-scraper's end-to-end tier, in its two halves.
 
-The contract is `.claude/rules/local-e2e.md`'s, which devkit's nightly
-`devkit-local-e2e` job reads: exit 0 green, anything else red, each failing test printed
-as pytest's `FAILED <id>` line, run from the checkout root. What it runs is every test
-marked `local` -- a real Chrome against a live platform, end to end into the lake --
-which `pyproject.toml`'s `addopts` deselects from every other run, CI's included. That
-deselection, not a skip, is what keeps the tier off a hosted runner.
+The contract is `.claude/rules/local-e2e.md`'s, which devkit's `devkit-local-e2e` job
+reads: exit 0 green, anything else red, each failing test printed as pytest's
+`FAILED <id>` line, run from the checkout root.
+
+- **No flag** runs every test marked `local`: what needs this workstation itself.
+- **`--ci`** runs every test marked `ci_e2e` instead: end to end too, but needing only
+  what a hosted `ubuntu-latest` runner has -- a Google Chrome, the public network. The
+  `PR Gate` workflow's `E2E` job runs it on each default-branch commit; that is where a
+  real Chrome scraping StockTwits into the lake (`tests/test_local_scrape.py`) runs.
+
+`pyproject.toml`'s `addopts` deselects both markers from every other run, so the ordinary
+suite stays fast. That deselection, not a skip, is what keeps a tier out of it.
 
 **A run that executed nothing is red**: a green from zero tests is a skip reported as a
 pass. **Under the scheduler (`DEVKIT_E2E` set) a skip is a failure**, printed as a
 `FAILED` line naming its reason: the checkout is the one the tests were written for, so
 nothing has a reason left to skip. By hand, skips are listed and do not fail the run.
 
-Test ids on the command line run those alone, still inside the tier.
+Test ids on the command line run those alone, still inside the tier (`--ci` may come
+anywhere among them).
 
 pytest's own output is captured and re-printed, so the pass reading this process's
 stdout sees pytest's `FAILED` lines even where the child would otherwise have written
@@ -40,6 +47,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENV_FLAG = "DEVKIT_E2E"
 MARKER = "local"
+CI_FLAG = "--ci"
+CI_MARKER = "ci_e2e"
 JUNIT = Path("logs") / "e2e-junit.xml"
 
 # pytest's junit report is its own flat shape: a `<testcase .../>` or a `<testcase ...>`
@@ -100,7 +109,9 @@ def cases(report: Path) -> list[Case]:
     return found
 
 
-def verdict(code: int, found: list[Case], strict: bool) -> tuple[int, list[str]]:
+def verdict(
+    code: int, found: list[Case], strict: bool, marker: str = MARKER
+) -> tuple[int, list[str]]:
     """`(exit code, lines to print)` for pytest's `code` and the cases it reported.
 
     pytest already printed its own `FAILED` lines; these add the skips and the empty run.
@@ -112,7 +123,7 @@ def verdict(code: int, found: list[Case], strict: bool) -> tuple[int, list[str]]
         reason = case.message.strip().splitlines()[0] if case.message.strip() else "no reason"
         lines.append(f"{'FAILED' if strict else 'SKIPPED'} {case.ident} - skipped: {reason}")
     if not ran:
-        lines.append(f"e2e: no {MARKER} test executed, which is not a pass")
+        lines.append(f"e2e: no {marker} test executed, which is not a pass")
         return (code or 1), lines
     if strict and skips:
         lines.append(f"e2e: {len(skips)} test(s) skipped under the scheduled run")
@@ -128,14 +139,22 @@ def venv_interpreter(root: Path, fallback: str) -> str:
     return fallback
 
 
-def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[str]:
+def split_args(argv: Sequence[str]) -> tuple[str, list[str]]:
+    """`(marker, named test ids)`: `--ci` anywhere picks the CI half, the rest are ids."""
+    named = [arg for arg in argv if arg != CI_FLAG]
+    return (CI_MARKER if len(named) < len(argv) else MARKER), named
+
+
+def pytest_argv(
+    python: str, report: Path, named: Sequence[str] = (), marker: str = MARKER
+) -> list[str]:
     return [
         python,
         "-m",
         "pytest",
         *(named or ["tests"]),
         "-m",
-        MARKER,
+        marker,
         "-rfE",
         "-p",
         "no:cacheprovider",
@@ -144,7 +163,7 @@ def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[st
 
 
 def main(argv: list[str] | None = None) -> int:
-    named = sys.argv[1:] if argv is None else argv
+    marker, named = split_args(sys.argv[1:] if argv is None else argv)
     report = REPO_ROOT / JUNIT
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)
@@ -152,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     # No console window for the child on Windows: the scheduler runs this unattended.
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     done = subprocess.run(
-        pytest_argv(python, report, named),
+        pytest_argv(python, report, named, marker),
         cwd=REPO_ROOT,
         capture_output=True,
         encoding="utf-8",
@@ -162,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(done.stdout or "", end="", flush=True)
     print(done.stderr or "", end="", file=sys.stderr, flush=True)
-    code, lines = verdict(done.returncode, cases(report), scheduled())
+    code, lines = verdict(done.returncode, cases(report), scheduled(), marker)
     for line in lines:
         print(line, flush=True)
     print(f"e2e: {'green' if code == 0 else 'red'} -- details in {JUNIT.as_posix()}", flush=True)

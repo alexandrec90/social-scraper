@@ -150,19 +150,45 @@ def test_pytest_argv_selects_the_tier(tmp_path: Path) -> None:
     assert "tests" not in named
 
 
-def test_the_default_run_deselects_the_tier() -> None:
-    """`addopts` keeps `local` out of every run that does not ask for it, CI's included."""
+def test_pytest_argv_selects_the_ci_half_when_told(tmp_path: Path) -> None:
+    argv = e2e.pytest_argv("py", tmp_path / "r.xml", marker="ci_e2e")
+    assert argv[argv.index("-m", 3) + 1] == "ci_e2e"
+
+
+def test_split_args_reads_the_ci_flag_anywhere() -> None:
+    assert e2e.split_args([]) == ("local", [])
+    assert e2e.split_args(["--ci"]) == ("ci_e2e", [])
+    assert e2e.split_args(["tests/test_x.py", "--ci"]) == ("ci_e2e", ["tests/test_x.py"])
+    assert e2e.split_args(["tests/test_x.py"]) == ("local", ["tests/test_x.py"])
+
+
+def test_verdict_names_the_half_that_ran_nothing() -> None:
+    code, lines = e2e.verdict(5, [], strict=True, marker="ci_e2e")
+    assert code == 5
+    assert lines == ["e2e: no ci_e2e test executed, which is not a pass"]
+
+
+def test_the_default_run_deselects_both_halves() -> None:
+    """`addopts` keeps both tiers out of every run that does not ask for one."""
     options = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     pytest_options = options["tool"]["pytest"]["ini_options"]
-    assert "-m 'not local'" in pytest_options["addopts"]
+    assert "-m 'not local and not ci_e2e'" in pytest_options["addopts"]
     assert any(m.startswith("local:") for m in pytest_options["markers"])
+    assert any(m.startswith("ci_e2e:") for m in pytest_options["markers"])
 
 
-def test_the_tier_holds_a_real_end_to_end_test() -> None:
-    """At least one `local` test exists for the script to run (an empty tier is red)."""
-    mark = "@pytest.mark." + "local"  # split, so this file does not count itself
+def test_the_ci_half_holds_a_real_end_to_end_test() -> None:
+    """At least one `ci_e2e` test exists for `--ci` to run (an empty tier is red)."""
+    mark = "@pytest.mark." + "ci_e2e"  # split, so this file does not count itself
     tests = (p for p in (ROOT / "tests").glob("test_*.py") if p.name != Path(__file__).name)
     assert [p for p in tests if mark in p.read_text(encoding="utf-8")]
+
+
+def test_the_gate_runs_the_ci_half() -> None:
+    """The `PR Gate` `E2E` job is what runs `--ci`; with no job the tier is never run."""
+    gate = (ROOT / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    assert "run: uv run python scripts/e2e.py --ci" in gate
+    assert "name: E2E" in gate
 
 
 def fake_run(report_text: str | None, code: int, seen: list[list[str]]):
@@ -201,3 +227,16 @@ def test_main_with_no_report_is_red(
     monkeypatch.setattr(e2e.subprocess, "run", fake_run(None, 0, []))
     assert e2e.main([]) == 1
     assert "no local test executed" in capsys.readouterr().out
+
+
+def test_main_with_the_ci_flag_runs_the_ci_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("DEVKIT_E2E", "1")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(e2e.subprocess, "run", fake_run(None, 5, seen))
+    assert e2e.main(["--ci"]) == 5
+    assert seen[0][3] == "tests"
+    assert seen[0][seen[0].index("-m", 3) + 1] == "ci_e2e"
+    assert "no ci_e2e test executed" in capsys.readouterr().out

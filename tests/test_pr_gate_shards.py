@@ -10,6 +10,10 @@ The evaluator accepts only the small grammar the workflow uses -- `||` of `&&` o
 `NR % k == n`, `$0 == "path"`, `$0 != "path"` and `"a" == "b"` (the shard name compared
 with a literal, once `${{ matrix.shard }}` is substituted) -- and refuses anything else,
 so a program reshaped beyond it fails here rather than being half-understood.
+
+The harness hook tests (`scripts/hooks/tests/`, outside pytest's `testpaths`) are the one
+suite no glob reaches; they ride in the `rest` shard as a step of their own, and
+`test_the_hook_tests_run_in_exactly_one_shard` holds them there.
 """
 
 import re
@@ -157,8 +161,33 @@ def test_a_missed_file_shows_up_with_no_shard():
 # --- the real gate ------------------------------------------------------------------
 
 
-def test_the_gate_runs_three_shards():
-    assert len(shard_values(GATE.read_text(encoding="utf-8"))) == 3
+def test_the_gate_runs_two_shards():
+    # Two, beside `Lint`: three jobs at once at most, since `E2E` waits for `Lint`.
+    assert shard_values(GATE.read_text(encoding="utf-8")) == ["runner", "rest"]
+
+
+def _step(text: str, name: str) -> str:
+    """The workflow text of the step called `name`, up to the next step."""
+    match = re.search(rf"^( *)- name: {re.escape(name)}\n(?P<body>(?:\1  .*\n)*)", text, re.M)
+    assert match is not None, f"no step named {name!r} in the gate"
+    return match.group("body")
+
+
+def test_the_hook_tests_run_in_exactly_one_shard():
+    """`scripts/hooks/tests/` is outside `testpaths`, so only its own step runs it: once,
+    in `rest`, and whatever the application suite in that shard said."""
+    text = GATE.read_text(encoding="utf-8")
+    assert text.count("pytest scripts/hooks/tests/") == 1
+    body = _step(text, "Harness hook tests")
+    assert "run: uv run python -m pytest scripts/hooks/tests/" in body
+    assert "matrix.shard == 'rest'" in body
+    assert "!cancelled()" in body
+    assert "rest" in shard_values(text)
+
+
+def test_the_step_reader_stops_at_the_next_step():
+    text = "      - name: A\n        run: a\n      - name: B\n        run: b\n"
+    assert _step(text, "A") == "        run: a\n"
 
 
 def test_every_test_file_runs_in_exactly_one_shard():
