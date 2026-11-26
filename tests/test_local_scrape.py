@@ -1,8 +1,10 @@
-"""The local end-to-end tier: one real `social-scraper scrape`, start to finish.
+"""The end-to-end tier: one real `social-scraper scrape`, start to finish.
 
-The scrape is marked `local`, which `addopts` deselects everywhere but `scripts/e2e.py`
-(`.claude/rules/local-e2e.md`): it needs this workstation's Google Chrome and the live
-StockTwits API, neither of which a hosted runner has. Every other test drives the
+The scrape is marked `ci_e2e`, which `addopts` deselects everywhere but
+`scripts/e2e.py --ci`, the `PR Gate` workflow's `E2E` job on `ubuntu-latest`. It needs a
+Google Chrome (the runner image ships one) and the live StockTwits API, and nothing of
+this workstation's: the profile is a fresh one under `tmp_path`, StockTwits wants no
+account, and so no login, cookie or secret is involved. Every other test drives the
 scrapers through `conftest.FakeBrowser`; this one is what proves the parts still meet --
 the CLI, `Settings` from the environment, a headless Chrome launched by Playwright,
 StockTwits answering it, the parser, the database and the export to the lake, read back
@@ -65,7 +67,7 @@ def scrape_env(root: Path, base: dict[str, str]) -> dict[str, str]:
             "SYMBOL_EXTRA_FILES": "",
             "BROWSER_CHANNEL": "chrome",
             "BROWSER_HEADLESS": "true",
-            # The scheduler runs this at night; StockTwits' default hours would skip it.
+            # CI runs this at any hour; StockTwits' default hours would skip it.
             "STOCKTWITS_ACTIVE_HOURS": "",
             "STOCKTWITS_SYMBOLS_PER_CYCLE": "1",
             "STOCKTWITS_MIN_DELAY_S": "1",
@@ -98,7 +100,7 @@ def describe(done: subprocess.CompletedProcess[str], report: Path) -> str:
     )
 
 
-@pytest.mark.local
+@pytest.mark.ci_e2e
 def test_stocktwits_scrape_reaches_the_lake(tmp_path: Path) -> None:
     done = subprocess.run(
         [sys.executable, "-m", "social_scraper", "scrape", "stocktwits", "--now"],

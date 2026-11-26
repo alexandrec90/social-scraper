@@ -73,9 +73,14 @@ here is a fork that will disagree with it the first time either is edited.
   throwaway schema. Postgres is where dialect bugs surface — psycopg reports
   `rowcount = -1` on `ON CONFLICT DO NOTHING`, so "was it inserted" is `RETURNING`.
   A test with no DB-specific behaviour takes the plain SQLite `engine` fixture.
-- **No real browser in tests.** Scrapers take a `fetch.Browser`; `conftest.FakeBrowser`
-  serves canned `PageResult`s by URL (exact, then longest prefix). `PlaywrightBrowser`
-  is tested against a fake page object in `test_browser.py`.
+- **No real browser in tests**, bar the end-to-end tier. Scrapers take a `fetch.Browser`;
+  `conftest.FakeBrowser` serves canned `PageResult`s by URL (exact, then longest prefix).
+  `PlaywrightBrowser` is tested against a fake page object in `test_browser.py`.
+- **The end-to-end tier runs in CI.** A test marked `ci_e2e` (a real Chrome scraping
+  StockTwits into the lake, `tests/test_local_scrape.py`) runs only in the `PR Gate`'s `E2E`
+  job via `scripts/e2e.py --ci`, on default-branch commits. `local` is for what needs
+  this PC's signed-in profiles or accounts; none does today, so `.devkit.toml` says
+  `e2e = "ci"`. Both markers are deselected by `addopts`.
 - **Payload builders in `conftest.py` mirror shapes captured live** (Reddit listings;
   X classic `legacy` and 2026 `details`/`counts` tweets) with invented content. Never
   commit captured payloads: they carry real usernames.

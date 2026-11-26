@@ -53,12 +53,14 @@ where = ["."]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —
 # those are the vendored harness's own stdlib-only tests and run separately.
 testpaths = ["tests/"]
-# `-m "not local"` keeps the local end-to-end tier out of every run but its own:
-# `scripts/e2e.py` passes `-m local`, and the later `-m` wins (.claude/rules/local-e2e.md).
-addopts = "-p devkit_temproot -m 'not local'"
+# `-m "not local and not ci_e2e"` keeps both end-to-end halves out of every run but their
+# own: `scripts/e2e.py` passes `-m local` and `scripts/e2e.py --ci` passes `-m ci_e2e`, and
+# the later `-m` wins (.claude/rules/local-e2e.md).
+addopts = "-p devkit_temproot -m 'not local and not ci_e2e'"
 pythonpath = ["scripts/pytest-plugins"]
 markers = [
-  "local: needs this workstation (a real Chrome, the network, live platforms); run by scripts/e2e.py only",
+  "local: needs this workstation itself (a signed-in browser profile, its accounts); run by scripts/e2e.py only",
+  "ci_e2e: end to end on what a hosted ubuntu-latest runner has (Google Chrome, the public network); run by scripts/e2e.py --ci, the PR Gate's E2E job",
 ]
 
 [tool.mypy]
