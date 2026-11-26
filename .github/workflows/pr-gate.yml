@@ -121,10 +121,12 @@ jobs:
       fail-fast: false
       matrix:
         # Two shards of equal measured length, the harness hook tests riding in `rest`.
-        # Measured on the gate's own runs, 2026-11-25/26, pytest's step time: the hook
-        # tests ~60 s, tests/test_runner.py 116-175 s alone, every other file ~95-120 s
-        # together. So `runner` takes test_runner.py and `rest` every other file plus the
-        # hook tests -- a new test file lands in `rest` with no edit here.
+        # Measured 2026-11-26 from a run's junit times: tests/test_runner.py 131 s alone;
+        # every other file 87 s together (tests/test_cycle.py 56 s, tests/test_cli.py
+        # 20 s, no other file over 2 s); the hook tests 44-56 s. Jobs: runner 167 s, rest
+        # 172 s. So `runner` takes test_runner.py and `rest` every other file plus the
+        # hook tests -- a new test file lands in `rest` with no edit here. If `rest`
+        # outgrows `runner`, move tests/test_cycle.py across.
         # tests/test_pr_gate_shards.py fails if a file runs in no shard or two, a named
         # shard's file is gone, or the hook tests leave `rest`.
         shard: [runner, rest]
@@ -165,13 +167,7 @@ jobs:
       - name: Application suite (this shard's files)
         # `--only`: the named files and nothing else, so the contract tests run once,
         # in whichever shard holds them, rather than in both.
-        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_${{ matrix.shard }}.py" || "${{ matrix.shard }}" == "rest" && $0 != "tests/test_runner.py"' | xargs uv run python scripts/run-tests.py --only --junit-xml=logs/junit-${{ matrix.shard }}.xml
-      - name: TEMP measure
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: measure-${{ matrix.shard }}
-          path: logs/junit-*.xml
+        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_${{ matrix.shard }}.py" || "${{ matrix.shard }}" == "rest" && $0 != "tests/test_runner.py"' | xargs uv run python scripts/run-tests.py --only
       - name: Harness hook tests
         # In `rest` only, and whatever the application suite said. pytest's testpaths
         # excludes these, and they are stdlib-only by contract. A junit file, because
